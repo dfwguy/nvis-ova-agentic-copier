@@ -60,6 +60,7 @@ from agent_work.domain import (
     render_split_marker,
 )
 from agent_work.gitlab import GitLabError
+from agent_work.green_commit import GreenCommitDependencies, IsolatedGreenCommit
 from agent_work.ledger import (
     JsonLedger,
     LedgerCorrupt,
@@ -100,6 +101,7 @@ from agent_work.red_checkpoint import (
     RedCheckpointRequest,
     checkpoint_ref,
 )
+from agent_work.red_commit import RedCommitDependencies
 from agent_work.repository import (
     CommandResult,
     LegacyPublicationCandidate,
@@ -833,6 +835,7 @@ class FakeRepository:
         self.candidate_tree = "b" * 40
         self.ancestry = True
         self.reconciliation_sha: str | None = None
+        self.reconcile_bound_targets: list[str | None] = []
         self.observed_default_sha = "b" * 40
         self.observe_default_error: RepositoryError | None = None
         self.observed_defaults: list[str] = []
@@ -1142,10 +1145,24 @@ class FakeRepository:
         self.current_head = new_sha
 
     def reconcile_default_branch(
-        self, worktree: Path, branch: str, expected_head: str
+        self,
+        worktree: Path,
+        branch: str,
+        expected_head: str,
+        *,
+        expected_default_sha: str | None = None,
     ) -> str | None:
         """Model a current-default reconciliation when requested by a test."""
         del worktree, branch, expected_head
+        self.reconcile_bound_targets.append(expected_default_sha)
+        if (
+            expected_default_sha is not None
+            and self.observed_default_sha != expected_default_sha
+        ):
+            drift_error = getattr(
+                repository, "ReconciliationTargetChanged", RepositoryError
+            )
+            raise drift_error("reconciliation target changed")
         return self.reconciliation_sha
 
     def observe_current_default(
@@ -3814,8 +3831,10 @@ def test_serial_publication_respects_trusted_timing_outcome(
     assert repository.judged_paths == [repository.paths]
 
 
+@pytest.mark.parametrize("comparison_unknown", (False, True))
 def test_serial_candidate_unknown_timing_unlocks_review_after_trusted_validation(
     tmp_path: Path,
+    comparison_unknown: bool,
 ) -> None:
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
@@ -3840,12 +3859,28 @@ def test_serial_candidate_unknown_timing_unlocks_review_after_trusted_validation
             assert timing_review_required is True
             assert action == "validate"
             self.judged_paths.append(changed_paths)
-            return {
+            candidate_unknown: dict[str, object] = {
                 "candidate_tree": candidate_tree,
                 "state": "terminal-success",
                 "timing_status": "unknown",
                 "timing_unknown": {"environment": "py311", "reason": "missing"},
                 "timing_review": None,
+            }
+            if not comparison_unknown:
+                return candidate_unknown
+            return candidate_unknown | {
+                "timing_status": "complete",
+                "timing_unknown": None,
+                "timing_comparison_status": "unknown",
+                "timing_comparison_reason": "baseline_unavailable",
+                "junit_artifacts": [
+                    {"environment": environment, "sha256": "c" * 64, "test_count": 1}
+                    for environment in ("py311", "py314")
+                ],
+                "junit_timings": [
+                    {"environment": environment, "timing_complete": True}
+                    for environment in ("py311", "py314")
+                ],
             }
 
     repository = UnknownTimingRepository(config)
@@ -26029,3 +26064,1337 @@ def test_staging_new_tree_discards_prior_timing_deferral(tmp_path: Path) -> None
     assert result is not None
     assert result.error_code is ErrorCode.WORKER_EXIT
     assert result.retry_count == 1
+
+
+class _CommittedCodingRepository(FakeRepository):
+    """Exercise the serial controller with real Red and Green transaction helpers."""
+
+    def __init__(self, config: AgentWorkConfig) -> None:
+        super().__init__(config)
+        self.red_tree = "d" * 40
+        self.red_sha = "c" * 40
+        self.green_sha = "f" * 40
+        self.red_ref: str | None = None
+        self.green_ref: str | None = None
+        self.green_refs: dict[str, str] = {}
+        self.green_message = ""
+        self.red_parent = self.current_head
+        self.red_commits = 0
+        self.red_proof_invalid = False
+        self.hook_runs = 0
+        self.hook_error: RuntimeError | None = None
+        self.green_test_blob = "e" * 40
+        self.events: list[str] = []
+
+    def committed_candidate_read_base(
+        self, worktree: Path, baseline_sha: str, green_sha: str, red_sha: str
+    ) -> str:
+        del worktree
+        assert (baseline_sha, green_sha, red_sha) == (
+            self.red_parent,
+            self.green_sha,
+            self.red_sha,
+        )
+        return baseline_sha
+
+    def changed_candidate_paths(
+        self,
+        worktree: Path,
+        candidate_tree: str,
+        *,
+        base_sha: str,
+        allow_base_ancestor: bool = False,
+    ) -> dict[str, object]:
+        assert base_sha == self.red_parent
+        prior_parent = self.single_parent_result
+        if self.current_head != self.red_parent:
+            self.single_parent_result = self.red_parent
+        try:
+            return super().changed_candidate_paths(
+                worktree,
+                candidate_tree,
+                base_sha=base_sha,
+                allow_base_ancestor=allow_base_ancestor,
+            )
+        finally:
+            self.single_parent_result = prior_parent
+
+    def red_commit_dependencies(
+        self, worktree: Path, isolated_worktree: Path
+    ) -> RedCommitDependencies:
+        del isolated_worktree
+
+        def isolated_red(base: str, tree: str, paths: tuple[str, ...]) -> str:
+            assert (base, tree, paths) == (
+                self.red_parent,
+                self.red_tree,
+                ("tests/test_agent_work_serial_runtime.py",),
+            )
+            self.events.append("red")
+            self.red_commits += 1
+            return self.red_sha
+
+        def cas_red(ref: str, sha: str, old: str | None) -> bool:
+            assert old is None and sha == self.red_sha
+            self.red_ref = sha
+            return True
+
+        return RedCommitDependencies(
+            current_head=lambda _path: self.current_head,
+            current_index_tree=lambda _path: self.candidate_tree,
+            changed_paths=lambda _base, _tree: (
+                ("src/unapproved.py",)
+                if self.red_proof_invalid
+                else ("tests/test_agent_work_serial_runtime.py",)
+            ),
+            blob_oid=lambda _tree, _path: "e" * 40,
+            read_ref=lambda ref: (
+                self.red_ref
+                if ref == f"refs/agent-work/red-commits/12/{self.red_parent}"
+                else None
+            ),
+            isolated_commit=isolated_red,
+            commit_identity=lambda _sha: (self.red_parent, self.red_tree),
+            cas_ref=cas_red,
+        )
+
+    def green_commit_dependencies(
+        self, worktree: Path, isolated_worktree: Path
+    ) -> GreenCommitDependencies:
+        del isolated_worktree
+
+        def isolated_green(red: str, tree: str, message: str) -> IsolatedGreenCommit:
+            assert red == self.red_sha and tree == self.candidate_tree
+            self.events.append("hook")
+            self.hook_runs += 1
+            if self.hook_error is not None:
+                raise self.hook_error
+            self.green_message = message
+            return IsolatedGreenCommit(self.green_sha, "unknown", ())
+
+        def cas_green(ref: str, sha: str, old: str | None) -> bool:
+            if ref.startswith("refs/agent-work/green-commits/"):
+                assert old is None and sha == self.green_sha
+                self.green_ref = sha
+                self.green_refs[ref] = sha
+            else:
+                assert old == self.current_head and sha == self.green_sha
+                self.current_head = sha
+            return True
+
+        return GreenCommitDependencies(
+            worker_state=lambda _path: (
+                "agent/issue-12",
+                self.current_head,
+                self.candidate_tree,
+                self.candidate_tree,
+            ),
+            read_ref=lambda ref: (
+                self.red_ref
+                if ref == f"refs/agent-work/red-commits/12/{self.red_parent}"
+                else self.green_refs.get(ref)
+                if self.green_refs
+                else self.green_ref
+                if ref
+                == f"refs/agent-work/green-commits/12/{self.red_parent}/{self.candidate_tree}"
+                else None
+            ),
+            commit_identity=lambda sha: (
+                (self.red_parent, self.red_tree, "")
+                if sha == self.red_sha
+                else (self.red_sha, self.candidate_tree, self.green_message)
+            ),
+            blob_oid=lambda tree, _path: (
+                self.green_test_blob if tree == self.green_sha else "e" * 40
+            ),
+            isolated_commit=isolated_green,
+            cas_ref=cas_green,
+        )
+
+
+def _run_committed_coding_probe(
+    tmp_path: Path,
+    repository: _CommittedCodingRepository,
+    probe: Callable[
+        [Callable[[str, str | None, dict[str, object] | None], dict[str, object]]],
+        None,
+    ],
+) -> LedgerRecord | None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+
+    class ProbeInvoker:
+        supports_worker_result_broker = True
+
+        def preflight(self) -> None:
+            pass
+
+        def invoke(
+            self,
+            checkout: Path,
+            prompt: str,
+            timeout: int,
+            *,
+            broker_request: WorkerResultBrokerRequest | None = None,
+            build_artifact: Callable[[bytes], bytes] | None = None,
+            candidate_action: Callable[
+                [str, str | None, dict[str, object] | None], dict[str, object]
+            ]
+            | None = None,
+        ) -> WorkerInvocation:
+            del checkout, prompt, timeout, broker_request, build_artifact
+            assert candidate_action is not None
+            probe(candidate_action)
+            return WorkerInvocation(1, "", "probe complete")
+
+    return run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=ProbeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda *_args: _red_checkpoint_evidence_for_segment(
+            record, tree_oid=repository.red_tree
+        ),
+    )
+
+
+def test_serial_judge_commits_exact_tree_once_before_coding_review(
+    tmp_path: Path,
+) -> None:
+    repository = _CommittedCodingRepository(_config(tmp_path))
+
+    def probe(
+        action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ],
+    ) -> None:
+        tree = cast(str, action("stage", None, None)["candidate_tree"])
+        proof = action("commit", tree, None)
+        assert proof["candidate_tree"] == tree
+        assert proof["commit_sha"] == repository.green_sha
+        assert proof["red_sha"] == repository.red_sha
+        assert repository.events == ["red", "hook"]
+        reviewed = action("read", tree, {"mode": "changed_paths"})
+        assert reviewed["candidate_tree"] == tree
+
+    _run_committed_coding_probe(tmp_path, repository, probe)
+
+    assert repository.hook_runs == 1
+    assert repository.judged_paths == []
+    assert repository.prepares == 0
+
+
+@pytest.mark.parametrize("failure", ("red-proof", "hook"))
+def test_serial_coding_commit_failure_stops_before_review(
+    tmp_path: Path, failure: str
+) -> None:
+    repository = _CommittedCodingRepository(_config(tmp_path))
+    if failure == "red-proof":
+        repository.red_proof_invalid = True
+    else:
+        repository.hook_error = RuntimeError("installed hook rejected candidate")
+
+    def probe(
+        action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ],
+    ) -> None:
+        tree = cast(str, action("stage", None, None)["candidate_tree"])
+        with pytest.raises(WorkerProtocolError):
+            action("commit", tree, None)
+        with pytest.raises(WorkerProtocolError):
+            action("read", tree, {"mode": "changed_paths"})
+
+    _run_committed_coding_probe(tmp_path, repository, probe)
+
+    assert repository.red_commits == (0 if failure == "red-proof" else 1)
+    assert repository.hook_runs == (0 if failure == "red-proof" else 1)
+    assert repository.green_ref is None
+    assert repository.prepares == 0
+
+
+@pytest.mark.parametrize("restarting", (False, True))
+def test_ordinary_coding_publication_pushes_verified_green_tip_without_new_commit(
+    tmp_path: Path, *, restarting: bool
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "merge_request_draft": MergeRequestDraft(
+                    title="Complete issue 12",
+                    description="Validated change. Closes #12",
+                ),
+                "intent": (
+                    TransitionIntentRecord(
+                        operation_id="12:publish:0",
+                        kind="publish_merge_request",
+                        expected_evidence={
+                            "branch": "agent/issue-12",
+                            "baseline_sha": "a" * 40,
+                        },
+                    )
+                    if restarting
+                    else None
+                ),
+            }
+        )
+    )
+    repository = _CommittedCodingRepository(config)
+    repository.current_head = repository.green_sha
+    repository.red_ref = repository.red_sha
+    repository.green_ref = repository.green_sha
+    published: list[str] = []
+    repository.push_observer = published.append
+
+    result = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda *_args: _red_checkpoint_evidence_for_segment(
+            record, tree_oid=repository.red_tree
+        ),
+    )
+
+    assert result is not None
+    assert repository.prepares == 0
+    assert published == [repository.green_sha]
+
+
+def test_serial_replayed_green_commit_reuses_exact_identity_and_hook_once(
+    tmp_path: Path,
+) -> None:
+    repository = _CommittedCodingRepository(_config(tmp_path))
+
+    def probe(
+        action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ],
+    ) -> None:
+        tree = cast(str, action("stage", None, None)["candidate_tree"])
+        first = action("commit", tree, None)
+        replayed = action("commit", tree, None)
+        assert replayed["commit_sha"] == first["commit_sha"]
+        assert replayed["candidate_tree"] == first["candidate_tree"]
+        assert replayed["red_sha"] == first["red_sha"]
+
+    _run_committed_coding_probe(tmp_path, repository, probe)
+
+    assert repository.red_commits == 1
+    assert repository.hook_runs == 1
+
+
+def test_new_controller_segment_recovers_green_from_git_without_second_hook(
+    tmp_path: Path,
+) -> None:
+    repository = _CommittedCodingRepository(_config(tmp_path))
+
+    def first_segment(
+        action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ],
+    ) -> None:
+        tree = cast(str, action("stage", None, None)["candidate_tree"])
+        assert action("commit", tree, None)["commit_sha"] == repository.green_sha
+
+    _run_committed_coding_probe(tmp_path, repository, first_segment)
+    assert repository.hook_runs == 1 and repository.green_refs
+    repository.single_parent_result = repository.red_parent
+
+    def recovered_segment(
+        action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ],
+    ) -> None:
+        tree = cast(str, action("stage", None, None)["candidate_tree"])
+        recovered = action("commit", tree, None)
+        assert recovered["commit_sha"] == repository.green_sha
+        assert recovered["red_sha"] == repository.red_sha
+
+    _run_committed_coding_probe(
+        tmp_path / "new-controller", repository, recovered_segment
+    )
+
+    assert repository.red_commits == 1
+    assert repository.hook_runs == 1
+
+
+@pytest.mark.parametrize("drift", ("green-ref", "candidate-tree"))
+def test_serial_coding_review_rejects_stale_committed_identity(
+    tmp_path: Path, drift: str
+) -> None:
+    repository = _CommittedCodingRepository(_config(tmp_path))
+
+    def probe(
+        action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ],
+    ) -> None:
+        tree = cast(str, action("stage", None, None)["candidate_tree"])
+        committed = action("commit", tree, None)
+        assert committed["commit_sha"] == repository.green_sha
+        if drift == "green-ref":
+            repository.green_ref = "0" * 40
+            repository.green_refs = {ref: "0" * 40 for ref in repository.green_refs}
+        else:
+            repository.candidate_tree = "0" * 40
+        with pytest.raises(WorkerProtocolError):
+            action("read", tree, {"mode": "changed_paths"})
+
+    _run_committed_coding_probe(tmp_path, repository, probe)
+
+
+def test_coding_correction_gets_fresh_green_identity_and_invalidates_old_review(
+    tmp_path: Path,
+) -> None:
+    repository = _CommittedCodingRepository(_config(tmp_path))
+    first_sha = repository.green_sha
+
+    def probe(
+        action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ],
+    ) -> None:
+        first_tree = cast(str, action("stage", None, None)["candidate_tree"])
+        first = action("commit", first_tree, None)
+        assert first["commit_sha"] == first_sha
+        action("read", first_tree, {"mode": "changed_paths"})
+        action(
+            "review",
+            first_tree,
+            {"verdict": "approved", "summary": "first review", "findings": []},
+        )
+
+        repository.current_head = repository.red_parent
+        repository.candidate_tree = "1" * 40
+        repository.green_sha = "2" * 40
+        second_tree = cast(str, action("stage", None, None)["candidate_tree"])
+        second = action("commit", second_tree, None)
+        assert second["commit_sha"] != first["commit_sha"]
+        assert second["candidate_tree"] != first["candidate_tree"]
+        with pytest.raises(WorkerProtocolError):
+            action(
+                "review",
+                first_tree,
+                {"verdict": "approved", "summary": "stale", "findings": []},
+            )
+
+    _run_committed_coding_probe(tmp_path, repository, probe)
+
+    assert repository.hook_runs == 2
+    assert first_sha in repository.green_refs.values()
+    assert repository.green_sha in repository.green_refs.values()
+
+
+def test_serial_finalizer_accepts_committed_review_without_second_commit(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW)
+    )
+    repository = _CommittedCodingRepository(config)
+
+    class FinalizerInvoker(SingleSessionInvoker):
+        def invoke(
+            self,
+            checkout: Path,
+            prompt: str,
+            timeout: int,
+            *,
+            broker_request: WorkerResultBrokerRequest | None = None,
+            build_artifact: Callable[[bytes], bytes] | None = None,
+            candidate_action: Callable[
+                [str, str | None, dict[str, object] | None], dict[str, object]
+            ]
+            | None = None,
+        ) -> WorkerInvocation:
+            assert candidate_action is not None
+
+            def committed_action(
+                action: str, tree: str | None, selector: dict[str, object] | None
+            ) -> dict[str, object]:
+                return candidate_action(
+                    "commit" if action == "validate" else action, tree, selector
+                )
+
+            return super().invoke(
+                checkout,
+                prompt,
+                timeout,
+                broker_request=broker_request,
+                build_artifact=build_artifact,
+                candidate_action=committed_action,
+            )
+
+    invoker = FinalizerInvoker()
+    invoker.changed_paths = repository.paths
+    result = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda *_args: _red_checkpoint_evidence_for_segment(
+            record, tree_oid=repository.red_tree
+        ),
+    )
+
+    assert result is not None and result.state is RunnerState.PUBLISHING
+    assert repository.hook_runs == 1
+    assert repository.prepares == 0
+
+
+def test_committed_coding_read_fails_when_original_base_proof_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    class MissingReadBaseRepository(_CommittedCodingRepository):
+        def __getattribute__(self, name: str) -> Any:
+            if name == "committed_candidate_read_base":
+                raise AttributeError(name)
+            return super().__getattribute__(name)
+
+    repository = MissingReadBaseRepository(_config(tmp_path))
+
+    def probe(
+        action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ],
+    ) -> None:
+        tree = cast(str, action("stage", None, None)["candidate_tree"])
+        assert action("commit", tree, None)["commit_sha"] == repository.green_sha
+        with pytest.raises(WorkerProtocolError):
+            action("read", tree, {"mode": "changed_paths"})
+
+    _run_committed_coding_probe(tmp_path, repository, probe)
+
+
+@pytest.mark.parametrize("operation", ("read", "review"))
+def test_committed_coding_rejects_review_when_red_commit_ref_moves(
+    tmp_path: Path, operation: str
+) -> None:
+    repository = _CommittedCodingRepository(_config(tmp_path))
+
+    def probe(
+        action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ],
+    ) -> None:
+        tree = cast(str, action("stage", None, None)["candidate_tree"])
+        assert action("commit", tree, None)["commit_sha"] == repository.green_sha
+        repository.red_ref = "0" * 40
+        with pytest.raises(WorkerProtocolError):
+            if operation == "read":
+                action("read", tree, {"mode": "changed_paths"})
+            else:
+                action(
+                    "review",
+                    tree,
+                    {"verdict": "approved", "summary": "review", "findings": []},
+                )
+
+    _run_committed_coding_probe(tmp_path, repository, probe)
+
+
+@pytest.mark.parametrize("drift", ("green-ref", "red-ref", "test-blob"))
+def test_bound_publication_rechecks_green_and_red_proof_before_replay_push(
+    tmp_path: Path, drift: str
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "publication_sha": "f" * 40,
+                "merge_request_draft": MergeRequestDraft(
+                    title="Complete issue 12",
+                    description="Validated change. Closes #12",
+                ),
+                "intent": TransitionIntentRecord(
+                    operation_id="12:publish:0",
+                    kind="publish_merge_request",
+                    expected_evidence={
+                        "branch": "agent/issue-12",
+                        "baseline_sha": "a" * 40,
+                        "publication_sha": "f" * 40,
+                    },
+                ),
+            }
+        )
+    )
+    repository = _CommittedCodingRepository(config)
+    repository.current_head = repository.green_sha
+    repository.red_ref = repository.red_sha
+    repository.green_ref = repository.green_sha
+    if drift == "green-ref":
+        repository.green_ref = "0" * 40
+    elif drift == "red-ref":
+        repository.red_ref = "0" * 40
+    else:
+        repository.green_test_blob = "0" * 40
+    published: list[str] = []
+    repository.push_observer = published.append
+
+    result = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda *_args: _red_checkpoint_evidence_for_segment(
+            record, tree_oid=repository.red_tree
+        ),
+    )
+
+    assert result is not None and result.state is RunnerState.BLOCKED
+    assert result.summary != "Durable publication intent is not exact."
+    assert published == []
+    assert repository.prepares == 0
+
+
+class _PendingCodingMergeRepository(_CommittedCodingRepository):
+    """Expose an advanced target and a retained pending merge through fake Git ports."""
+
+    def __init__(self, config: AgentWorkConfig) -> None:
+        super().__init__(config)
+        self.target_sha = "9" * 40
+        self.joined_tree = "8" * 40
+        self.merge_sha = "7" * 40
+        self.current_head = self.green_sha
+        self.candidate_tree = self.joined_tree
+        self.red_ref = self.red_sha
+        self.green_ref = self.green_sha
+        self.green_refs[
+            f"refs/agent-work/green-commits/12/{self.red_parent}/{'b' * 40}"
+        ] = self.green_sha
+        self.legacy_merge_head = self.target_sha
+        self.observed_default_sha = self.target_sha
+        self.single_parent_result = self.target_sha
+        self.reconcile_calls: list[tuple[object, ...]] = []
+
+    def committed_candidate_read_base(
+        self, worktree: Path, baseline_sha: str, green_sha: str, red_sha: str
+    ) -> str:
+        del worktree
+        assert (baseline_sha, green_sha, red_sha) == (
+            self.red_parent,
+            self.green_sha,
+            self.red_sha,
+        )
+        return self.green_sha
+
+    def changed_candidate_paths(
+        self,
+        worktree: Path,
+        candidate_tree: str,
+        *,
+        base_sha: str,
+        allow_base_ancestor: bool = False,
+    ) -> dict[str, object]:
+        assert base_sha == self.target_sha
+        return FakeRepository.changed_candidate_paths(
+            self,
+            worktree,
+            candidate_tree,
+            base_sha=base_sha,
+            allow_base_ancestor=allow_base_ancestor,
+        )
+
+    def green_commit_dependencies(
+        self, worktree: Path, isolated_worktree: Path
+    ) -> GreenCommitDependencies:
+        dependencies = super().green_commit_dependencies(worktree, isolated_worktree)
+        return replace(
+            dependencies,
+            commit_identity=lambda sha: (
+                (self.red_parent, self.red_tree, "")
+                if sha == self.red_sha
+                else (self.red_sha, "b" * 40, self.green_message)
+            ),
+        )
+
+    def prepare_reconcile_commit(
+        self,
+        worktree: Path,
+        branch: str,
+        source_sha: str,
+        target_sha: str,
+        candidate_tree: str,
+        red_ref: str,
+        green_ref: str,
+    ) -> str:
+        self.reconcile_calls.append(
+            (
+                worktree,
+                branch,
+                source_sha,
+                target_sha,
+                candidate_tree,
+                red_ref,
+                green_ref,
+            )
+        )
+        self.current_head = self.merge_sha
+        self.legacy_merge_head = None
+        return self.merge_sha
+
+
+def _run_pending_coding_probe(
+    tmp_path: Path,
+    repository: _PendingCodingMergeRepository,
+    probe: Callable[
+        [Callable[[str, str | None, dict[str, object] | None], dict[str, object]]],
+        None,
+    ],
+) -> LedgerRecord | None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    original = _record(
+        tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+    )
+    ledger.persist(
+        original.model_copy(
+            update={
+                "source_sha": repository.green_sha,
+                "main_sha": repository.target_sha,
+            }
+        )
+    )
+
+    class ProbeInvoker:
+        supports_worker_result_broker = True
+
+        def preflight(self) -> None:
+            pass
+
+        def invoke(
+            self,
+            checkout: Path,
+            prompt: str,
+            timeout: int,
+            *,
+            broker_request: WorkerResultBrokerRequest | None = None,
+            build_artifact: Callable[[bytes], bytes] | None = None,
+            candidate_action: Callable[
+                [str, str | None, dict[str, object] | None], dict[str, object]
+            ]
+            | None = None,
+        ) -> WorkerInvocation:
+            del checkout, prompt, timeout, broker_request, build_artifact
+            assert candidate_action is not None
+            probe(candidate_action)
+            return WorkerInvocation(1, "", "probe complete")
+
+    return run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=ProbeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda *_args: _red_checkpoint_evidence_for_segment(
+            original, tree_oid=repository.red_tree
+        ),
+    )
+
+
+def test_advanced_target_routes_pending_merge_to_combined_tree_validation(
+    tmp_path: Path,
+) -> None:
+    repository = _PendingCodingMergeRepository(_config(tmp_path))
+
+    def probe(
+        action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ],
+    ) -> None:
+        tree = cast(str, action("stage", None, None)["candidate_tree"])
+        assert tree == repository.joined_tree
+        with pytest.raises(WorkerProtocolError):
+            action("commit", tree, None)
+        validation = action("validate", tree, None)
+        assert validation["state"] == "terminal-success"
+        assert validation["source_sha"] == repository.green_sha
+        assert validation["target_sha"] == repository.target_sha
+        assert action("read", tree, {"mode": "changed_paths"})["candidate_tree"] == tree
+        assert (
+            action(
+                "review",
+                tree,
+                {"verdict": "approved", "summary": "combined tree", "findings": []},
+            )["state"]
+            == "review-recorded"
+        )
+
+    _run_pending_coding_probe(tmp_path, repository, probe)
+
+    assert repository.red_commits == 0
+    assert repository.hook_runs == 0
+    assert repository.judged_paths == [repository.paths]
+
+
+def test_pending_merge_reviewer_reads_joined_tree_against_target(
+    tmp_path: Path,
+) -> None:
+    """Review includes source-authored changes while retaining target-only bytes."""
+
+    class DivergentMergeRepository(_PendingCodingMergeRepository):
+        def changed_candidate_paths(
+            self,
+            worktree: Path,
+            candidate_tree: str,
+            *,
+            base_sha: str,
+            allow_base_ancestor: bool = False,
+        ) -> dict[str, object]:
+            del worktree, allow_base_ancestor
+            assert candidate_tree == self.joined_tree
+            path = (
+                "src/source_feature.py"
+                if base_sha == self.target_sha
+                else "src/target_only.py"
+            )
+            return {
+                "candidate_tree": candidate_tree,
+                "base_tree": "6" * 40,
+                "changed_paths": [path],
+                "files": [
+                    {
+                        "path": path,
+                        "old_mode": None,
+                        "old_oid": None,
+                        "old_size": None,
+                        "new_mode": "100644",
+                        "new_oid": "5" * 40,
+                        "new_size": 1,
+                    }
+                ],
+            }
+
+        def read_candidate_range(
+            self,
+            worktree: Path,
+            candidate_tree: str,
+            *,
+            base_sha: str,
+            path: str,
+            side: str,
+            offset: int,
+            length: int,
+            allow_base_ancestor: bool = False,
+        ) -> dict[str, object]:
+            del worktree, allow_base_ancestor
+            assert (candidate_tree, base_sha, path, side, offset, length) == (
+                self.joined_tree,
+                self.target_sha,
+                "src/source_feature.py",
+                "new",
+                0,
+                1,
+            )
+            return {
+                "candidate_tree": candidate_tree,
+                "base_tree": "6" * 40,
+                "path": path,
+                "side": side,
+                "offset": offset,
+                "length": length,
+                "oid": "5" * 40,
+                "size": 1,
+                "data_base64": "eA==",
+            }
+
+    repository = DivergentMergeRepository(_config(tmp_path))
+
+    def probe(
+        action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ],
+    ) -> None:
+        tree = cast(str, action("stage", None, None)["candidate_tree"])
+        assert action("validate", tree, None)["state"] == "terminal-success"
+        inventory = action("read", tree, {"mode": "changed_paths"})
+        assert inventory["base_sha"] == repository.target_sha
+        assert inventory["changed_paths"] == ["src/source_feature.py"]
+        content = action(
+            "read",
+            tree,
+            {
+                "path": "src/source_feature.py",
+                "side": "new",
+                "offset": 0,
+                "length": 1,
+            },
+        )
+        assert content["data_base64"] == "eA=="
+
+    _run_pending_coding_probe(tmp_path, repository, probe)
+
+
+def test_pending_merge_restart_validates_same_tree_without_new_red(
+    tmp_path: Path,
+) -> None:
+    repository = _PendingCodingMergeRepository(_config(tmp_path))
+
+    def probe(
+        action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ],
+    ) -> None:
+        tree = cast(str, action("stage", None, None)["candidate_tree"])
+        assert tree == repository.joined_tree
+        validation = action("validate", tree, None)
+        assert validation["state"] == "terminal-success"
+        assert validation["source_sha"] == repository.green_sha
+        assert validation["target_sha"] == repository.target_sha
+
+    _run_pending_coding_probe(tmp_path, repository, probe)
+    _run_pending_coding_probe(tmp_path / "restart", repository, probe)
+
+    assert repository.red_commits == 0
+    assert repository.hook_runs == 0
+
+
+@pytest.mark.parametrize("drift", ("red-ref", "green-ref", "target"))
+def test_pending_merge_rejects_retained_proof_or_candidate_drift(
+    tmp_path: Path, drift: str
+) -> None:
+    repository = _PendingCodingMergeRepository(_config(tmp_path))
+
+    def probe(
+        action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ],
+    ) -> None:
+        tree = cast(str, action("stage", None, None)["candidate_tree"])
+        if drift == "red-ref":
+            repository.red_ref = "0" * 40
+        elif drift == "green-ref":
+            repository.green_refs = {ref: "0" * 40 for ref in repository.green_refs}
+        elif drift == "target":
+            repository.legacy_merge_head = "0" * 40
+        with pytest.raises(WorkerProtocolError):
+            action("validate", tree, None)
+
+    _run_pending_coding_probe(tmp_path, repository, probe)
+
+    assert repository.red_commits == 0
+    assert repository.hook_runs == 0
+    assert repository.reconcile_calls == []
+
+
+def test_pending_merge_publication_uses_ordered_two_parent_commit(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    repository = _PendingCodingMergeRepository(config)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "source_sha": repository.green_sha,
+                "main_sha": repository.target_sha,
+                "merge_request_draft": MergeRequestDraft(
+                    title="Complete issue 12",
+                    description="Validated combined change. Closes #12",
+                ),
+                "intent": TransitionIntentRecord(
+                    operation_id="12:reconcile:0",
+                    kind="reconcile_commit",
+                    expected_evidence={
+                        "branch": "agent/issue-12",
+                        "source_sha": repository.green_sha,
+                        "target_sha": repository.target_sha,
+                        "candidate_tree": repository.joined_tree,
+                        "red_ref": f"refs/agent-work/red-commits/12/{repository.red_parent}",
+                        "green_ref": f"refs/agent-work/green-commits/12/{repository.red_parent}/{'b' * 40}",
+                    },
+                ),
+            }
+        )
+    )
+    published: list[str] = []
+    repository.push_observer = published.append
+
+    class PendingMergeGitLab(FakeGitLab):
+        def create_merge_request(
+            self,
+            *,
+            branch: str,
+            target: str,
+            issue_iid: int,
+            draft: MergeRequestDraft,
+        ) -> MergeRequestEvidence:
+            mr = super().create_merge_request(
+                branch=branch,
+                target=target,
+                issue_iid=issue_iid,
+                draft=draft,
+            )
+            self.existing_mr = mr.model_copy(update={"sha": repository.merge_sha})
+            return self.existing_mr
+
+    gitlab = PendingMergeGitLab()
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.OBSERVING
+    assert repository.reconcile_calls == [
+        (
+            outcome.worktree,
+            "agent/issue-12",
+            repository.green_sha,
+            repository.target_sha,
+            repository.joined_tree,
+            f"refs/agent-work/red-commits/12/{repository.red_parent}",
+            f"refs/agent-work/green-commits/12/{repository.red_parent}/{'b' * 40}",
+        )
+    ]
+    assert repository.prepares == 0
+    assert published == [repository.merge_sha]
+    assert gitlab.created_merge_requests == 1
+    assert gitlab.fetch_merge_request(88).sha == repository.merge_sha
+
+
+@pytest.mark.parametrize("drift", ("none", "red-ref", "green-ref", "target"))
+def test_reconciliation_replay_verifies_committed_proof_before_push(
+    tmp_path: Path, drift: str
+) -> None:
+    """A retry uses the same ledger and rejects changed ordered-merge proof."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+
+    class ReplayRepository(_PendingCodingMergeRepository):
+        def prepare_reconcile_commit(
+            self,
+            worktree: Path,
+            branch: str,
+            source_sha: str,
+            target_sha: str,
+            candidate_tree: str,
+            red_ref: str,
+            green_ref: str,
+        ) -> str:
+            if self.current_head == self.merge_sha and (
+                self.red_ref != self.red_sha
+                or self.green_refs.get(green_ref) != self.green_sha
+                or self.observed_default_sha != self.target_sha
+                or candidate_tree != self.joined_tree
+            ):
+                raise RepositoryError("reconciliation commit identity changed")
+            return super().prepare_reconcile_commit(
+                worktree,
+                branch,
+                source_sha,
+                target_sha,
+                candidate_tree,
+                red_ref,
+                green_ref,
+            )
+
+    repository = ReplayRepository(config)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "source_sha": repository.green_sha,
+                "main_sha": repository.target_sha,
+                "merge_request_draft": MergeRequestDraft(
+                    title="Complete issue 12",
+                    description="Validated combined change. Closes #12",
+                ),
+                "intent": TransitionIntentRecord(
+                    operation_id="12:reconcile:0",
+                    kind="reconcile_commit",
+                    expected_evidence={
+                        "branch": "agent/issue-12",
+                        "source_sha": repository.green_sha,
+                        "target_sha": repository.target_sha,
+                        "candidate_tree": repository.joined_tree,
+                        "red_ref": f"refs/agent-work/red-commits/12/{repository.red_parent}",
+                        "green_ref": f"refs/agent-work/green-commits/12/{repository.red_parent}/{'b' * 40}",
+                    },
+                ),
+            }
+        )
+    )
+    repository.push_error = RepositoryTransientError("temporary push failure")
+    first = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+    )
+    assert first is not None and first.state is RunnerState.RETRY_WAIT
+    assert first.publication_sha == repository.merge_sha
+    assert first.intent is not None and first.intent.kind == "publish_merge_request"
+    retained = ledger.load(12)
+    assert retained is not None
+    assert retained.publication_sha == repository.merge_sha
+
+    repository.push_error = None
+    if drift == "red-ref":
+        repository.red_ref = "0" * 40
+    elif drift == "green-ref":
+        repository.green_refs = {ref: "0" * 40 for ref in repository.green_refs}
+    elif drift == "target":
+        repository.observed_default_sha = "0" * 40
+    resumed = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW + timedelta(hours=1),
+        load_red_checkpoint=lambda *_args: _red_checkpoint_evidence_for_segment(
+            first, tree_oid=repository.red_tree
+        ),
+    )
+    assert resumed is not None and resumed.state is RunnerState.PUBLISHING
+    replay = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW + timedelta(hours=1),
+        load_red_checkpoint=lambda *_args: _red_checkpoint_evidence_for_segment(
+            first, tree_oid=repository.red_tree
+        ),
+    )
+
+    assert replay is not None
+    expected_reconciles = 2 if drift == "none" else 1
+    assert len(repository.reconcile_calls) == expected_reconciles
+    if drift == "none":
+        assert repository.pushes == 1
+    else:
+        assert replay.state is RunnerState.BLOCKED
+        assert replay.summary == "reconciliation commit identity changed"
+        assert repository.pushes == 0
+
+
+def test_reconciliation_publication_replay_rejects_wrong_lane_before_push(
+    tmp_path: Path,
+) -> None:
+    """A content label cannot authorize an ordered coding merge push."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    repository = _PendingCodingMergeRepository(config)
+    repository.current_head = repository.merge_sha
+    repository.legacy_merge_head = None
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "workflow_lane": WorkflowLane.CONTENT,
+                "source_sha": repository.green_sha,
+                "main_sha": repository.target_sha,
+                "publication_sha": repository.merge_sha,
+                "merge_request_draft": MergeRequestDraft(
+                    title="Complete issue 12",
+                    description="Validated combined change. Closes #12",
+                ),
+                "intent": TransitionIntentRecord(
+                    operation_id="12:publish:0",
+                    kind="publish_merge_request",
+                    expected_evidence={
+                        "branch": "agent/issue-12",
+                        "baseline_sha": repository.green_sha,
+                        "publication_sha": repository.merge_sha,
+                    },
+                ),
+            }
+        )
+    )
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.BLOCKED
+    assert repository.pushes == 0
+
+
+def test_second_target_advance_after_ordered_commit_stops_with_recovery(
+    tmp_path: Path,
+) -> None:
+    """A completed merge cannot become a new unproven Green workflow source."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    repository = _PendingCodingMergeRepository(config)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "source_sha": repository.green_sha,
+                "main_sha": repository.target_sha,
+                "merge_request_draft": MergeRequestDraft(
+                    title="Complete issue 12",
+                    description="Validated combined change. Closes #12",
+                ),
+                "intent": TransitionIntentRecord(
+                    operation_id="12:reconcile:0",
+                    kind="reconcile_commit",
+                    expected_evidence={
+                        "branch": "agent/issue-12",
+                        "source_sha": repository.green_sha,
+                        "target_sha": repository.target_sha,
+                        "candidate_tree": repository.joined_tree,
+                        "red_ref": f"refs/agent-work/red-commits/12/{repository.red_parent}",
+                        "green_ref": f"refs/agent-work/green-commits/12/{repository.red_parent}/{'b' * 40}",
+                    },
+                ),
+            }
+        )
+    )
+    repository.push_error = RepositoryTransientError("temporary push failure")
+    first = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+    )
+    assert first is not None and first.state is RunnerState.RETRY_WAIT
+    assert first.publication_sha == repository.merge_sha
+
+    repository.push_error = None
+    repository.reconciliation_sha = "6" * 40
+    repository.observed_default_sha = repository.reconciliation_sha
+    resume = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW + timedelta(hours=1),
+    )
+    assert resume is not None and resume.state is RunnerState.PUBLISHING
+    replay = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW + timedelta(hours=1),
+        load_red_checkpoint=lambda *_args: _red_checkpoint_evidence_for_segment(
+            first, tree_oid=repository.red_tree
+        ),
+    )
+
+    assert replay is not None and replay.state is RunnerState.BLOCKED
+    assert "target" in replay.summary.lower()
+    assert "reconciliation" in replay.next_action.lower()
+    assert replay.source_sha == repository.green_sha
+    assert repository.pushes == 0
+
+
+def test_target_advances_between_ordered_commit_check_and_publication_fetch(
+    tmp_path: Path,
+) -> None:
+    """A second fetch cannot promote an ordered merge to an unreviewed source."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    repository = _PendingCodingMergeRepository(config)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "source_sha": repository.green_sha,
+                "main_sha": repository.target_sha,
+                "merge_request_draft": MergeRequestDraft(
+                    title="Complete issue 12",
+                    description="Validated combined change. Closes #12",
+                ),
+                "intent": TransitionIntentRecord(
+                    operation_id="12:reconcile:0",
+                    kind="reconcile_commit",
+                    expected_evidence={
+                        "branch": "agent/issue-12",
+                        "source_sha": repository.green_sha,
+                        "target_sha": repository.target_sha,
+                        "candidate_tree": repository.joined_tree,
+                        "red_ref": f"refs/agent-work/red-commits/12/{repository.red_parent}",
+                        "green_ref": f"refs/agent-work/green-commits/12/{repository.red_parent}/{'b' * 40}",
+                    },
+                ),
+            }
+        )
+    )
+    repository.reconciliation_sha = "6" * 40
+    repository.observed_default_sha = repository.reconciliation_sha
+    published: list[str] = []
+    repository.push_observer = published.append
+
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=FakeInvoker(),
+        timeout_seconds=10,
+        now=NOW,
+    )
+
+    assert outcome is not None and outcome.state is RunnerState.BLOCKED
+    assert outcome.source_sha == repository.green_sha
+    assert outcome.publication_sha == repository.merge_sha
+    assert "target" in outcome.summary.lower()
+    assert "reconciliation" in outcome.next_action.lower()
+    assert published == []
+    assert repository.reconcile_bound_targets == [repository.target_sha]
+    assert repository.pushes == 0
+    assert len(repository.reconcile_calls) == 1
+    assert repository.current_head == repository.merge_sha
+    assert repository.legacy_merge_head is None
+    assert repository.dirty is False

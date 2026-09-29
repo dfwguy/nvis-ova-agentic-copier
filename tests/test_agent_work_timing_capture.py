@@ -93,7 +93,7 @@ def test_capture_classifies_command_failure_by_trusted_stage(
     )
     candidate_artifact = (
         b"<testsuite tests='1' failures='0' errors='0'>"
-        b"<testcase classname='tests.test_speed' name='test_new' time='0.2'/>"
+        b"<testcase classname='tests.test_speed' name='test_new' time='1.2'/>"
         b"</testsuite>"
     )
     observed: list[tuple[str, ...]] = []
@@ -303,7 +303,7 @@ def test_clear_capture_binds_both_full_versions_and_replays_private_transcript(
         "template/scripts/check_licenses.py",
     ),
 )
-def test_production_change_focuses_existing_case_newly_above_one_second(
+def test_production_change_reports_existing_case_without_focused_repeats(
     tmp_path: Path, production_path: str
 ) -> None:
     crossing = "tests/test_speed.py::test_crossing"
@@ -393,16 +393,12 @@ def test_production_change_focuses_existing_case_newly_above_one_second(
         dependencies=_dependencies(tmp_path, run),
     )
 
-    assert len(focused_calls) == 8
-    assert captured["outcome"] == "correction_required"
-    assert {
-        (finding["name"], finding["reason"])
-        for finding in cast(list[dict[str, object]], captured["findings"])
-    } == {
-        (crossing, "corroborated_regression"),
-        (crossing, "touched_slow"),
-        (inherited, "inherited_slow"),
-    }
+    assert focused_calls == []
+    assert captured["outcome"] == "report_only"
+    findings = cast(list[dict[str, object]], captured["findings"])
+    assert {finding["name"] for finding in findings} == {crossing, inherited}
+    assert all(finding["reason"] != "new_slow" for finding in findings)
+    assert set(cast(dict[str, object], captured["runs"])) == {"py311", "py314"}
 
 
 def test_changed_file_with_many_existing_slow_cases_retains_complete_junit_proof(

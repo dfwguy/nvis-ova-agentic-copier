@@ -118,6 +118,7 @@ def test_candidate_operation_type_names_every_broker_action() -> None:
         "stage",
         "read",
         "validate",
+        "commit",
         "status",
         "review",
     }

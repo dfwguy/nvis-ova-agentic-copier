@@ -455,6 +455,61 @@ def test_repository_green_commit_uses_one_native_hook_and_preserves_worker(
     )
 
 
+def test_repository_green_commit_rejects_present_malformed_junit_after_successful_hook(
+    tmp_path: Path,
+) -> None:
+    from agent_work.models import AgentWorkConfig
+    from agent_work.repository import CommandResult, GitRepository, RepositoryError
+
+    worker = tmp_path / "worker"
+    isolated = tmp_path / "isolated"
+    _install_hook(worker)
+    config = AgentWorkConfig(
+        host="gitlab.example.com",
+        project_id=310967,
+        checkout=worker,
+        state_root=tmp_path / "state",
+        git_path=tmp_path / "bin" / "git",
+        glab_path=tmp_path / "bin" / "glab",
+        base_branch="agent/work-base",
+    )
+    committed: list[bool] = []
+
+    def run(command: tuple[str, ...], **_kwargs: Any) -> CommandResult:
+        args = command[3:]
+        if args == ("rev-parse", "--git-common-dir"):
+            return CommandResult(0, f"{worker / '.git'}\n", "")
+        if args == ("config", "--get", "core.hooksPath"):
+            return CommandResult(1, "", "")
+        if args[:3] == ("worktree", "add", "--detach"):
+            isolated.mkdir()
+        elif args == ("write-tree",):
+            return CommandResult(0, f"{GREEN_TREE}\n", "")
+        elif args[:1] == ("commit",):
+            committed.append(True)
+            (isolated / "test-results-py311.xml").write_text(
+                "<testsuite>", encoding="utf-8"
+            )
+        elif args == ("rev-parse", "HEAD"):
+            return CommandResult(0, f"{GREEN}\n", "")
+        elif args[:3] == ("worktree", "remove", "--force"):
+            (isolated / "test-results-py311.xml").unlink()
+            isolated.rmdir()
+        return CommandResult(0, "", "")
+
+    with pytest.raises(RepositoryError):
+        GitRepository(config, run).create_isolated_green_commit(
+            worktree=worker,
+            isolated_worktree=isolated,
+            red_sha=RED,
+            candidate_tree=GREEN_TREE,
+            message=MESSAGE,
+        )
+
+    assert committed == [True]
+    assert not isolated.exists()
+
+
 def test_repository_green_commit_removes_red_only_file_before_hook(
     tmp_path: Path,
 ) -> None:

@@ -113,20 +113,26 @@ become controller state.
 
 | Lane | What runs, and when |
 | --- | --- |
-| Coding | A fresh Red-first session gets three proposals, then asks Red to create the checkpoint. A later fresh session gets three new proposals. After the accepted Red checkpoint, Architect completes any policy preparation, then Green implements code and tests while the Diátaxis Writer updates `docs/` and README in parallel. After both stop editing, Green requests controller staging, successful coding validation, then changed-path inventory and bounded candidate ranges through the private socket. Green coordinates review and routes documentation findings to the writer before returning final validation to Architect. |
+| Coding | A fresh Red-first session gets three proposals, then asks Red to create the checkpoint. A later fresh session gets three new proposals. After the accepted Red checkpoint, Architect completes any policy preparation, then Green implements code and tests while the Diátaxis Writer updates `docs/` and README in parallel. After both stop editing, Green requests controller staging and the controller-owned Green commit. The installed hook validates the candidate during that commit. Green then requests changed-path inventory and bounded ranges from the committed tree, coordinates review, and routes documentation findings to the writer before returning final validation to Architect. |
 | Documentation and agent policy | The Architect delegates the Documentation Writer as sole mutator. After the writer stops editing, the controller stages the candidate and gives Consistency Judge bounded, read-only evidence from that tree. The judge checks copied facts when applicable, and the Documentation Finalizer records the verdict. Evidence-based repair and finalization continue only while material progress exists; there is no arbitrary repair count. |
 
 The Red-first coding session ends after the trusted checkpoint. A fresh session
 then handles policy preparation, concurrent Green and documentation work,
 review, and final validation. Content work uses one session. The controller
 does not restore an individual Architect, writer, implementer, reviewer, or
-internal workflow stage after a crash.
+internal workflow stage after a crash. It rechecks Red and Green identities
+from Git and GitLab. A changed ordinary candidate creates a new Green commit
+and requires fresh receipts. Ordinary coding publication uses the verified
+Green SHA.
+If the target advances first, the controller validates and reviews the joined
+tree, then makes an ordered two-parent commit with Green first and target
+second. It publishes that reviewed commit after checking its exact identity.
 
 After Green and the Diátaxis Writer finish, Green asks the private controller
 socket to stage their combined changes. The controller returns the tree ID.
-The Validation Judge first uses the socket to ask the controller to run the
-hook against that tree and return bounded evidence. Once validation succeeds,
-Consistency Judge uses separate reads through that socket to compare changed
+Judge first uses the socket to ask the controller to commit that tree with its
+installed hook and return the Green SHA, tree, and bounded evidence. Once the
+commit succeeds, Consistency Judge uses separate reads through that socket to compare changed
 copied facts against their source. The controller binds each read to the
 current issue, repository, base, and candidate tree. It provides a canonical
 changed-path inventory with old and new file metadata, plus independent
@@ -134,12 +140,14 @@ bounded byte ranges from either side of a changed file. The judge can read
 ranges in any order, repeat them, or read before requesting the inventory.
 Each range identifies its path, side, offset, length, blob OID, and size.
 There is no read cursor or completion call. The Non-functional Reviewer then
-checks the JUnit summary and the same staged tree. Green waits
+checks the JUnit summary and the committed tree. Green waits
 for both receipts before it starts the parallel specialist review. This review includes
 the Diátaxis, Quality, Test, and CI/CD Judges, the read-only README Reviewer,
 and the License Checker. The CLI Syntax, Filesystem Structure, and Agent-policy
 Judges join when their topics apply. Each active specialist sees the same
-staged tree, diff, and Judge evidence. Green waits for every receipt and routes
+Green SHA, tree, diff, and Judge evidence. For a pending target merge, the
+same reviewers instead use the validated joined tree and exact source and
+target identities. Green waits for every receipt and routes
 findings to their file owners. The Architect then gets the full result and
 asks the Finalizer to act. Final validation uses current license evidence.
 

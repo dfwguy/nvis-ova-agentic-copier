@@ -39,15 +39,15 @@ Existing labels. Send findings through Green to Architect.
 ## Exact-tree review scope
 
 The first Quality Judge review of a candidate must be complete. Normal
-interactive Green work uses the Green commit tree. A pending coding merge and
-serial work use the validated staged tree. Return a receipt tied to its
-immutable tree OID.
+interactive Green and serial work use their Green commit SHA and tree. A
+pending coding merge uses the validated staged tree. Bind each receipt to
+that exact identity.
 Green cannot replace this independent review with its own assessment.
 
 A later serial review may be focused only when Green supplies all of this
 provenance:
 
-- the prior and current immutable staged tree OIDs;
+- the prior and current immutable Green SHAs and tree OIDs;
 - the prior complete Quality Judge receipt;
 - stable fingerprints for the findings being corrected;
 - the correction ledger; and
@@ -72,8 +72,8 @@ For normal interactive Green work, TDD Judge owns one Green commit and its
 installed hook before specialist review. Review that commit. For a pending
 coding merge, review the validated staged tree before Main makes the ordered
 two-parent commit. Finalizer verifies either commit read-only. In serial work,
-review the staged-tree identity. Serial Finalizer never commits; the trusted
-runner keeps its normal controller commit path.
+review the Green SHA and committed tree. Serial Finalizer never commits; the
+trusted runner publishes that verified commit.
 
 ## Severity taxonomy
 

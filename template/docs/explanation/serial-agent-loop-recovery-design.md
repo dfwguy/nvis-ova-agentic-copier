@@ -5,7 +5,7 @@ summary: Learn how the loop recovers unattended work.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-27
+last_reviewed: 2026-09-29
 related:
   - path: serial-gitlab-agent-loop.md
     why: Explains the operational model implemented by this architecture.
@@ -324,7 +324,8 @@ The table maps each invariant to the required control or evidence.
 | Publication | Publication is idempotent. It needs exact GitLab and Git evidence. |
 | Protected-policy applicability | Protected-policy applicability uses the prospective publication tree against the durable verified reconciliation target, not raw worktree status. This assigns target-branch-only policy changes to the target branch. It keeps review evidence for issue-owned changes and merge resolutions that differ from the target tree. |
 | Human handoff | Before projecting `agent::awaiting-human`, the runner writes one factory-authored actionable issue handoff for the exact MR source commit. A deterministic project, issue, MR, and SHA marker, plus a verified factory author, make recovery noiseless. The same SHA reuses the note. A changed SHA needs a new handoff. The note asks a human to review the named commit and either approve and merge it if acceptable or leave actionable general or inline MR feedback. The runner never assigns a reviewer, approves, or merges. |
-| Workflow ownership | The full repository workflow stays in one workflow-owning session. Red changes only `tests/` and stops at the accepted checkpoint. After any policy preparation, Green changes code and tests while the Diátaxis Writer changes `docs/` and README in parallel. After both stop editing, Green requests controller staging of their combined work through the private candidate socket. Green consolidates applicable read-only judge findings and routes prose fixes to the writer for the Architect's final decision. |
+| Workflow ownership | One session owns the full workflow. Red changes only `tests/` and stops at the accepted checkpoint. After any policy preparation, Green changes code and tests while the Diátaxis Writer changes `docs/` and README in parallel. After both stop editing, Green requests controller staging and the Green commit through the private candidate socket. Specialists review that commit and tree. Green consolidates judge findings and routes prose fixes to the writer for the Architect's final decision. |
+| Target reconciliation | If the target advances after Green, the controller proves the exact Green source, pending target, and retained Red and Green refs. It validates the joined tree before review, records a reconciliation intent, then makes an ordered two-parent commit with Green first and target second. Publication verifies that commit and pushes its SHA. |
 | Systemd outcomes | Expected durable outcomes do not fail the systemd unit. |
 | Authority boundary | The runner never approves or merges. It never widens authority from issue text, labels, comments, or worker output. |
 
@@ -349,12 +350,15 @@ against the current record and Git evidence. A deliberate stop is not a failure.
 | `retryable` | Runner; current retry evidence | Retry now, or retain a future deadline for an external transient. An explicit retry of the exact issue resets the automatic budget after a human fix. |
 | `needs_human` | Runner; block and concrete action | Block publication. |
 | Malformed protocol or legacy receipt condition | Runner; current coarse phase and canonical identity: error code plus bounded, stable, redacted contract-field or reason diagnostic | Retry once immediately. The same later identity blocks, retains phase, worktree, and safe cause, and creates the normal blocked projection and comment. A changed code, diagnostic, or phase uses the bounded retry path; non-protocol transients keep their retry rules. Historical receipt prose cannot authorize the retry. |
-| Architecture through Green | Architect gives the approved design to Red, completes any policy preparation, then starts Green and the Diátaxis Writer after the accepted checkpoint | Green implements code and tests while the writer aligns docs and README with the final interface. After both stop editing, Green asks the controller to stage one candidate. |
-| Green through finalization | Green; final interface, documentation, and applicable read-only judge receipts | Green runs judge fan-out, corrects code and tests from evidence, routes prose findings to the writer, consolidates feedback, and returns it to Architect. The Diátaxis Judge compares design, writer receipt, final docs, and final interface; its verdict and writer evidence are required finalizer evidence. |
+| Architecture through Green | Architect gives the approved design to Red, completes any policy preparation, then starts Green and the Diátaxis Writer after the accepted checkpoint | Green implements code and tests while the writer aligns docs and README with the final interface. After both stop editing, Green asks the controller to stage and commit one candidate with its installed hook. |
+| Green through finalization | Green; final interface, documentation, and applicable read-only judge receipts | Green runs judge fan-out against the Green SHA and tree, corrects code and tests from evidence, routes prose findings to the writer, consolidates feedback, and returns it to Architect. Each correction needs a new committed candidate and fresh receipts. The Diátaxis Judge compares design, writer receipt, final docs, and final interface; its verdict and writer evidence are required finalizer evidence. |
+| Target reconciliation through finalization | Green and controller; joined tree and exact source and target identities | A pending target merge uses staged-tree validation and reviews before the controller makes the ordered two-parent commit. A changed joined tree needs fresh validation and receipts. |
 | Publication and required-job proof | Architect, finalizer, then runner; complete finalizer evidence | `observing` and exact-MR-conflict `repair` are durable. The controller verifies current required jobs before human handoff. |
 
-The installed pre-commit hook checks the proposed change. The runner sends the
-work back for a fix only when standard pre-commit output identifies a failed
+For coding work, the hook checks the change as the controller makes the Green
+commit. This happens before review. The runner then pushes that SHA. It makes
+no new commit. Content and repair work still commit at publication. If that
+hook fails, the runner sends work back for a fix only when its output names a failed
 hook and the issue, branch, commit, pending merge, staged Git tree, and retained
 changes still match.
 

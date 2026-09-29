@@ -43,24 +43,27 @@ relative regression `UNKNOWN` and continue with the valid full JUnit. The
 missing comparison cannot waive a full-JUnit finding. Use available paired
 runs and phase data to explain a cause; mixed directions alone prove none.
 
-For serial work, Judge gives you controller-owned `timing_review`: baseline
-SHA and tree, candidate tree, transcript digest and outcome, Python 3.11 and
-3.14 baseline and candidate run digests, counts, and `timing_complete` flags,
-plus bounded findings and phase deltas. Candidate `junit_timings` also gives
-the complete bounded `over_100ms_cases` list. Readable timing requires full
-transcript and case-list proof. The controller checks full inventories,
-environment, command, seed, and required focused repeats. Reject incomplete or
-mismatched readable proof. Three slowest cases cannot stand in for the full
-list. For `timing_status=unknown`, use trusted `timing_unknown` instead.
+For serial work, Judge gives you controller-owned `junit_timings` from the
+native Green hook, bound to the Green SHA and committed tree. Each readable
+Python 3.11 and 3.14 result has a JUnit digest, test count, and complete
+bounded `over_100ms_cases` list. Three slowest cases cannot stand in for the
+full list. Reject a mismatch in proof marked complete. The ordinary serial
+route does not require paired baseline runs or phase deltas. Baseline-relative
+regression is `UNKNOWN` and nonblocking. If a successful serial Green hook
+has a missing or `OSError`-unreadable JUnit file, use trusted `timing_unknown`.
+Do not turn it into a timing pass. A valid readable JUnit file with an
+overflowing bounded advisory case summary also has timing `UNKNOWN`.
+Malformed, oversized, or invalid present JUnit data blocks review. A failed
+hook still fails. The legacy staged-tree route rejects malformed proof.
 Use only that result. Do not ask for private JUnit files or state-root paths.
 Never run or replace a test suite. A later Finalizer run cannot stand in for
 this review.
 
-For serial `inherited_variance`, trace changed production paths into the case's
-test, fixtures, helpers, and callers. Review both versions' phase evidence.
-Approve only with case-specific proof that the delta is unrelated. Reject and
-route possible or unknown causal impact to Architect. `report_only` and
-opposite version directions alone are not proof.
+In serial coding, identify new and changed test cases from the accepted Red
+checkpoint and the Red-to-Green diff. Any such case above 1.000 seconds in
+either Python environment fails the human-approved gate. Report existing
+unchanged slow cases as suggestions. A case above 0.100 seconds is an
+optimization suggestion, not a rejection by itself.
 
 Use Read, Grep, and Glob tools when this frontend has them. If it does not,
 use Bash only to read Judge's files, comparator proof, and task or test files.
@@ -74,11 +77,13 @@ files. Do not use Bash to run tests, benchmarks, builds, or other checks.
    proof Judge gave you for this mode. Read
    `docs/reference/testing-strategy.md` for the per-case targets and review
    rules.
-2. For available timing proof, check finished cases and times. Report the total
-   time and slowest relevant cases. Use full JUnit in interactive work or the full
+2. For available timing proof, check finished cases and times. Report total
+   time when supplied and the slowest relevant cases. Use full JUnit in
+   interactive work or the full
    trusted `over_100ms_cases` list in serial work. For readable serial timing,
-   check source binding, transcript, outcome, and findings. List every candidate case
-   above 0.100 s and every case at or above 1.000 s with its environment.
+   check Green SHA and tree binding, JUnit digests, and counts. List every
+   candidate case above 0.100 seconds and every case at or above 1.000
+   seconds with its environment.
    Keep the proof fixed. Use only the timing data for this mode. For `UNKNOWN`,
    identify the affected environment and omit unavailable times.
 3. Find each stated need for speed, scale, or resource use. For performance
@@ -86,85 +91,50 @@ files. Do not use Bash to run tests, benchmarks, builds, or other checks.
    Timing tests must use an injected or controlled boundary, not the machine
    clock.
 4. Apply each stated controlled task budget, including a tighter one. For
-   interactive work, the ordinary timing hard gate applies only to new or
-   modified tests and their parameterizations. Reject any such case strictly
-   above 1.000 seconds in either valid full-hook JUnit file. Exactly 1.000
-   seconds is allowed. Cases above 0.100 seconds are optimization suggestions;
-   route them to a separate follow-up. Unchanged tests, including cases linked
-   to changed code or fixtures, are report-only under this ordinary gate.
-   Missing paired proof leaves baseline-relative regression `UNKNOWN` but
+   interactive and serial work, the ordinary timing hard gate applies to new
+   or modified tests and their parameterizations. Reject any such case
+   strictly above 1.000 seconds in either Python environment with valid
+   full-hook timing proof. Exactly 1.000 seconds is allowed. In serial work,
+   honor only a specific human-approved exception.
+   Classify serial cases from the accepted Red checkpoint and Red-to-Green
+   diff. Cases above 0.100 seconds are optimization suggestions; route them
+   to a separate follow-up. Unchanged tests, including cases linked to
+   changed code or fixtures, are report-only under this ordinary gate.
+   Missing paired proof leaves baseline-relative regression `UNKNOWN` and
    does not change the full-JUnit hard gate. When valid paired proof exists,
    report signed deltas and possible causes without adding an ordinary hard
    gate. A controlled task-specific budget still applies to its own scope.
-
-   In serial work, touched cases include added or modified tests and their
-   parameterizations. Include cases affected by a changed shared fixture or
-   helper when they can be identified. A changed `.py` file outside `tests/`
-   and `template/tests/` conservatively marks an existing case as affected
-   when its candidate time reaches 1.000 s and either its baseline was below
-   1.000 s or its candidate time is slower in that Python version. This is an
-   impact map, not proof that the diff caused the cost. Return an unclear
-   serial impact map to Architect and the test owner for resolution.
-   In serial timing proof, an unsafe parameter
-   becomes `[param_<64 lowercase SHA-256 hex>]` after the safe base test name.
-   Treat each emitted ID as a distinct case. Map a touched base test to all its
-   parameterizations, and match the emitted ID and Python environment to its
-   durable audit or linked issue record. Do not request raw unsafe parameter
-   text. In serial work, send a newly introduced ordinary case above
-   0.100 s to the test owner unless a documented integration exception applies.
-   Send an existing touched case back only when sound repeat and phase evidence
-   corroborates attributable added cost above 0.100 s or a regression caused by
-   the change. Report inherited touched cost that is unchanged, faster, or lacks
-   proven attributable slowdown without rejecting it for that cost alone. Keep
-   the 0.100 s optimization goal. Compare each
-   candidate case at or above 1.000 s with its baseline where present and
-   record the case, environment, and proof in the durable audit or linked
-   issue record, even when another finding requires return. Review bounded
-   findings and the full inventory for cases at or above 1.000 s. For affected
-   existing cases
-   that newly cross 1.000 s or worsen while already slow, review available
-   setup, call, and teardown phase deltas from focused repeats. Unaffected
-   inherited cases and new cases may have no phase deltas; record the available
-   full-inventory and baseline evidence without inventing phases. A new case
-   has no baseline case to repeat. Distinguish inherited slow cases,
-   integration exceptions, and newly observed ordinary cases. One time alone
-   is not a stable regression.
-   Report missing cause, owner, reduction plan, or exception review trigger
-   in that record. Do not
-   invent a limit. CI case times give context; local goals are not CI gates.
+   Use safe emitted case IDs; do not request raw unsafe parameter text.
 5. A successful hook with a missing or `OSError`-unreadable fixed `py311` or
    `py314` JUnit file has timing `UNKNOWN`; continue without invented times or
-   a timing pass. Reject malformed or mismatched proof that is present.
-   In interactive work, apply the full-JUnit hard gate in step 4 even when
-   paired proof is absent. Mark the baseline comparison `UNKNOWN` without
-   blocking on that absence. Cases above 0.100 seconds remain suggestions
-   for a separate follow-up. Exactly 1.000 seconds is allowed; an unchanged
-   case above that value is reported, not an ordinary hard block. A valid
-   controlled task-specific hard budget can still reject its own scope.
-   A comparator `review` flag asks for assessment, not automatic rejection;
-   malformed present comparator proof is invalid. In serial work, retain its
-   0.100-second ordinary-test rule, required paired proof, and corroborated
-   regression checks. Assess documented integration exceptions against their
-   plan and task budget. Route code gaps to Implementer and test gaps to Test
-   Writer. Report each case at or above 1.000 seconds and any follow-up to
-   Architect, regardless of the verdict.
+   a timing pass. A valid readable serial JUnit file with an overflowing
+   bounded advisory case summary also has timing `UNKNOWN`. Malformed,
+   oversized, or invalid present JUnit data blocks review.
+   A failed hook or mismatched commit identity proof still fails. The legacy
+   staged-tree route rejects malformed proof. Apply the full-JUnit hard gate
+   in step 4 whenever valid timing is available. Mark absent paired proof and
+   baseline comparison `UNKNOWN` without blocking on that absence. A present
+   malformed or mismatched comparator is invalid. A comparator `review` flag
+   asks for assessment, not automatic rejection. Assess documented integration
+   exceptions against their plan and task budget. Route code gaps to
+   Implementer and test gaps to Test Writer. Report each case at or above
+   1.000 seconds and any follow-up to Architect, regardless of the verdict.
 
 ## Output
 
 Return `Overall: Approve` or `Overall: Reject`. Give the proof ID or file
-paths for this mode; in serial work, name the candidate tree and the baseline
-when readable. For interactive work, name the exact full-JUnit proof and
-classify each new or modified case above 1.000 seconds. Mark absent paired
-proof and baseline regression `UNKNOWN`; for present valid proof, report its
-trees, repeated times, phases, and signed deltas. Name mixed cases and their
-separate follow-up.
-Give available total and slowest run times, every available case above 0.100 s
-and at or above 1.000 s, its environment, classification and next
-action, each touched case
-above 0.100 s and its environment, and each stated limit. Route interactive
-0.100-second suggestions to a separate follow-up. For readable
-serial timing, report both `timing_complete` flags per environment and the
-controller's finding and phase deltas for each review. For
+paths for this mode; in serial work, name the Green SHA and committed tree.
+For interactive work, name the exact full-JUnit proof and classify each new
+or modified case above 1.000 seconds. Mark absent paired proof and baseline
+regression `UNKNOWN`; for present valid proof, report its trees, repeated
+times, phases, and signed deltas. Name mixed cases and their separate
+follow-up. Give available total and slowest run times, every available case
+above 0.100 s and at or above 1.000 s, its environment, classification and
+next action, each touched case above 0.100 s and its environment, and each
+stated limit. Route 0.100-second suggestions to a separate follow-up. For
+readable serial timing, report each environment's JUnit digest, count, and
+new or changed test above one second. Label baseline-relative regression
+`UNKNOWN` and list optimization suggestions separately. For
 `timing_status=unknown`, report the trusted environment and reason.
 Give any rejection reason. On approval, hand off to the TDD Judge. It returns
 the combined Judge and non-functional package to Green.
@@ -175,7 +145,7 @@ the combined Judge and non-functional package to Green.
   when dedicated read tools are unavailable. Do not write or mutate any file.
 - Do not infer run times from test source. In interactive work, use Judge's
   available JUnit snapshots and comparator report when available. In serial work,
-  use only trusted `timing_review` when readable, or bounded `timing_unknown`
+  use only trusted `junit_timings` when readable, or bounded `timing_unknown`
   evidence. Never ask for a private path.
-- Do not add a final-only performance gate. This review comes before normal
-  validation and finalization. It lets later agents act on the result.
+- Do not add a final-only performance gate. This review follows the native
+  Green hook and precedes specialist review and finalization.

@@ -108,17 +108,22 @@ checkpoint.
 For serial code work, Green asks the trusted boundary to stage while live.
 The controller scans the exact worktree and normalizes its changed paths.
 It stages only allowed files and returns the tree ID. Green's path list
-cannot grant access. Judge asks the trusted boundary to run tests and read
-saved status for that tree. A canonical rejection goes back to the same live
-producer for one corrected request. The worker never runs `git add`,
+cannot grant access. Judge requests controller-owned `candidate commit` on
+that exact tree. It runs one installed hook and returns the Green SHA, tree,
+and saved validation proof before specialists review. A canonical rejection
+goes back to the same live producer for one corrected request. The worker
+never runs `git add`,
 `git write-tree`, `git fetch`, `git pull`,
 `agent-work validation run`, or `agent-work validation status`. It never reads
-or receives a controller state-root path. The passed result has the tree ID
-and an opaque saved proof ID. It may give test counts, hashes, and time data
+or receives a controller state-root path. The passed result has the Green SHA,
+committed tree ID, retained Red proof, and an opaque saved validation proof
+ID. It may give test counts, hashes, and time data
 from trusted code. It gives no writable file or private path. Judge and reviewers
 use this result as proof. Model prose cannot grant a stage or test pass. The
 final worker result goes through a separate broker. After worker exit, the
-controller rechecks identity, tree, and changed paths before save or publish.
+controller rechecks the Green SHA, tree, retained Red proof, clean state, and
+changed paths before publishing that same commit. Content work retains its
+separate staged-tree publication route.
 
 The Red-only intent is one protocol-version-2 `red_checkpoint_ready` envelope.
 It has the Architect and Red receipts, the exact `red_checkpoint_request`, a
@@ -146,8 +151,11 @@ same project, issue, source branch, base SHA, tree OID, ref, test paths, command
 nonzero exit, failure marker, and output digest. Never reconstruct it from
 prose. A missing or mismatched checkpoint returns a structured recovery
 blocker. The checkpoint ref stays local and is never pushed. It does not depend
-on squash. Finalizer still never commits in this serial flow. The controller
-retains the single validated final commit path.
+on squash. Finalizer still never commits in this serial flow. Recover the
+current Green SHA and tree from Git and GitLab evidence. Recheck their Red
+ancestry and
+review receipts. Any changed Green SHA or tree invalidates stale reviews. The
+controller publishes the verified Green commit without making another one.
 
 ## MR remediation issue exception
 

@@ -133,10 +133,11 @@ Agent-policy Writer handles portable policy when it applies. Green never edits
 docs, README, or agent-policy paths.
 
 Some changed facts have copies in the repo. Consistency Judge checks those
-copies against their source on the staged tree when the review applies.
-In serial coding work, the Validation Judge first accepts that staged tree.
-The controller then supplies bounded, read-only candidate evidence to
-Consistency Judge. The finalizer records the judge's verdict or exact
+copies against their source when the review applies. In serial coding work,
+the controller commits the staged candidate after its installed hook passes.
+The Green commit and tree identify the code that every specialist reviews.
+The controller supplies bounded, read-only evidence from that committed tree
+to Consistency Judge. The finalizer records the judge's verdict or exact
 not-applicable reason in its existing receipt. A skip needs a specific reason.
 
 Red keeps a verified failing-test boundary. In an ordinary interactive
@@ -169,7 +170,7 @@ It is not branch history, and the ref is never pushed. The controller returns
 the exact ref, tree, and path identity as program-owned evidence. Green, test
 review, and final audit use that identity. On resume, the controller reloads it
 freshly and stops on invalid, stale, missing, or changed evidence. The trusted
-controller later makes the one final commit for the whole change.
+controller commits the validated candidate before specialist review.
 
 Serial Green runs the fast formatter, lint, type checks, and focused behavior
 tests. Interactive Green runs format, lint, type, and readability checks
@@ -185,43 +186,49 @@ paths the controller observes. The content workflow uses that boundary too.
 It returns the exact Git tree ID. The worker cannot write the linked
 checkout's Git administrative data or controller state.
 
-For coding work, the Validation Judge first uses that socket to validate the
-staged tree and read its durable status. The trusted controller checks licenses
-in that tree before it starts the full-hook session. It runs one hook
-for each tree and records elapsed time. Complete timing also records fixed
-JUnit snapshots, digests, and test counts; a successful hook with missing or
-`OSError`-unreadable fixed JUnit evidence records timing `UNKNOWN` instead. It
-returns an opaque evidence ID and bounded results without private snapshot
-paths. A failed result gives the same live worker safe test
-names and digests when available; the worker can correct the code, stage a
-new tree, and validate it. Status recovers the saved result without rerunning
-the hook.
+For ordinary serial coding work, Judge requests the controller-owned candidate
+commit through that socket. The controller checks the staged tree and Red
+checkpoint, then makes one Green commit with the installed hook. A successful
+request returns the Green SHA and tree. A replay verifies the same commit
+without rerunning the hook. A failed request returns to the live worker for
+correction. It can stage a new tree and request a new candidate commit.
+Content work retains staged-tree validation and status.
 
-After successful coding validation, the controller reads that same staged
-tree for Consistency Judge. Content work reads its tree after staging without
-a coding validation step. The controller binds the read to the current
-project, issue, ledger revision, branch, base commit, and private nonce.
+If the target branch advances after Green, reconciliation uses the reviewed
+combined tree. The controller checks the saved Red and Green commits and the
+pending target. It then validates the staged tree. After review,
+the trusted publication boundary makes an ordered two-parent commit with
+Green first and the target second. It pushes that verified commit.
+
+After the coding commit, the controller reads its exact tree for Consistency
+Judge. Content work reads its tree after staging. The controller binds the
+read to the current project, issue, ledger revision, branch, base commit, and
+private nonce.
 Consistency Judge gets a canonical changed-path inventory and can read
 independent bounded ranges from the exact old and new Git trees. The judge
 must review every present side of each changed path before recording a
 verdict. Each response proves which bytes the controller returned; it does
 not prove that the judge understood them. The controller binds each read to
 the exact trees and rejects drift, replay, timeout, and oversized evidence.
-A correction needs a new staged tree, coding validation when applicable, and
-a new consistency review.
+A correction needs a new staged tree, a new Green commit for coding work, and
+fresh reviews. Earlier receipts no longer apply.
 
 The separate result broker accepts final workflow intent. After worker exit,
-the controller checks the tree, changed paths, and identity again before
-publication. The normal ledger transition records that authorization. See
-the [candidate command reference](../reference/serial-gitlab-agent-loop.md#candidate-stage-read-validate-and-status).
+the controller checks the commit and tree again. It also checks changed paths
+and identity before publication. Ordinary coding publishes the Green commit.
+A reviewed pending reconciliation publishes its ordered two-parent commit.
+The normal ledger transition records that authorization. See
+the [candidate command reference](../reference/serial-gitlab-agent-loop.md#candidate-stage-commit-read-validate-and-status).
 
 An interactive restart reconstructs the workflow from source code, Git
 commits, and exact issue and merge-request state. It reruns any needed checks
 instead of restoring an agent session or stored role and session receipts.
 
-The serial runner uses its normal commit path. Pipeline review checks the exact
-source commit after publication. It never replaces Judge. In serial work,
-Finalizer does not commit. The trusted controller commits with its hook.
+For ordinary coding work, the serial runner publishes the verified Green
+commit without making another commit. A pending reconciliation publishes the
+reviewed two-parent commit. Pipeline review checks that exact source after
+publication. It never replaces Judge. In serial work, Finalizer checks the
+reviewed identity read-only.
 
 The documentation lane needs a complete diff limited to docs and agent-work
 instructions. It never invents passing prose tests. Its writer records sources.
@@ -433,8 +440,8 @@ flowchart TD
 ```
 
 License Checker starts specialist review as a read-only reviewer. TDD Judge owns the
-read-only validation Non-functional Reviewer. Each specialist sees the same
-staged tree. Green gets every initial receipt. It then consolidates
+read-only validation Non-functional Reviewer. Each serial coding specialist sees the same
+Green SHA and tree. Green gets every initial receipt. It then consolidates
 findings. A license receipt never needs another review receipt. A violation joins
 other actionable findings in focused correction. Rerun the checker only when a
 maintained file changes in its checked scope. Final validation needs a current
@@ -466,7 +473,7 @@ Green and the writer compare the final interface while both are live; the
 writer aligns the prose. Once both stop editing, Main stages their combined
 work in interactive sessions. In serial sessions, Green requests controller
 staging through the private socket. Judge and applicable read-only specialists
-inspect that same tree.
+inspect the Green SHA and committed tree after the controller-owned commit.
 Green consolidates feedback and routes documentation findings to the writer.
 Green never edits docs, README, or agent-policy paths.
 
@@ -549,12 +556,13 @@ or evidence changed. Rerun License Checker when maintained files in its checked
 scope change. Run the full test gate again only when behavior or tests change.
 
 The first `$judge-quality` review must be complete and independent. It reviews
-the exact staged tree. Its receipt names that tree OID. Green's own check cannot
+the exact committed tree in serial coding work. Its receipt names the Green
+SHA and tree. Green's own check cannot
 replace it.
 
 A later rerun may focus only when Green supplies this proof:
 
-- The prior and current staged tree OIDs.
+- The prior and current Green SHAs and tree OIDs in serial coding work.
 - The prior complete `$judge-quality` receipt.
 - Stable fingerprints for the addressed findings.
 - The correction ledger.
@@ -571,12 +579,12 @@ constant, state machine, or dependency inversion. Also use one for a security
 or authority boundary, cross-module rule, or scope not proved safe.
 
 The receipt marks prior sections that still have support. It also marks the
-scope checked again against the current tree. The reviewer uses staged tree
-identities, not intermediate commits. In ordinary interactive work, Judge
-requests the sole normal Green commit. For a pending coding merge, Main makes
-the reviewed two-parent reconciliation commit after validation and review.
-Finalizer verifies either commit read-only. In serial-worker work, Finalizer
-never commits. The trusted runner keeps its normal controller commit path.
+scope checked again against the current tree. In serial coding, the reviewer
+uses the Green SHA and tree. In normal interactive work, Judge requests one
+Green commit. For a pending coding merge, Main makes the reviewed two-parent
+reconciliation commit after validation and review. Finalizer checks either
+commit without edits. In serial work, Finalizer does not commit. The trusted
+controller made Green before review and pushes that SHA.
 
 The controller, not the reviewer, measures review time. The receipt starts with
 compact, token-neutral scope metadata. A later cost study can compare complete
@@ -664,14 +672,14 @@ visible and preserves the human approval and merge boundary.
 | Implementation Judge | Runs applicable Python/Bash lint and non-test checks | Fix issues |
 | Diátaxis Judge | Validates documentation accuracy and Diátaxis fit | Edit docs, code, tests, or README.md |
 | Agent Policy Judge | Reviews agent routing, portable skills, mirrors, and authority boundaries | Edit instructions, code, tests, or README.md |
-| Consistency Judge | Checks changed repeated facts against authoritative definitions on an exact staged tree, using a bounded controller read in serial work | Edit, stage, approve, merge, or infer exceptions without evidence |
+| Consistency Judge | Checks changed repeated facts against authoritative definitions. In serial coding work, bounded controller reads bind its review to the committed Green SHA and tree. | Edit, stage, approve, merge, or infer exceptions without evidence |
 | Quality Judge | Reviews production-code design, clarity, and conventions | Run tooling |
 | Test Judge | Reviews test quality and language-appropriate test practices | Run tooling or review production-code quality |
 | README Reviewer | Ensures the README orients new visitors | Touch docs, code, tests, or agent definitions |
 | CI/CD Judge | Checks local CI configuration alignment and static job shape | Inspect live GitLab CI or edit configuration |
 | CLI Judge | Checks CLI changes against safety, output, and exit-code contracts | Run tooling or edit files |
 | Filesystem Judge | Checks the project layout or documented exceptions | Edit files, run tooling, or review non-layout quality |
-| License Checker | Independently checks license compliance on the stable staged tree | Edit files, wait for another review receipt, or waive a violation |
+| License Checker | Independently checks license compliance on the committed Green SHA and tree in serial coding work | Edit files, wait for another review receipt, or waive a violation |
 | Finalizer | Verifies final gates and returns the final validation receipt | Fix issues or publish changes |
 | Documentation Finalizer | Verifies content classification, structure, mirrors, and source synchronization | Edit, stage, publish, or call remote APIs |
 

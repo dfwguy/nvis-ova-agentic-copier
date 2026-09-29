@@ -14,7 +14,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import secrets
+import tempfile
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
@@ -22,7 +24,7 @@ from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import cast
+from typing import Protocol, cast
 
 from .classification import ClassificationError, classify_work, is_protected_policy_path
 from .domain import (
@@ -45,6 +47,13 @@ from .domain import (
     render_split_marker,
 )
 from .gitlab import GitLabError, GitLabIdentityError
+from .green_commit import (
+    GreenCommitDependencies,
+    GreenCommitError,
+    GreenCommitProof,
+    create_green_commit,
+    green_commit_ref,
+)
 from .models import (
     ConditionEvidence,
     GitLabIssue,
@@ -67,10 +76,17 @@ from .red_checkpoint import (
     RedCheckpointEvidence,
     RedCheckpointRequest,
 )
+from .red_commit import (
+    RedCommitDependencies,
+    RedCommitError,
+    create_red_commit,
+    red_commit_ref,
+)
 from .repository import (
     LegacyPublicationCandidate,
     PublicationCommitRejected,
     PublicationError,
+    ReconciliationTargetChanged,
     RepositoryError,
     RepositoryTransientError,
 )
@@ -103,6 +119,46 @@ from .worker_read import (
 
 class SegmentError(RuntimeError):
     """A segment could not safely reconcile or record its outcome."""
+
+
+class _CommitRepository(Protocol):
+    """Narrow transaction capability used only by the serial coding lane."""
+
+    def red_commit_dependencies(
+        self, worktree: Path, isolated_worktree: Path
+    ) -> RedCommitDependencies: ...
+
+    def green_commit_dependencies(
+        self, worktree: Path, isolated_worktree: Path
+    ) -> GreenCommitDependencies: ...
+
+    def committed_candidate_read_base(
+        self, worktree: Path, baseline_sha: str, green_sha: str, red_sha: str
+    ) -> str: ...
+
+    def prepare_reconcile_commit(
+        self,
+        worktree: Path,
+        branch: str,
+        source_sha: str,
+        target_sha: str,
+        candidate_tree: str,
+        red_ref: str,
+        green_ref: str,
+    ) -> str: ...
+
+
+class _BoundReconcileRepository(Protocol):
+    """Require a fresh target match before an ordered commit can publish."""
+
+    def reconcile_default_branch(
+        self,
+        worktree: Path,
+        branch: str,
+        expected_head: str,
+        *,
+        expected_default_sha: str,
+    ) -> str | None: ...
 
 
 def create_live_worker_read_session(
@@ -306,6 +362,11 @@ def _broker_artifact_builder(
                             record.worktree, candidate_base_sha or ""
                         )
                         if uses_authored_base
+                        or (
+                            red_checkpoint is not None
+                            and record.workflow_lane is WorkflowLane.CODING
+                            and repository.head(record.worktree) != candidate_base_sha
+                        )
                         else repository.changed_paths(record.worktree)
                     )
                 )
@@ -2635,10 +2696,56 @@ def _reconcile_closed_published_issue(
     return complete
 
 
-def _publication_intent_is_exact(record: LedgerRecord, *, baseline_sha: str) -> bool:
+def _source_has_retained_green_proof(
+    record: LedgerRecord, repository: RepositoryPort
+) -> bool:
+    """Recognize an issue-bound Green source even when intent omits its refs."""
+    source_sha = record.source_sha
+    if (
+        source_sha is None
+        or not hasattr(repository, "green_commit_dependencies")
+        or not hasattr(repository, "red_commit_dependencies")
+    ):
+        return False
+    commit_repository = cast(_CommitRepository, repository)
+    green = commit_repository.green_commit_dependencies(record.worktree, Path())
+    red = commit_repository.red_commit_dependencies(record.worktree, Path())
+    try:
+        red_sha, green_tree, _message = green.commit_identity(source_sha)
+        base_sha, _red_tree = red.commit_identity(red_sha)
+    except RepositoryError:
+        return False
+    if not all(
+        re.fullmatch(r"[0-9a-f]{40}", oid)
+        for oid in (source_sha, red_sha, green_tree, base_sha)
+    ):
+        return False
+    return (
+        red.read_ref(red_commit_ref(record.issue_iid, base_sha)) == red_sha
+        and green.read_ref(green_commit_ref(record.issue_iid, base_sha, green_tree))
+        == source_sha
+    )
+
+
+def _publication_intent_is_exact(
+    record: LedgerRecord, *, baseline_sha: str, repository: RepositoryPort
+) -> bool:
     """Return whether durable intent authorizes this publication replay."""
     intent = record.intent
     if intent is None:
+        return False
+    if (
+        record.publication_sha is not None
+        and record.publication_sha != record.source_sha
+        and record.main_sha is not None
+        and record.main_sha != record.source_sha
+        and (
+            record.workflow_lane is not WorkflowLane.CODING
+            or record.work_kind is not WorkKind.ORDINARY
+            or record.pending_feedback is not None
+        )
+        and _source_has_retained_green_proof(record, repository)
+    ):
         return False
     issue_iid, issue_separator, operation = intent.operation_id.partition(":")
     action, action_separator, revision = operation.partition(":")
@@ -2646,6 +2753,7 @@ def _publication_intent_is_exact(record: LedgerRecord, *, baseline_sha: str) -> 
     revision_is_canonical = revision == "0" or (
         revision.isascii() and revision.isdecimal() and not revision.startswith("0")
     )
+
     revision_is_older = len(revision) < len(record_revision) or (
         len(revision) == len(record_revision) and revision < record_revision
     )
@@ -2655,6 +2763,27 @@ def _publication_intent_is_exact(record: LedgerRecord, *, baseline_sha: str) -> 
     }
     if record.publication_sha is not None:
         expected_evidence["publication_sha"] = record.publication_sha
+    if "candidate_tree" in intent.expected_evidence:
+        reconciliation = {
+            key: value
+            for key, value in intent.expected_evidence.items()
+            if key
+            in {
+                "branch",
+                "source_sha",
+                "target_sha",
+                "candidate_tree",
+                "red_ref",
+                "green_ref",
+            }
+        }
+        if record.publication_sha is None or not _reconcile_evidence_is_exact(
+            record, reconciliation
+        ):
+            return False
+        expected_evidence |= {
+            key: value for key, value in reconciliation.items() if key != "branch"
+        }
     if record.pending_feedback is not None:
         validated_paths = _feedback_validated_paths(record)
         if validated_paths is None:
@@ -2667,8 +2796,79 @@ def _publication_intent_is_exact(record: LedgerRecord, *, baseline_sha: str) -> 
         and action == "publish"
         and action_separator == ":"
         and revision_is_canonical
-        and revision_is_older
+        and (
+            revision_is_older
+            or record.workflow_lane is WorkflowLane.CODING
+            and record.work_kind is WorkKind.ORDINARY
+            and record.publication_sha is None
+            and revision == record_revision
+        )
         and intent.expected_evidence == expected_evidence
+    )
+
+
+def _reconcile_intent_is_exact(record: LedgerRecord) -> bool:
+    """Require one canonical ordered-merge intent for the retained source."""
+    intent = record.intent
+    source_sha = record.source_sha
+    target_sha = record.main_sha
+    if (
+        intent is None
+        or intent.kind != "reconcile_commit"
+        or record.workflow_lane is not WorkflowLane.CODING
+        or record.work_kind is not WorkKind.ORDINARY
+        or record.pending_feedback is not None
+        or source_sha is None
+        or target_sha is None
+        or record.publication_sha is not None
+    ):
+        return False
+    match = re.fullmatch(
+        rf"{record.issue_iid}:reconcile:(0|[1-9][0-9]*)", intent.operation_id
+    )
+    if match is None or int(match.group(1)) > record.revision:
+        return False
+    return _reconcile_evidence_is_exact(record, intent.expected_evidence)
+
+
+def _reconcile_evidence_is_exact(
+    record: LedgerRecord, evidence: Mapping[str, str | int | None]
+) -> bool:
+    """Validate durable source, target, candidate, and retained refs."""
+    source_sha = record.source_sha
+    target_sha = record.main_sha
+    if source_sha is None or target_sha is None:
+        return False
+    red_ref = evidence.get("red_ref")
+    green_ref = evidence.get("green_ref")
+    candidate_tree = evidence.get("candidate_tree")
+    if not all(isinstance(item, str) for item in (red_ref, green_ref, candidate_tree)):
+        return False
+    red_ref = cast(str, red_ref)
+    green_ref = cast(str, green_ref)
+    candidate_tree = cast(str, candidate_tree)
+    red_match = re.fullmatch(
+        rf"refs/agent-work/red-commits/{record.issue_iid}/([0-9a-f]{{40}})",
+        red_ref,
+    )
+    return (
+        red_match is not None
+        and re.fullmatch(r"[0-9a-f]{40}", candidate_tree) is not None
+        and re.fullmatch(
+            rf"refs/agent-work/green-commits/{record.issue_iid}/"
+            rf"{red_match.group(1) if red_match else ''}/[0-9a-f]{{40}}",
+            green_ref,
+        )
+        is not None
+        and evidence
+        == {
+            "branch": record.source_branch,
+            "source_sha": source_sha,
+            "target_sha": target_sha,
+            "candidate_tree": candidate_tree,
+            "red_ref": red_ref,
+            "green_ref": green_ref,
+        }
     )
 
 
@@ -3489,6 +3689,7 @@ def _execute(
     successfully_validated_tree: str | None = None
     pending_deferred_tree: str | None = None
     prepared_candidate: str | None = None
+    committed_candidate: GreenCommitProof | None = None
     uses_authored_base = (
         record.correction_identity is not None
         and record.correction_identity.mode == "authored_candidate_recovery"
@@ -3505,15 +3706,141 @@ def _execute(
             gitlab=gitlab,
             summary="Candidate validation base is unavailable.",
         )
+    pending_coding_merge = (
+        retained_checkpoint is not None
+        and record.workflow_lane is WorkflowLane.CODING
+        and record.work_kind is WorkKind.ORDINARY
+        and record.main_sha is not None
+        and retained_checkpoint.base_sha != record.source_sha
+        and hasattr(repository, "green_commit_dependencies")
+    )
+    candidate_head = record.source_sha if uses_authored_base else candidate_base_sha
+    if (
+        retained_checkpoint is not None
+        and record.workflow_lane is WorkflowLane.CODING
+        and record.work_kind is WorkKind.ORDINARY
+        and hasattr(repository, "green_commit_dependencies")
+        and repository.head(record.worktree) != candidate_base_sha
+    ):
+        observed_head = repository.head(record.worktree)
+        try:
+            dependencies = cast(
+                _CommitRepository, repository
+            ).green_commit_dependencies(record.worktree, Path())
+            red_sha, green_tree, _ = dependencies.commit_identity(observed_head)
+            expected_red_ref = (
+                f"refs/agent-work/red-commits/{record.issue_iid}/{candidate_base_sha}"
+            )
+            if (
+                dependencies.read_ref(expected_red_ref) == red_sha
+                and dependencies.read_ref(
+                    green_commit_ref(record.issue_iid, candidate_base_sha, green_tree)
+                )
+                == observed_head
+            ):
+                repository.verify_worktree(
+                    record.worktree, record.source_branch, observed_head
+                )
+                candidate_head = observed_head
+        except (RepositoryError, ValueError):
+            pass
 
     def observed_candidate_paths() -> tuple[str, ...]:
         """Return the candidate scope for its exact validation base."""
         paths = (
             repository.publication_changed_paths(record.worktree, candidate_base_sha)
-            if uses_authored_base
+            if uses_authored_base or candidate_head != candidate_base_sha
             else repository.changed_paths(record.worktree)
         )
         return tuple(sorted(set(paths)))
+
+    def committed_identity_is_exact() -> bool:
+        if committed_candidate is None:
+            return False
+        proof = committed_candidate
+        dependencies = cast(_CommitRepository, repository).green_commit_dependencies(
+            record.worktree, Path()
+        )
+        return (
+            dependencies.read_ref(proof.ref) == proof.commit_sha
+            and dependencies.read_ref(
+                red_commit_ref(record.issue_iid, candidate_base_sha)
+            )
+            == proof.red_sha
+            and dependencies.commit_identity(proof.commit_sha)[:2]
+            == (proof.red_sha, proof.tree_oid)
+            and dependencies.worker_state(record.worktree)
+            == (record.source_branch, proof.commit_sha, proof.tree_oid, proof.tree_oid)
+        )
+
+    def pending_merge_identity_is_exact() -> bool:
+        """Re-prove the retained Red and Green source plus exact pending target."""
+        if not pending_coding_merge or retained_checkpoint is None:
+            return False
+        source_sha = record.source_sha
+        target_sha = record.main_sha
+        if source_sha is None or target_sha is None:
+            return False
+        observation = repository.observe_legacy_publication_candidate(record.worktree)
+        if (
+            observation.branch != record.source_branch
+            or observation.head != source_sha
+            or observation.merge_head != target_sha
+            or observation.has_unmerged
+            or repository.observe_current_default(
+                record.worktree, record.source_branch, source_sha
+            )
+            != target_sha
+        ):
+            return False
+        dependencies = cast(_CommitRepository, repository).green_commit_dependencies(
+            record.worktree, Path()
+        )
+        red_dependencies = cast(_CommitRepository, repository).red_commit_dependencies(
+            record.worktree, Path()
+        )
+        red_sha, green_tree, _ = dependencies.commit_identity(source_sha)
+        red_ref = red_commit_ref(record.issue_iid, retained_checkpoint.base_sha)
+        green_ref = green_commit_ref(
+            record.issue_iid, retained_checkpoint.base_sha, green_tree
+        )
+        return (
+            dependencies.read_ref(red_ref) == red_sha
+            and dependencies.read_ref(green_ref) == source_sha
+            and red_dependencies.commit_identity(red_sha)
+            == (retained_checkpoint.base_sha, retained_checkpoint.tree_oid)
+            and all(
+                dependencies.blob_oid(source_sha, path)
+                == dependencies.blob_oid(red_sha, path)
+                for path in retained_checkpoint.test_paths
+            )
+        )
+
+    def review_base() -> str:
+        if pending_coding_merge:
+            if record.main_sha is None:
+                raise WorkerProtocolError(
+                    "candidate_broker", "pending review target is unavailable"
+                )
+            return record.main_sha
+        if committed_candidate is None:
+            return candidate_base_sha
+        select_base = getattr(repository, "committed_candidate_read_base", None)
+        if not callable(select_base):
+            raise WorkerProtocolError(
+                "candidate_broker", "original review base is unavailable"
+            )
+        base = select_base(
+            record.worktree,
+            candidate_base_sha,
+            committed_candidate.commit_sha,
+            committed_candidate.red_sha,
+        )
+        if base != candidate_base_sha:
+            raise WorkerProtocolError(
+                "candidate_broker", "original review base changed"
+            )
+        return base
 
     def candidate_action(
         action: str, tree: str | None, selector: dict[str, object] | None = None
@@ -3521,6 +3848,7 @@ def _execute(
         nonlocal validated_candidate_paths, successfully_validated_tree
         nonlocal pending_deferred_tree
         nonlocal prepared_candidate
+        nonlocal committed_candidate, candidate_head
         range_read = (
             action == "read"
             and selector is not None
@@ -3558,17 +3886,27 @@ def _execute(
             or current.phase is not record.phase
             or current.source_sha != record.source_sha
             or record.source_sha is None
-            or repository.head(record.worktree) != record.source_sha
+            or repository.head(record.worktree) != candidate_head
+            and not (
+                action == "stage"
+                and committed_candidate is not None
+                and repository.head(record.worktree) == candidate_base_sha
+            )
         ):
             raise WorkerProtocolError("candidate_broker", "identity changed")
         try:
+            if pending_coding_merge and not pending_merge_identity_is_exact():
+                raise WorkerProtocolError("candidate_broker", "identity changed")
             if action == "stage":
                 successfully_validated_tree = None
+                candidate_head = repository.head(record.worktree)
                 staged_tree = repository.stage_candidate(
                     record.worktree,
                     candidate_base_sha,
-                    allow_base_ancestor=uses_authored_base,
+                    allow_base_ancestor=uses_authored_base
+                    or candidate_head != candidate_base_sha,
                 )
+                committed_candidate = None
                 prepared_candidate = staged_tree
                 pending_deferred_tree = None
                 validated_candidate_paths = observed_candidate_paths()
@@ -3591,7 +3929,108 @@ def _execute(
                 )
             ):
                 raise WorkerProtocolError("candidate_broker", "candidate changed")
+            if (
+                action in {"validate", "status"}
+                and retained_checkpoint is not None
+                and record.workflow_lane is WorkflowLane.CODING
+                and record.work_kind is WorkKind.ORDINARY
+                and hasattr(repository, "green_commit_dependencies")
+                and not pending_coding_merge
+            ):
+                raise WorkerProtocolError(
+                    "candidate_broker", "candidate request is invalid"
+                )
+            if action == "commit":
+                if (
+                    pending_coding_merge
+                    or retained_checkpoint is None
+                    or record.work_kind is not WorkKind.ORDINARY
+                    or record.workflow_lane is not WorkflowLane.CODING
+                    or not hasattr(repository, "red_commit_dependencies")
+                    or not hasattr(repository, "green_commit_dependencies")
+                    or retained_checkpoint.tree_oid == tree
+                ):
+                    raise WorkerProtocolError(
+                        "candidate_broker", "candidate request is invalid"
+                    )
+                if committed_candidate is not None:
+                    if not committed_identity_is_exact():
+                        raise WorkerProtocolError(
+                            "candidate_broker", "candidate changed"
+                        )
+                    proof = committed_candidate
+                else:
+                    try:
+                        request = RedCheckpointRequest(
+                            argv=retained_checkpoint.argv,
+                            expected_failure=retained_checkpoint.expected_failure,
+                            test_paths=retained_checkpoint.test_paths,
+                        )
+                        with tempfile.TemporaryDirectory(
+                            prefix="agent-work-commit-"
+                        ) as scratch:
+                            red = create_red_commit(
+                                issue_iid=record.issue_iid,
+                                worktree=record.worktree,
+                                base_sha=candidate_base_sha,
+                                candidate_tree=retained_checkpoint.tree_oid,
+                                request=request,
+                                dependencies=cast(
+                                    _CommitRepository, repository
+                                ).red_commit_dependencies(
+                                    record.worktree, Path(scratch) / "red"
+                                ),
+                                previous_head=candidate_head,
+                            )
+                            proof = create_green_commit(
+                                issue_iid=record.issue_iid,
+                                worktree=record.worktree,
+                                branch=record.source_branch,
+                                base_sha=candidate_base_sha,
+                                candidate_tree=tree,
+                                red_proof=red,
+                                message=f"Resolve issue #{record.issue_iid}",
+                                dependencies=cast(
+                                    _CommitRepository, repository
+                                ).green_commit_dependencies(
+                                    record.worktree, Path(scratch) / "green"
+                                ),
+                                previous_head=candidate_head,
+                                immutable_ref=True,
+                            )
+                    except (
+                        RedCommitError,
+                        GreenCommitError,
+                        RepositoryError,
+                        AssertionError,
+                    ) as error:
+                        raise WorkerProtocolError(
+                            "candidate_broker", "trusted candidate commit failed"
+                        ) from error
+                    committed_candidate = proof
+                    candidate_head = proof.commit_sha
+                successfully_validated_tree = tree
+                return {
+                    "candidate_tree": tree,
+                    "committed_tree": proof.tree_oid,
+                    "commit_sha": proof.commit_sha,
+                    "red_sha": proof.red_sha,
+                    "red_ref": red_commit_ref(record.issue_iid, candidate_base_sha),
+                    "state": "terminal-success",
+                    "timing_status": proof.timing_status,
+                    "junit_timings": list(proof.junit_timings),
+                    **(
+                        {"timing_unknown": {"reason": "fixed JUnit unavailable"}}
+                        if proof.timing_status == "unknown"
+                        else {}
+                    ),
+                }
             if action == "read":
+                if (
+                    committed_candidate is not None
+                    and not committed_identity_is_exact()
+                ):
+                    raise WorkerProtocolError("candidate_broker", "candidate changed")
                 if (
                     record.phase is WorkflowPhase.WORKFLOW
                     and (
@@ -3604,11 +4043,13 @@ def _execute(
                         "candidate_broker", "candidate request is invalid"
                     )
                 if selector == {"mode": "changed_paths"}:
+                    read_base = review_base()
                     evidence = repository.changed_candidate_paths(
                         record.worktree,
                         tree,
-                        base_sha=candidate_base_sha,
-                        allow_base_ancestor=uses_authored_base,
+                        base_sha=read_base,
+                        allow_base_ancestor=uses_authored_base
+                        or read_base != repository.head(record.worktree),
                     )
                 elif selector is not None and set(selector) == {
                     "path",
@@ -3619,8 +4060,9 @@ def _execute(
                     evidence = repository.read_candidate_range(
                         record.worktree,
                         tree,
-                        base_sha=candidate_base_sha,
-                        allow_base_ancestor=uses_authored_base,
+                        base_sha=review_base(),
+                        allow_base_ancestor=uses_authored_base
+                        or review_base() != repository.head(record.worktree),
                         path=cast(str, selector["path"]),
                         side=cast(str, selector["side"]),
                         offset=cast(int, selector["offset"]),
@@ -3637,13 +4079,31 @@ def _execute(
                     or refreshed.state is not record.state
                     or refreshed.phase is not record.phase
                     or refreshed.source_sha != record.source_sha
-                    or repository.head(record.worktree) != record.source_sha
+                    or repository.head(record.worktree)
+                    not in (
+                        {record.source_sha}
+                        if committed_candidate is None
+                        else {committed_candidate.commit_sha}
+                    )
                     or not range_read
                     and validated_candidate_paths != observed_candidate_paths()
                 ):
                     raise WorkerProtocolError("candidate_broker", "identity changed")
-                return dict(evidence) | {"base_sha": candidate_base_sha}
+                result = dict(evidence) | {"base_sha": review_base()}
+                if committed_candidate is not None:
+                    result |= {
+                        "commit_sha": committed_candidate.commit_sha,
+                        "committed_tree": committed_candidate.tree_oid,
+                    }
+                return result
             if action == "review":
+                if (
+                    committed_candidate is not None
+                    and not committed_identity_is_exact()
+                ):
+                    raise WorkerProtocolError("candidate_broker", "candidate changed")
+                if committed_candidate is not None:
+                    review_base()
                 if (
                     successfully_validated_tree != tree
                     or selector is None
@@ -3659,7 +4119,12 @@ def _execute(
                     or refreshed.state is not record.state
                     or refreshed.phase is not record.phase
                     or refreshed.source_sha != record.source_sha
-                    or repository.head(record.worktree) != record.source_sha
+                    or repository.head(record.worktree)
+                    != (
+                        record.source_sha
+                        if committed_candidate is None
+                        else committed_candidate.commit_sha
+                    )
                     or validated_candidate_paths != observed_candidate_paths()
                     or repository.red_candidate_tree(
                         record.worktree, candidate_base_sha, validated_candidate_paths
@@ -3678,12 +4143,44 @@ def _execute(
                 timeout_seconds=worker_timeout,
                 timing_review_required=True,
             )
+            if pending_coding_merge:
+                report = dict(report) | {
+                    "source_sha": record.source_sha,
+                    "target_sha": record.main_sha,
+                }
             timing_review = report.get("timing_review")
+            artifacts = report.get("junit_artifacts")
+            timings = report.get("junit_timings")
+            comparison_unknown = (
+                report.get("timing_status") == "complete"
+                and report.get("timing_comparison_status") == "unknown"
+                and report.get("timing_comparison_reason") == "baseline_unavailable"
+                and timing_review is None
+                and report.get("timing_unknown") is None
+                and isinstance(artifacts, list)
+                and len(artifacts) == 2
+                and all(isinstance(item, dict) for item in artifacts)
+                and {
+                    item.get("environment")
+                    for item in cast(list[dict[str, object]], artifacts)
+                }
+                == {"py311", "py314"}
+                and isinstance(timings, list)
+                and len(timings) == 2
+                and all(isinstance(item, dict) for item in timings)
+                and {
+                    item.get("environment")
+                    for item in cast(list[dict[str, object]], timings)
+                    if item.get("timing_complete") is True
+                }
+                == {"py311", "py314"}
+            )
             if report.get("state") != "deferred" and pending_deferred_tree == tree:
                 pending_deferred_tree = None
             if report.get("state") == "terminal-success" and (
                 report.get("timing_status") == "unknown"
                 and isinstance(report.get("timing_unknown"), dict)
+                or comparison_unknown
                 or isinstance(timing_review, dict)
                 and cast(dict[str, object], timing_review).get("outcome")
                 in {"clear", "report_only"}
@@ -4291,6 +4788,47 @@ def _execute(
                 )
             }
         )
+    if outcome.state is RunnerState.PUBLISHING and pending_coding_merge:
+        if (
+            successfully_validated_tree is None
+            or invocation.validated_candidate != successfully_validated_tree
+            or not pending_merge_identity_is_exact()
+            or retained_checkpoint is None
+            or record.source_sha is None
+            or record.main_sha is None
+        ):
+            return _block_publication_identity(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                summary="Validated pending reconciliation identity changed.",
+            )
+        dependencies = cast(_CommitRepository, repository).green_commit_dependencies(
+            record.worktree, Path()
+        )
+        _, green_tree, _ = dependencies.commit_identity(record.source_sha)
+        outcome = outcome.model_copy(
+            update={
+                "intent": TransitionIntentRecord(
+                    operation_id=f"{record.issue_iid}:reconcile:{record.revision}",
+                    kind="reconcile_commit",
+                    expected_evidence={
+                        "branch": record.source_branch,
+                        "source_sha": record.source_sha,
+                        "target_sha": record.main_sha,
+                        "candidate_tree": successfully_validated_tree,
+                        "red_ref": red_commit_ref(
+                            record.issue_iid, retained_checkpoint.base_sha
+                        ),
+                        "green_ref": green_commit_ref(
+                            record.issue_iid,
+                            retained_checkpoint.base_sha,
+                            green_tree,
+                        ),
+                    },
+                )
+            }
+        )
     if (
         record.state is RunnerState.REPAIR
         and record.pending_feedback is not None
@@ -4522,6 +5060,118 @@ def _publish(
     }
     if baseline_sha is None:
         raise SegmentError("worker did not provide exact publication metadata")
+    ordinary_coding = (
+        record.workflow_lane is WorkflowLane.CODING
+        and record.work_kind is WorkKind.ORDINARY
+        and record.pending_feedback is None
+        and hasattr(repository, "green_commit_dependencies")
+        and hasattr(repository, "red_commit_dependencies")
+    )
+    reconciled_now = False
+    if record.intent is not None and record.intent.kind == "reconcile_commit":
+        if not _reconcile_intent_is_exact(record) or not hasattr(
+            repository, "prepare_reconcile_commit"
+        ):
+            return _block_publication_identity(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                summary="Durable reconciliation intent is not exact.",
+            )
+        evidence = record.intent.expected_evidence
+        try:
+            reconciled_sha = cast(
+                _CommitRepository, repository
+            ).prepare_reconcile_commit(
+                record.worktree,
+                record.source_branch,
+                baseline_sha,
+                cast(str, record.main_sha),
+                cast(str, evidence["candidate_tree"]),
+                cast(str, evidence["red_ref"]),
+                cast(str, evidence["green_ref"]),
+            )
+        except RepositoryTransientError:
+            return _record_retry(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                now=now,
+                error_code=ErrorCode.GIT_TRANSPORT_RETRYABLE,
+            )
+        except ReconciliationTargetChanged:
+            return _block_publication_identity(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                summary="Current target changed after reconciliation commit.",
+                next_action=(
+                    "Review the retained Green source and start a fresh reconciliation "
+                    "against the current target."
+                ),
+            )
+        except RepositoryError as error:
+            return _block_publication_identity(
+                record, ledger=ledger, gitlab=gitlab, summary=str(error)
+            )
+        record = ledger.persist(
+            record.model_copy(
+                update={
+                    "publication_sha": reconciled_sha,
+                    "intent": TransitionIntentRecord(
+                        operation_id=f"{record.issue_iid}:publish:{record.revision}",
+                        kind="publish_merge_request",
+                        expected_evidence={
+                            "branch": record.source_branch,
+                            "baseline_sha": baseline_sha,
+                            "publication_sha": reconciled_sha,
+                            "source_sha": baseline_sha,
+                            "target_sha": record.main_sha,
+                            "candidate_tree": evidence["candidate_tree"],
+                            "red_ref": evidence["red_ref"],
+                            "green_ref": evidence["green_ref"],
+                        },
+                    ),
+                }
+            )
+        )
+        ordinary_coding = False
+        reconciled_now = True
+
+    def verified_green_tip() -> str:
+        checkpoint = _retained_red_checkpoint(record, load_red_checkpoint)
+        if checkpoint is None or checkpoint.base_sha != baseline_sha:
+            raise RepositoryError("accepted Red checkpoint is unavailable")
+        commit_repository = cast(_CommitRepository, repository)
+        dependencies = commit_repository.green_commit_dependencies(
+            record.worktree, Path()
+        )
+        red_dependencies = commit_repository.red_commit_dependencies(
+            record.worktree, Path()
+        )
+        branch, head, index_tree, worktree_tree = dependencies.worker_state(
+            record.worktree
+        )
+        ref = green_commit_ref(record.issue_iid, baseline_sha, index_tree)
+        red_ref = f"refs/agent-work/red-commits/{record.issue_iid}/{baseline_sha}"
+        red_sha = dependencies.read_ref(red_ref)
+        if (
+            branch != record.source_branch
+            or index_tree != worktree_tree
+            or red_sha is None
+            or red_dependencies.commit_identity(red_sha)
+            != (baseline_sha, checkpoint.tree_oid)
+            or dependencies.read_ref(ref) != head
+            or dependencies.commit_identity(head)[:2] != (red_sha, index_tree)
+            or any(
+                dependencies.blob_oid(head, path)
+                != dependencies.blob_oid(red_sha, path)
+                for path in checkpoint.test_paths
+            )
+        ):
+            raise RepositoryError("verified Green commit identity changed")
+        return head
+
     if not remediation and draft is None:
         if record.intent is not None:
             raise SegmentError("worker did not provide exact publication metadata")
@@ -4542,7 +5192,7 @@ def _publish(
         )
     replaying = record.intent is not None
     if replaying and not _publication_intent_is_exact(
-        record, baseline_sha=baseline_sha
+        record, baseline_sha=baseline_sha, repository=repository
     ):
         return _block_publication_identity(
             record,
@@ -4550,6 +5200,53 @@ def _publish(
             gitlab=gitlab,
             summary="Durable publication intent is not exact.",
         )
+    if (
+        record.intent is not None
+        and "candidate_tree" in record.intent.expected_evidence
+    ):
+        evidence = record.intent.expected_evidence
+        if not reconciled_now:
+            try:
+                proof_sha = cast(
+                    _CommitRepository, repository
+                ).prepare_reconcile_commit(
+                    record.worktree,
+                    record.source_branch,
+                    baseline_sha,
+                    cast(str, record.main_sha),
+                    cast(str, evidence["candidate_tree"]),
+                    cast(str, evidence["red_ref"]),
+                    cast(str, evidence["green_ref"]),
+                )
+                if proof_sha != record.publication_sha:
+                    raise RepositoryError("reconciliation commit identity changed")
+            except RepositoryTransientError:
+                return _record_retry(
+                    record,
+                    ledger=ledger,
+                    gitlab=gitlab,
+                    now=now,
+                    error_code=ErrorCode.GIT_TRANSPORT_RETRYABLE,
+                )
+            except ReconciliationTargetChanged:
+                return _block_publication_identity(
+                    record,
+                    ledger=ledger,
+                    gitlab=gitlab,
+                    summary="Current target changed after reconciliation commit.",
+                    next_action=(
+                        "Review the retained Green source and start a fresh "
+                        "reconciliation against the current target."
+                    ),
+                )
+            except RepositoryError:
+                return _block_publication_identity(
+                    record,
+                    ledger=ledger,
+                    gitlab=gitlab,
+                    summary="reconciliation commit identity changed",
+                )
+        ordinary_coding = False
     if replaying and record.pending_feedback is not None:
         feedback_paths = _feedback_validated_paths(record)
         if feedback_paths is None:
@@ -4708,6 +5405,8 @@ def _publish(
                     expected_head=baseline_sha,
                     validated_paths=validated_paths,
                 )
+            elif ordinary_coding:
+                prepared_sha = verified_green_tip()
             elif replaying:
                 return _block_publication_identity(
                     record,
@@ -4741,10 +5440,49 @@ def _publish(
         publication_sha = record.publication_sha
         if publication_sha is None:
             raise SegmentError("publication commit is not durably bound")
-        reconciliation_sha = repository.reconcile_default_branch(
-            record.worktree, record.source_branch, publication_sha
+        if ordinary_coding and verified_green_tip() != publication_sha:
+            raise RepositoryError("verified Green commit differs from publication")
+        bound_reconciliation = (
+            record.intent is not None
+            and "candidate_tree" in record.intent.expected_evidence
         )
+        try:
+            if bound_reconciliation:
+                reconciliation_sha = cast(
+                    _BoundReconcileRepository, repository
+                ).reconcile_default_branch(
+                    record.worktree,
+                    record.source_branch,
+                    publication_sha,
+                    expected_default_sha=cast(str, record.main_sha),
+                )
+            else:
+                reconciliation_sha = repository.reconcile_default_branch(
+                    record.worktree, record.source_branch, publication_sha
+                )
+        except ReconciliationTargetChanged:
+            return _block_publication_identity(
+                record,
+                ledger=ledger,
+                gitlab=gitlab,
+                summary="Current target changed after reconciliation commit.",
+                next_action=(
+                    "Review the retained Green source and start a fresh "
+                    "reconciliation against the current target."
+                ),
+            )
         if reconciliation_sha is not None:
+            if bound_reconciliation:
+                return _block_publication_identity(
+                    record,
+                    ledger=ledger,
+                    gitlab=gitlab,
+                    summary="Current target changed after reconciliation commit.",
+                    next_action=(
+                        "Review the retained Green source and start a fresh "
+                        "reconciliation against the current target."
+                    ),
+                )
             return ledger.persist(
                 transition_record(
                     record,

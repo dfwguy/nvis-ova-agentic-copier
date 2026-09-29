@@ -93,17 +93,20 @@ authorizes serial staging. Repeat the applicable boundary after each correction.
 
 These fast commands are repair tools. In interactive work, Judge owns the sole
 normal Green commit and installed hook under its role contract. In
-serial work, Judge invokes the
-controller-owned durable validation and status boundary for that exact tree.
-The session runs the installed hook and persists evidence. The controller
-returns an unchanged-tree proof and opaque evidence identity. Readable JUnit
-files yield trusted counts, digests, slow cases, and `timing_complete` flags;
-a successful hook with a missing or `OSError`-unreadable fixed JUnit file
-yields bounded `timing_status=unknown` and `timing_unknown`, without times.
-Judge returns its Non-functional Reviewer child receipt. Only after the
-normal interactive Green commit, pending-merge candidate validation, or serial
-validation may concurrent specialist
-reviews start. Test Judge verifies the Red-to-Green Git diff. During
+serial work, Judge requests the controller-owned `candidate commit` for
+that exact staged tree. It runs the installed hook once and returns the Green
+SHA, committed tree, and opaque validation evidence. No separate full
+validation hook precedes this commit. Readable JUnit
+files yield trusted counts, digests, and complete bounded slow-case lists;
+a successful serial Green hook with a missing or `OSError`-unreadable JUnit
+file yields `timing_status=unknown` and `timing_unknown`, without times.
+A valid readable JUnit file with an overflowing bounded advisory case
+summary also yields timing `UNKNOWN`. Malformed, oversized, or invalid
+present JUnit data blocks review. A failed hook still fails.
+Judge returns its Non-functional Reviewer child receipt. Specialist reviews
+start after the normal Green commit, pending-merge validation, or serial Green
+commit. Serial specialists review the Green SHA and tree. Test Judge checks
+the Red-to-Green Git diff. During
 finalization, Finalizer checks that diff, checkpoint, and validation proof.
 For normal interactive Green work, it invokes
 `agent-work interactive-commit verify` and
@@ -112,11 +115,14 @@ independently observes the exact-source pipeline.
 
 Recovery uses the exact retained checkpoint for the mode. It never rebuilds
 one from prose. No Red checkpoint ref is pushed. Correctness does not depend on
-stored Green, role receipts, or session state. Before Green, restart from
+session summaries or unverified role receipts. Before Green, restart from
 current code, retained Red commits/ref, and the exact issue or MR. An
 actionable finding after interactive Green starts a fresh branch and TDD cycle.
-Never append a correction commit. Serial workers still cannot commit. The trusted controller
-retains its single validated final commit path.
+Never append a correction commit. Serial workers still cannot commit. The
+trusted controller creates each serial Green candidate commit before review;
+after a correction, it creates a new one and invalidates stale receipts.
+Recovery derives the current Red and Green identities from Git and GitLab
+evidence, not a session summary. Publication uses the verified Green SHA.
 
 ## Reconciliation of completed coding work
 
@@ -135,8 +141,8 @@ candidate. While the merge is pending, Judge invokes
 `agent-work validation run --candidate-tree <staged-tree> --apply` for read-only
 validation of the exact staged candidate before specialist review. It does not
 create a Green commit or consume `MERGE_HEAD`. Judge and Finalizer keep
-historical Red-to-source proof apart from
-fresh three-way source-plus-target-to-candidate proof. Main supplies freshly
+historical Red-to-source proof apart from fresh three-way merge proof. Main
+supplies freshly
 fetched exact source and target ref proof before finalization. Finalizer checks
 it and local identities. It makes no remote or GitLab calls. Main invokes
 `agent-work reconcile-commit commit --apply` for the exact Judge-approved

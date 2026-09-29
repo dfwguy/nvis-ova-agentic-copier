@@ -34,11 +34,13 @@ owns only the push and MR update. Content or trivial work keeps its normal
 main-thread commit. **Do not spawn a subagent for the main-thread publication
 steps below.** They are short, local-only, or one remote command.
 
-Judge owns the normal interactive Green commit and its hook under the TDD Judge
-contract. A pending coding merge keeps its staged tree through review. Main's
-trusted two-parent commit runs the hook. Only test-only Red commits use
-`--no-verify`. Finalizer checks the resulting commit without edits. The serial runner keeps its
-ordinary controller commit. Exact-source pipeline checks after push are another
+Judge owns the normal interactive Green commit and its hook. A pending
+coding merge keeps its staged tree through review; Main's trusted two-parent
+commit runs the hook. In serial coding, Judge requests the controller-owned
+candidate commit before review, and the runner publishes that same verified
+Green SHA. Content work keeps its own controller path. Only test-only Red
+commits use `--no-verify`. Finalizer checks the resulting commit without
+edits. Exact-source pipeline checks after push are another
 defense. They never replace Judge.
 
 **A readiness or policy audit is not publication permission.** A Developer may

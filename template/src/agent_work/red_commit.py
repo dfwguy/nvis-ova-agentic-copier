@@ -67,6 +67,7 @@ def create_red_commit(
     candidate_tree: str,
     request: RedCheckpointRequest,
     dependencies: RedCommitDependencies,
+    previous_head: str | None = None,
 ) -> RedCommitProof:
     """Bind only an unchanged accepted test tree to a verified real commit."""
     try:
@@ -82,7 +83,7 @@ def create_red_commit(
 
     head = dependencies.current_head(worktree)
     index = dependencies.current_index_tree(worktree)
-    if head != base_sha:
+    if head != (previous_head or base_sha):
         raise RedCommitError("worker head is not the accepted base")
     if dependencies.changed_paths(base_sha, candidate_tree) != request.test_paths:
         raise RedCommitError("candidate contains paths outside accepted tests")

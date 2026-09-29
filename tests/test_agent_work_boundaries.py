@@ -18,7 +18,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import pytest
 from pydantic import ValidationError
@@ -3982,6 +3982,201 @@ def test_push_prepared_rejects_a_changed_head_without_push(tmp_path: Path) -> No
     assert not any(call[3:4] == ("push",) for call in calls)
 
 
+def test_prepare_reconcile_commit_is_idempotent_and_rejects_dirty_input_before_hook(
+    tmp_path: Path,
+) -> None:
+    """The exact merge commits once; unrelated untracked files stop before commit."""
+    source, target, red, joined, merge = (letter * 40 for letter in "abcde")
+    red_ref = f"refs/agent-work/red-commits/12/{'f' * 40}"
+    green_ref = f"refs/agent-work/green-commits/12/{'f' * 40}/{joined}"
+
+    def repository_for(*, dirty: bool) -> tuple[GitRepository, list[tuple[str, ...]]]:
+        calls: list[tuple[str, ...]] = []
+        committed = False
+
+        def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+            nonlocal committed
+            args = _git_arguments(command)
+            calls.append(args)
+            if args == ("fetch", "origin", "main"):
+                return CommandResult(0, "", "")
+            if args == ("branch", "--show-current"):
+                return CommandResult(0, "agent/issue-12\n", "")
+            if args == ("rev-parse", "origin/main"):
+                return CommandResult(0, target, "")
+            if args == ("rev-parse", "HEAD"):
+                return CommandResult(0, merge if committed else source, "")
+            if args == ("rev-parse", "-q", "--verify", "MERGE_HEAD"):
+                return CommandResult(
+                    1 if committed else 0, "" if committed else target, ""
+                )
+            if args in {("ls-files", "--unmerged"), ("diff", "--name-only")}:
+                return CommandResult(0, "", "")
+            if args == ("write-tree",):
+                return CommandResult(0, joined, "")
+            if args == ("rev-parse", red_ref):
+                return CommandResult(0, red, "")
+            if args == ("rev-parse", green_ref):
+                return CommandResult(0, source, "")
+            if args == ("show", "-s", "--format=%P", source):
+                return CommandResult(0, red, "")
+            if args == ("rev-list", "--parents", "-n", "1", merge):
+                return CommandResult(0, f"{merge} {source} {target}", "")
+            if args == ("show", "-s", "--format=%T", merge):
+                return CommandResult(0, joined, "")
+            if args == ("status", "--porcelain"):
+                return CommandResult(0, "?? unrelated.py\n" if dirty else "", "")
+            if args[:2] == ("commit", "-m"):
+                committed = True
+                return CommandResult(0, "", "")
+            raise AssertionError(f"unexpected Git command: {args}")
+
+        return (
+            GitRepository(
+                _config(tmp_path),
+                fake,
+                service_environment={"GITLAB_TOKEN": "test-token"},
+            ),
+            calls,
+        )
+
+    clean, clean_calls = repository_for(dirty=False)
+    request = (
+        tmp_path / "worktree",
+        "agent/issue-12",
+        source,
+        target,
+        joined,
+        red_ref,
+        green_ref,
+    )
+    assert clean.prepare_reconcile_commit(*request) == merge
+    assert clean.prepare_reconcile_commit(*request) == merge
+    assert sum(args[:1] == ("commit",) for args in clean_calls) == 1
+
+    dirty_repository, dirty_calls = repository_for(dirty=True)
+    with pytest.raises(RepositoryError):
+        dirty_repository.prepare_reconcile_commit(*request)
+    assert not any(args[:1] == ("commit",) for args in dirty_calls)
+
+
+@pytest.mark.parametrize(
+    ("drift", "replaying"),
+    (
+        ("reversed-parents", False),
+        ("wrong-tree", True),
+        ("red-ref", True),
+        ("green-ref", True),
+        ("target-after-commit", False),
+    ),
+)
+def test_prepare_reconcile_commit_rejects_changed_readbacks(
+    tmp_path: Path, drift: str, *, replaying: bool
+) -> None:
+    """Both new and replayed ordered commits retain exact parents, tree, and refs."""
+    source, target, red, joined, merge, wrong = (letter * 40 for letter in "abcdef")
+    red_ref = f"refs/agent-work/red-commits/12/{wrong}"
+    green_ref = f"refs/agent-work/green-commits/12/{wrong}/{joined}"
+    committed = replaying
+    commit_calls = 0
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        nonlocal committed, commit_calls
+        args = _git_arguments(command)
+        if args == ("fetch", "origin", "main"):
+            return CommandResult(0, "", "")
+        if args == ("branch", "--show-current"):
+            return CommandResult(0, "agent/issue-12", "")
+        if args == ("rev-parse", "origin/main"):
+            return CommandResult(
+                0, wrong if drift == "target-after-commit" and committed else target, ""
+            )
+        if args == ("rev-parse", "HEAD"):
+            return CommandResult(0, merge if committed else source, "")
+        if args == ("rev-parse", "-q", "--verify", "MERGE_HEAD"):
+            return CommandResult(1 if committed else 0, "" if committed else target, "")
+        if args in {("ls-files", "--unmerged"), ("diff", "--name-only")}:
+            return CommandResult(0, "", "")
+        if args == ("write-tree",):
+            return CommandResult(0, joined, "")
+        if args == ("status", "--porcelain"):
+            return CommandResult(0, "", "")
+        if args == ("rev-parse", red_ref):
+            return CommandResult(
+                0, wrong if drift == "red-ref" and committed else red, ""
+            )
+        if args == ("rev-parse", green_ref):
+            return CommandResult(
+                0, wrong if drift == "green-ref" and committed else source, ""
+            )
+        if args == ("show", "-s", "--format=%P", source):
+            return CommandResult(0, red, "")
+        if args == ("rev-list", "--parents", "-n", "1", merge):
+            parents = (
+                (target, source) if drift == "reversed-parents" else (source, target)
+            )
+            return CommandResult(0, f"{merge} {' '.join(parents)}", "")
+        if args == ("show", "-s", "--format=%T", merge):
+            return CommandResult(0, wrong if drift == "wrong-tree" else joined, "")
+        if args[:2] == ("commit", "-m"):
+            commit_calls += 1
+            committed = True
+            return CommandResult(0, "", "")
+        raise AssertionError(f"unexpected Git command: {args}")
+
+    repository = GitRepository(
+        _config(tmp_path), fake, service_environment={"GITLAB_TOKEN": "test-token"}
+    )
+    with pytest.raises(RepositoryError):
+        repository.prepare_reconcile_commit(
+            tmp_path / "worktree",
+            "agent/issue-12",
+            source,
+            target,
+            joined,
+            red_ref,
+            green_ref,
+        )
+    assert commit_calls == (0 if replaying else 1)
+
+
+def test_candidate_changed_paths_reads_pending_target_as_review_base(
+    tmp_path: Path,
+) -> None:
+    """A pending target is a valid exact review base despite divergent ancestry."""
+    source, target, joined, target_tree, blob = (letter * 40 for letter in "abcde")
+    path = "src/source_feature.py"
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        args = _git_arguments(command)
+        if args == ("rev-parse", "HEAD"):
+            return CommandResult(0, source, "")
+        if args == ("merge-base", "--is-ancestor", target, "HEAD"):
+            return CommandResult(1, "", "")
+        if args == ("rev-parse", "-q", "--verify", "MERGE_HEAD"):
+            return CommandResult(0, target, "")
+        if args == ("write-tree",):
+            return CommandResult(0, joined, "")
+        if args == ("rev-parse", f"{target}^{{tree}}"):
+            return CommandResult(0, target_tree, "")
+        if args == ("diff", "--name-only", "-z", "--no-renames", target_tree, joined):
+            return CommandResult(0, f"{path}\0", "")
+        if args == ("ls-tree", "-z", target_tree, "--", path):
+            return CommandResult(0, "", "")
+        if args == ("ls-tree", "-z", joined, "--", path):
+            return CommandResult(0, f"100644 blob {blob}\t{path}\0", "")
+        if args == ("cat-file", "-s", blob):
+            return CommandResult(0, "1", "")
+        raise AssertionError(f"unexpected Git command: {args}")
+
+    result = GitRepository(_config(tmp_path), fake).changed_candidate_paths(
+        tmp_path / "worktree", joined, base_sha=target, allow_base_ancestor=True
+    )
+
+    assert result["changed_paths"] == [path]
+    assert result["base_tree"] == target_tree
+
+
 def test_bind_retained_commit_returns_only_the_exact_legacy_commit(
     tmp_path: Path,
 ) -> None:
@@ -5041,6 +5236,79 @@ def test_repository_reconciliation_rejects_dirty_worktree_without_pending_merge(
         ).reconcile_default_branch(tmp_path / "worktree", "agent/issue-12", candidate)
 
 
+def test_reconciliation_second_fetch_drift_does_not_mutate_reviewed_merge(
+    tmp_path: Path,
+) -> None:
+    """A bound two-parent publication cannot begin a second unreviewed merge."""
+    config = _config(tmp_path)
+    reviewed_source, bound_target, advanced_target = (
+        "a" * 40,
+        "b" * 40,
+        "c" * 40,
+    )
+    reviewed_commit = "d" * 40
+    commands: list[tuple[str, ...]] = []
+    mutation: list[tuple[str, ...]] = []
+    retained = {
+        "head": reviewed_commit,
+        "green_ref": reviewed_source,
+        "merge_head": None,
+        "index_tree": "e" * 40,
+        "worktree_tree": "e" * 40,
+    }
+
+    def fake(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        arguments = _git_arguments(command)
+        commands.append(arguments)
+        if arguments and arguments[0] in {
+            "merge",
+            "add",
+            "reset",
+            "checkout",
+            "read-tree",
+            "update-index",
+        }:
+            mutation.append(arguments)
+            retained["merge_head"] = advanced_target
+            retained["index_tree"] = "f" * 40
+            retained["worktree_tree"] = "f" * 40
+        if arguments == ("branch", "--show-current"):
+            return CommandResult(0, "agent/issue-12\n", "")
+        if arguments == ("rev-parse", "HEAD"):
+            return CommandResult(0, f"{retained['head']}\n", "")
+        if arguments == ("rev-parse", "origin/main"):
+            return CommandResult(0, f"{advanced_target}\n", "")
+        if arguments == ("fetch", "origin", "main"):
+            return CommandResult(0, "", "")
+        if arguments == ("rev-parse", "-q", "--verify", "MERGE_HEAD"):
+            return CommandResult(1, "", "")
+        if arguments == ("status", "--porcelain"):
+            return CommandResult(0, "", "")
+        return CommandResult(1, "", "")
+
+    repository = GitRepository(
+        config, fake, service_environment={"GITLAB_TOKEN": "test-token"}
+    )
+    with pytest.raises(RepositoryError, match="target|default|drift"):
+        cast(Any, repository).reconcile_default_branch(
+            tmp_path / "worktree",
+            "agent/issue-12",
+            reviewed_commit,
+            expected_default_sha=bound_target,
+        )
+
+    assert mutation == []
+    assert retained == {
+        "head": reviewed_commit,
+        "green_ref": reviewed_source,
+        "merge_head": None,
+        "index_tree": "e" * 40,
+        "worktree_tree": "e" * 40,
+    }
+    assert ("fetch", "origin", "main") in commands
+    assert ("rev-parse", "HEAD") in commands
+
+
 def test_repository_publication_changed_paths_compares_the_prospective_tree_to_target(
     tmp_path: Path,
 ) -> None:
@@ -5521,18 +5789,29 @@ def test_bind_retained_commit_rebinds_only_an_exact_current_default_merge(
     ("outcome", "reason", "omitted_findings"),
     (
         ("correction_required", "corroborated_regression", 0),
+        ("correction_required", "touched_slow", 0),
+        ("report_only", "corroborated_regression", 0),
         ("report_only", "touched_slow", 2),
         ("report_only", "inherited_variance", 0),
     ),
+)
+@pytest.mark.parametrize(
+    "case_path", ("tests/test_speed.py", "tests/unit/test_speed.py")
 )
 def test_serial_judge_passes_exact_baseline_and_rejects_missing_timing_proof(
     tmp_path: Path,
     outcome: str,
     reason: str,
     omitted_findings: int,
+    case_path: str,
 ) -> None:
     baseline_sha = "a" * 40
     candidate_tree = "b" * 40
+    changed_path = (
+        "src/agent_work/test_timing.py"
+        if outcome == "report_only" and reason == "corroborated_regression"
+        else case_path
+    )
     observed_commands: list[tuple[str, ...]] = []
     report: dict[str, object] = {
         "candidate_tree": candidate_tree,
@@ -5559,7 +5838,7 @@ def test_serial_judge_passes_exact_baseline_and_rejects_missing_timing_proof(
 
         def changed_paths(self, worktree: Path) -> tuple[str, ...]:
             del worktree
-            return ("tests/test_speed.py",)
+            return (changed_path,)
 
         def red_candidate_tree(
             self, worktree: Path, base_sha: str, paths: tuple[str, ...]
@@ -5572,7 +5851,7 @@ def test_serial_judge_passes_exact_baseline_and_rejects_missing_timing_proof(
             tmp_path,
             candidate_tree,
             base_sha=baseline_sha,
-            changed_paths=("tests/test_speed.py",),
+            changed_paths=(changed_path,),
             action="validate",
             timeout_seconds=30,
             timing_review_required=True,
@@ -5586,7 +5865,7 @@ def test_serial_judge_passes_exact_baseline_and_rejects_missing_timing_proof(
         baseline_sha
     )
 
-    class_case = "tests/test_speed.py::TestWidget::test_existing"
+    class_case = f"{case_path}::TestWidget::test_existing"
     hashed_class_case = f"{class_case}[param_{'a' * 64}]"
     report["timing_review"] = {
         "baseline_sha": baseline_sha,
@@ -5609,7 +5888,7 @@ def test_serial_judge_passes_exact_baseline_and_rejects_missing_timing_proof(
         "findings": [
             {
                 "environment": "py311",
-                "name": "tests/test_speed.py::test_existing",
+                "name": f"{case_path}::test_existing",
                 "reason": reason,
                 "phase_deltas": (
                     {"setup": 0.0, "call": 0.8, "teardown": 0.0}
@@ -5653,13 +5932,26 @@ def test_serial_judge_passes_exact_baseline_and_rejects_missing_timing_proof(
         tmp_path,
         candidate_tree,
         base_sha=baseline_sha,
-        changed_paths=("tests/test_speed.py",),
+        changed_paths=(changed_path,),
         action="validate",
         timeout_seconds=30,
         timing_review_required=True,
     )
 
     assert observed["timing_review"] == report["timing_review"]
+    valid_outcome = cast(dict[str, object], report["timing_review"])["outcome"]
+    cast(dict[str, object], report["timing_review"])["outcome"] = "clear"
+    with pytest.raises(RepositoryError, match="timing proof"):
+        ObservedRepository(_config(tmp_path), run).judge_candidate(
+            tmp_path,
+            candidate_tree,
+            base_sha=baseline_sha,
+            changed_paths=(changed_path,),
+            action="validate",
+            timeout_seconds=30,
+            timing_review_required=True,
+        )
+    cast(dict[str, object], report["timing_review"])["outcome"] = valid_outcome
     assert (
         cast(list[dict[str, object]], observed["junit_timings"])[0]["over_100ms_cases"]
         == cast(list[dict[str, object]], report["junit_timings"])[0]["over_100ms_cases"]
@@ -5682,7 +5974,7 @@ def test_serial_judge_passes_exact_baseline_and_rejects_missing_timing_proof(
         tmp_path,
         candidate_tree,
         base_sha=baseline_sha,
-        changed_paths=("tests/test_speed.py",),
+        changed_paths=(changed_path,),
         action="validate",
         timeout_seconds=30,
     )
@@ -5706,3 +5998,97 @@ def test_serial_judge_passes_exact_baseline_and_rejects_missing_timing_proof(
             timeout_seconds=30,
             timing_review_required=True,
         )
+
+
+def test_serial_judge_accepts_complete_candidate_junit_with_unknown_comparison(
+    tmp_path: Path,
+) -> None:
+    """Unavailable baseline comparison cannot erase a valid candidate hook result."""
+    baseline_sha, candidate_tree = "a" * 40, "b" * 40
+    changed_path = "src/agent_work/test_timing.py"
+    case_name = "tests/test_speed.py::test_existing"
+    report: dict[str, object] = {
+        "candidate_tree": candidate_tree,
+        "state": "terminal-success",
+        "exit_code": 0,
+        "failed_tests": [],
+        "failed_junit_digests": [],
+        "timing_status": "complete",
+        "timing_comparison_status": "unknown",
+        "timing_comparison_reason": "baseline_unavailable",
+        "timing_review": None,
+        "junit_artifacts": [
+            {
+                "environment": environment,
+                "path": str(tmp_path / f"test-results-{environment}.xml"),
+                "sha256": "c" * 64,
+                "test_count": 1,
+            }
+            for environment in ("py311", "py314")
+        ],
+        "junit_timings": [
+            {
+                "environment": environment,
+                "total_seconds": 0.2,
+                "slowest_cases": [{"name": case_name, "seconds": 0.2}],
+                "timing_complete": True,
+                "over_100ms_cases": [{"name": case_name, "seconds": 0.2}],
+            }
+            for environment in ("py311", "py314")
+        ],
+    }
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        return CommandResult(
+            0,
+            candidate_tree if command[-1] == "write-tree" else json.dumps(report),
+            "",
+        )
+
+    class ObservedRepository(GitRepository):
+        def head(self, worktree: Path) -> str:
+            del worktree
+            return baseline_sha
+
+        def changed_paths(self, worktree: Path) -> tuple[str, ...]:
+            del worktree
+            return (changed_path,)
+
+        def red_candidate_tree(
+            self, worktree: Path, base_sha: str, paths: tuple[str, ...]
+        ) -> str:
+            del worktree, base_sha, paths
+            return candidate_tree
+
+    repository = ObservedRepository(_config(tmp_path), run)
+
+    def judge() -> dict[str, object]:
+        return repository.judge_candidate(
+            tmp_path,
+            candidate_tree,
+            base_sha=baseline_sha,
+            changed_paths=(changed_path,),
+            action="validate",
+            timeout_seconds=30,
+            timing_review_required=True,
+        )
+
+    observed = judge()
+    assert observed["state"] == "terminal-success"
+    assert observed["timing_status"] == "complete"
+    assert observed["timing_comparison_status"] == "unknown"
+    assert observed["timing_comparison_reason"] == "baseline_unavailable"
+    assert observed["timing_review"] is None
+    assert {
+        item["environment"]
+        for item in cast(list[dict[str, object]], observed["junit_artifacts"])
+    } == {"py311", "py314"}
+    assert len(cast(list[dict[str, object]], observed["junit_timings"])) == 2
+
+    report["timing_comparison_reason"] = "untrusted"
+    with pytest.raises(RepositoryError, match="timing"):
+        judge()
+    report["timing_comparison_reason"] = "baseline_unavailable"
+    report["timing_review"] = {"baseline_sha": "0" * 40}
+    with pytest.raises(RepositoryError, match="timing"):
+        judge()

@@ -32,7 +32,12 @@ from agent_work.ports import CommandResult as PortCommandResult
 from agent_work.repository import CommandResult
 from agent_work.test_timing import parse_full_junit_records
 from agent_work.timing_admission import TimingAdmissionLease
-from agent_work.timing_capture import FocusedTimingCaptureError, TimingCaptureError
+from agent_work.timing_capture import (
+    FocusedTimingCaptureError,
+    TimingCaptureDependencies,
+    TimingCaptureError,
+    capture_serial_timing_review,
+)
 from agent_work.validation import (
     FilesystemJUnitSnapshotStore,
     JudgeValidationDependencies,
@@ -1757,7 +1762,7 @@ def test_success_timing_is_durable_and_status_does_not_rerun_hook() -> None:
     assert calls == [("git", "hook", "run", "pre-commit")]
 
 
-def test_required_source_bound_capture_missing_after_successful_hook_fails_closed() -> (
+def test_required_source_bound_capture_missing_after_successful_hook_is_unknown() -> (
     None
 ):
     state = ValidationStateFake()
@@ -1773,6 +1778,11 @@ def test_required_source_bound_capture_missing_after_successful_hook_fails_close
 
     dependencies = replace(
         dependencies,
+        read_artifact=lambda _path: (
+            b"<testsuite tests='1' failures='0' errors='0'>"
+            b"<testcase classname='tests.test_speed' name='test_existing' time='0.2'/>"
+            b"</testsuite>"
+        ),
         timing_review_required=True,
         expected_baseline_tree=_OTHER_CANDIDATE,
         capture_timing_review=missing_capture,
@@ -1789,8 +1799,19 @@ def test_required_source_bound_capture_missing_after_successful_hook_fails_close
         "py311",
         "py314",
     }
-    assert report.state == "terminal-artifact-failure"
-    assert state.records[_CANDIDATE]["state"] == "terminal-artifact-failure"
+    status = observe_judge_validation(
+        candidate_tree=_CANDIDATE, dependencies=dependencies
+    )
+    assert report.state == status.state == "terminal-success"
+    assert report.timing_status == status.timing_status == "complete"
+    assert getattr(report, "timing_comparison_status", None) == "unknown"
+    assert getattr(status, "timing_comparison_reason", None) == "baseline_unavailable"
+    record = state.records[_CANDIDATE]
+    assert record["timing_comparison_status"] == "unknown"
+    assert record["timing_comparison_reason"] == "baseline_unavailable"
+    assert "timing_transcript_sha256" not in record
+    assert len(report.junit_artifacts) == len(report.junit_timings) == 2
+    assert all(item.timing_complete for item in report.junit_timings)
 
 
 def test_focused_budget_exhaustion_has_distinct_diagnostic_and_keeps_snapshots() -> (
@@ -1899,6 +1920,210 @@ class _FocusedCommandCaptureError(TimingCaptureError):
     code = "focused_timing_command_failed"
 
 
+@pytest.mark.parametrize(
+    "capture_error",
+    (
+        _BaselineHookCaptureError("PRIVATE_TOKEN=secret /private/hook"),
+        OSError("PRIVATE_TOKEN=secret /private/path"),
+    ),
+)
+def test_baseline_capture_failure_preserves_candidate_junit_and_reports_unknown(
+    capture_error: Exception,
+) -> None:
+    state = ValidationStateFake()
+    dependencies, calls = _dependencies(state)
+    junit = (
+        b"<testsuite tests='1' failures='0' errors='0'>"
+        b"<testcase classname='tests.test_speed' name='test_existing' time='0.2'/>"
+        b"</testsuite>"
+    )
+
+    def capture(
+        _tree: str, _artifacts: tuple[tuple[str, bytes, int], ...], _output: str
+    ) -> None:
+        raise capture_error
+
+    dependencies = replace(
+        dependencies,
+        read_artifact=lambda _path: junit,
+        timing_review_required=True,
+        expected_baseline_tree=_OTHER_CANDIDATE,
+        expected_baseline_sha="c" * 40,
+        capture_timing_review=capture,
+    )
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    status = observe_judge_validation(
+        candidate_tree=_CANDIDATE, dependencies=dependencies
+    )
+
+    assert calls == [("git", "hook", "run", "pre-commit")]
+    assert report.state == status.state == "terminal-success"
+    assert report.timing_status == status.timing_status == "complete"
+    assert getattr(report, "timing_comparison_status", None) == "unknown"
+    assert getattr(status, "timing_comparison_reason", None) == "baseline_unavailable"
+    assert {item.environment for item in report.junit_artifacts} == {"py311", "py314"}
+    assert all(
+        item.sha256 == hashlib.sha256(junit).hexdigest()
+        for item in report.junit_artifacts
+    )
+    assert {item.environment for item in report.junit_timings} == {"py311", "py314"}
+    assert all(item.timing_complete for item in report.junit_timings)
+    assert all(item.over_100ms_cases for item in report.junit_timings)
+    record = state.records[_CANDIDATE]
+    assert record["timing_comparison_reason"] == "baseline_unavailable"
+    assert "timing_transcript_sha256" not in record
+    assert "PRIVATE_TOKEN" not in str(record)
+    record["timing_comparison_reason"] = "PRIVATE_TOKEN=forged"
+    with pytest.raises(JudgeValidationError):
+        observe_judge_validation(candidate_tree=_CANDIDATE, dependencies=dependencies)
+
+
+@pytest.mark.parametrize(
+    ("baseline_artifact", "comparison_unknown"),
+    (
+        ("missing", True),
+        ("read_error", True),
+        ("malformed", False),
+        ("oversized", False),
+    ),
+)
+def test_real_baseline_junit_read_preserves_candidate_validation_only_when_unavailable(
+    tmp_path: Path, baseline_artifact: str, comparison_unknown: bool
+) -> None:
+    """Only an absent baseline result makes the paired comparison unknown."""
+    state = ValidationStateFake()
+    dependencies, candidate_hooks = _dependencies(state)
+    candidate_junit = (
+        b"<testsuite tests='1' failures='0' errors='0'>"
+        b"<testcase classname='tests.test_speed' name='test_existing' time='0.2'/>"
+        b"</testsuite>"
+    )
+    baseline_hooks: list[tuple[str, ...]] = []
+    candidate_checkout = tmp_path / "candidate"
+    base_sha, base_tree = "c" * 40, "d" * 40
+
+    def run_baseline(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        cwd = cast(Path, kwargs["current_directory"])
+        if command == ("git", "write-tree"):
+            return CommandResult(
+                0, base_tree if cwd.name == "baseline" else _CANDIDATE, ""
+            )
+        if command == ("git", "rev-parse", f"{base_sha}^{{tree}}"):
+            return CommandResult(0, base_tree, "")
+        if command == ("git", "rev-parse", "HEAD"):
+            return CommandResult(0, base_sha, "")
+        if command == ("git", "rev-parse", "HEAD^{tree}"):
+            return CommandResult(0, base_tree, "")
+        if command[:3] == ("git", "diff", "--name-only"):
+            return CommandResult(0, "src/example.py\n", "")
+        if command[:3] == ("git", "worktree", "add"):
+            Path(command[4]).mkdir()
+            return CommandResult(0, "", "")
+        if command == ("git", "hook", "run", "pre-commit"):
+            baseline_hooks.append(command)
+            if baseline_artifact != "missing":
+                (cwd / "test-results-py311.xml").write_bytes(
+                    b"<testsuite>"
+                    if baseline_artifact == "malformed"
+                    else candidate_junit
+                )
+            (cwd / "test-results-py314.xml").write_bytes(candidate_junit)
+            return CommandResult(0, "", "")
+        if command in {
+            ("git", "diff", "--quiet"),
+            ("git", "ls-files", "--others", "--exclude-standard"),
+            ("git", "status", "--porcelain"),
+        } or command[:3] == ("git", "worktree", "remove"):
+            return CommandResult(0, "", "")
+        raise AssertionError(f"unexpected baseline command: {command}")
+
+    def read_baseline(path: Path) -> bytes:
+        if baseline_artifact == "read_error" and path.name == "test-results-py311.xml":
+            raise OSError("PRIVATE_TOKEN=baseline-read")
+        return path.read_bytes()
+
+    def size_baseline(path: Path) -> int:
+        if baseline_artifact == "oversized" and path.name == "test-results-py311.xml":
+            return 2_000_000
+        return path.stat().st_size
+
+    def write_private(path: Path, data: bytes) -> None:
+        path.write_bytes(data)
+
+    capture_dependencies = TimingCaptureDependencies(
+        run_command=run_baseline,
+        monotonic_clock=lambda: 0.0,
+        candidate_worktree=candidate_checkout,
+        state_root=tmp_path / "timing-state",
+        environment={},
+        atomic_write=write_private,
+        read_bytes=read_baseline,
+        size=size_baseline,
+    )
+    dependencies = replace(
+        dependencies,
+        read_artifact=lambda _path: candidate_junit,
+        timing_review_required=True,
+        expected_baseline_tree=base_tree,
+        expected_baseline_sha=base_sha,
+        capture_timing_review=lambda tree, artifacts, _output: (
+            capture_serial_timing_review(
+                baseline_sha=base_sha,
+                candidate_tree=tree,
+                candidate_artifacts=artifacts,
+                changed_paths=("src/example.py",),
+                dependencies=capture_dependencies,
+            )
+        ),
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    assert candidate_hooks == baseline_hooks == [("git", "hook", "run", "pre-commit")]
+    if comparison_unknown:
+        assert report.state == "terminal-success"
+        assert report.timing_status == "complete"
+        assert report.timing_comparison_status == "unknown"
+        assert report.timing_comparison_reason == "baseline_unavailable"
+        assert len(report.junit_artifacts) == len(report.junit_timings) == 2
+        assert all(item.timing_complete for item in report.junit_timings)
+        assert "timing_transcript_sha256" not in state.records[_CANDIDATE]
+    else:
+        assert report.state == "terminal-artifact-failure"
+        assert report.artifact_failure is not None
+        assert report.artifact_failure.stage == "timing_review"
+        assert report.timing_comparison_status is None
+
+
+def test_present_mismatched_paired_timing_proof_still_blocks_validation() -> None:
+    state = ValidationStateFake()
+    dependencies, calls = _dependencies(state)
+    transcript = _timing_transcript()
+    runs = cast(dict[str, object], transcript["runs"])
+    py311 = cast(dict[str, object], runs["py311"])
+    candidate = cast(dict[str, object], py311["candidate"])
+    candidate["sha256"] = "0" * 64
+    dependencies = replace(
+        dependencies,
+        timing_review_required=True,
+        expected_baseline_tree=_OTHER_CANDIDATE,
+        capture_timing_review=lambda _tree, _artifacts, _output: transcript,
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert calls == [("git", "hook", "run", "pre-commit")]
+    assert report.state == "terminal-artifact-failure"
+    assert report.artifact_failure is not None
+    assert report.artifact_failure.stage == "timing_review"
+    assert getattr(report, "timing_comparison_status", None) != "unknown"
+
+
 def _failed_serial_timing_session(
     capture_error: Exception | None = None,
     snapshot_root: Path = Path("/snapshots"),
@@ -1944,7 +2169,8 @@ def _failed_serial_timing_session(
         expected_baseline_tree=_OTHER_CANDIDATE,
         expected_baseline_sha="c" * 40,
         capture_timing_review=lambda _tree, _artifacts, _output: (_ for _ in ()).throw(
-            capture_error or OSError("PRIVATE_TOKEN=timing-secret /private/path")
+            capture_error
+            or _FocusedCommandCaptureError("PRIVATE_TOKEN=timing-secret /private/path")
         ),
     )
     result = run_judge_validation(
@@ -1958,14 +2184,9 @@ def _failed_serial_timing_session(
     ("capture_error", "expected_code"),
     [
         (
-            _BaselineHookCaptureError("PRIVATE_TOKEN=secret /private/hook"),
-            "baseline_hook_failed",
-        ),
-        (
             _FocusedCommandCaptureError("PRIVATE_TOKEN=secret /private/focused"),
             "focused_timing_command_failed",
         ),
-        (OSError("PRIVATE_TOKEN=secret /private/path"), "capture_failed"),
     ],
 )
 def test_timing_capture_failure_has_safe_code_and_preserves_retry_evidence(
@@ -1999,7 +2220,7 @@ def test_timing_capture_failure_has_safe_code_and_preserves_retry_evidence(
 
 def test_status_rejects_forged_timing_failure_code() -> None:
     state, dependencies, _snapshots, _commands = _failed_serial_timing_session(
-        _BaselineHookCaptureError("PRIVATE_TOKEN=secret /private/hook")
+        _FocusedCommandCaptureError("PRIVATE_TOKEN=secret /private/focused")
     )
     state.records[_CANDIDATE]["timing_failure_code"] = "PRIVATE_TOKEN=/private/path"
 

@@ -58,9 +58,10 @@ class GreenCommitProof:
     junit_timings: tuple[dict[str, object], ...]
 
 
-def green_commit_ref(issue_iid: int, base_sha: str) -> str:
-    """Name the one local Green commit ref for an issue and base."""
-    return f"refs/agent-work/green-commits/{issue_iid}/{base_sha}"
+def green_commit_ref(issue_iid: int, base_sha: str, tree_oid: str = "") -> str:
+    """Name an immutable Green commit ref for one candidate tree."""
+    prefix = f"refs/agent-work/green-commits/{issue_iid}/{base_sha}"
+    return f"{prefix}/{tree_oid}" if tree_oid else prefix
 
 
 def create_green_commit(
@@ -73,6 +74,8 @@ def create_green_commit(
     red_proof: RedCommitProof,
     message: str,
     dependencies: GreenCommitDependencies,
+    previous_head: str | None = None,
+    immutable_ref: bool = False,
 ) -> GreenCommitProof:
     """Commit the exact candidate through one native hook before moving the worker."""
     if (
@@ -127,32 +130,35 @@ def create_green_commit(
     ):
         raise GreenCommitError("candidate changes accepted Red tests")
 
-    ref = green_commit_ref(issue_iid, base_sha)
+    expected_head = previous_head or base_sha
+    if _OID.fullmatch(expected_head) is None:
+        raise GreenCommitError("worker head is invalid")
+    ref = green_commit_ref(issue_iid, base_sha, candidate_tree if immutable_ref else "")
     retained = dependencies.read_ref(ref)
     if retained is not None:
         verify_commit(retained)
         head = dependencies.worker_state(worktree)[1]
-        if head not in {base_sha, retained}:
+        if head not in {expected_head, retained}:
             raise GreenCommitError("worker head differs from retained Green commit")
         verify_worker(head)
         if dependencies.read_ref(red_proof.ref) != red_proof.commit_sha:
             raise GreenCommitError("accepted Red commit ref changed")
-        if head == base_sha and not dependencies.cas_ref(
-            f"refs/heads/{branch}", retained, base_sha
+        if head == expected_head and not dependencies.cas_ref(
+            f"refs/heads/{branch}", retained, expected_head
         ):
             raise GreenCommitError("worker branch changed before Green update")
         timing_status = "unknown"
         timings: tuple[dict[str, object], ...] = ()
         commit = retained
     else:
-        verify_worker(base_sha)
+        verify_worker(expected_head)
         try:
             isolated = dependencies.isolated_commit(
                 red_proof.commit_sha, candidate_tree, message
             )
         except RuntimeError as error:
             raise GreenCommitError("installed hook rejected Green commit") from error
-        verify_worker(base_sha)
+        verify_worker(expected_head)
         commit = isolated.commit_sha
         verify_commit(commit)
         if isolated.timing_status not in {"complete", "unknown"}:
@@ -164,10 +170,10 @@ def create_green_commit(
         if dependencies.read_ref(ref) != commit:
             raise GreenCommitError("Green commit ref readback differs")
         verify_commit(commit)
-        verify_worker(base_sha)
+        verify_worker(expected_head)
         if dependencies.read_ref(red_proof.ref) != red_proof.commit_sha:
             raise GreenCommitError("accepted Red commit ref changed")
-        if not dependencies.cas_ref(f"refs/heads/{branch}", commit, base_sha):
+        if not dependencies.cas_ref(f"refs/heads/{branch}", commit, expected_head):
             raise GreenCommitError("worker branch changed before Green update")
         timing_status = isolated.timing_status
         timings = isolated.junit_timings

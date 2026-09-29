@@ -303,7 +303,12 @@ def review_test_timings(
     focused_runs = 0
 
     def add_finding(finding: TimingFinding, seconds: float) -> None:
-        if seconds >= 1:
+        directly_changed = _changed(finding.name, changed_tests)
+        if seconds > 1 and (
+            finding.reason == "new_slow"
+            or directly_changed
+            and finding.reason in {"corroborated_regression", "touched_slow"}
+        ):
             critical_findings.append(finding)
         else:
             subsecond_findings.append(finding)
@@ -350,44 +355,30 @@ def review_test_timings(
         new_names = [
             name
             for name, seconds in candidate.items()
-            if name not in baseline and seconds > 0.100
+            if name not in baseline and seconds > 1
         ]
         regression_names = [
             name
             for name, seconds in candidate.items()
             if name in baseline
-            and seconds >= 1
-            and (baseline[name] < 1 or seconds > baseline[name])
-            and (
-                _changed(name, changed_tests)
-                or name in affected_by_helper
-                or production_changed
-            )
+            and seconds > 1
+            and (baseline[name] <= 1 or seconds > baseline[name])
+            and _changed(name, changed_tests)
         ]
-        critical_count = sum(
-            1
-            + int(
-                name in baseline
-                and (baseline[name] < 1 or seconds > baseline[name])
-                and (
-                    _changed(name, changed_tests)
-                    or name in affected_by_helper
-                    or production_changed
-                )
-            )
-            for name, seconds in candidate.items()
-            if seconds >= 1
-        )
-        if len(critical_findings) + critical_count > _MAX_FINDINGS:
-            raise FindingBudgetExhausted("finding budget exhausted")
+        new_focus_capacity = (_MAX_FOCUSED_RUNS - focused_runs) * _MAX_FOCUSED_CASES
         focused_batches(
-            new_names,
+            new_names[:new_focus_capacity],
             source_tree=candidate_tree,
             environment=environment,
             prepared=prepared,
             argv=argv,
             seed=seed,
         )
+        regression_focus_capacity = (
+            (_MAX_FOCUSED_RUNS - focused_runs) // 4 * _MAX_FOCUSED_CASES
+        )
+        regression_names = regression_names[:regression_focus_capacity]
+        focused_names = set(regression_names)
         baseline_repeats = [
             focused_batches(
                 regression_names,
@@ -415,20 +406,16 @@ def review_test_timings(
             directly_affected = (
                 _changed(name, changed_tests) or name in affected_by_helper
             )
-            touched = (
-                directly_affected
-                or production_changed
-                and original is not None
-                and seconds >= 1
-                and (original < 1 or seconds > original)
-            )
+            touched = directly_affected
             if original is None and seconds > 0.100:
-                add_finding(TimingFinding(environment, name, "new_slow"), seconds)
+                reason = "new_slow" if seconds > 1 else "new_advisory"
+                add_finding(TimingFinding(environment, name, reason), seconds)
             elif (
                 original is not None
-                and seconds >= 1
-                and (original < 1 or seconds > original)
+                and seconds > 1
+                and (original <= 1 or seconds > original)
                 and touched
+                and name in focused_names
             ):
                 paired_totals = tuple(
                     (
@@ -440,10 +427,10 @@ def review_test_timings(
                     )
                 )
                 corroborated = all(
-                    (original >= 1 or prior < 1)
-                    and current >= 1
+                    (original > 1 or prior <= 1)
+                    and current > 1
                     and current > prior
-                    and (directly_affected or original < 1 or current - prior > 0.100)
+                    and (directly_affected or original <= 1 or current - prior > 0.100)
                     for prior, current in paired_totals
                 )
                 deltas = {
@@ -460,7 +447,7 @@ def review_test_timings(
                 inherited_variance = (
                     corroborated
                     and not directly_affected
-                    and original >= 1
+                    and original > 1
                     and seconds - original < 1
                     and focused_increase < 1
                 )
@@ -482,24 +469,17 @@ def review_test_timings(
                 add_finding(TimingFinding(environment, name, "touched_slow"), seconds)
             elif touched and seconds > 0.100:
                 add_finding(TimingFinding(environment, name, "touched_slow"), seconds)
-            elif original is not None and seconds >= 1:
+            elif original is not None and seconds > 1:
                 add_finding(TimingFinding(environment, name, "inherited_slow"), seconds)
+    if len(critical_findings) > _MAX_FINDINGS:
+        raise FindingBudgetExhausted("finding budget exhausted")
     findings = (
         critical_findings + subsecond_findings[: _MAX_FINDINGS - len(critical_findings)]
     )
     omitted_findings = len(subsecond_findings) - (
         len(findings) - len(critical_findings)
     )
-    retained_correction = any(
-        item.reason in {"new_slow", "corroborated_regression"} for item in findings
-    )
-    omitted_correction = any(
-        item.reason in {"new_slow", "corroborated_regression"}
-        for item in subsecond_findings[len(findings) - len(critical_findings) :]
-    )
-    if omitted_correction and not retained_correction:
-        raise FindingBudgetExhausted("finding budget exhausted")
-    if retained_correction or omitted_correction:
+    if critical_findings:
         outcome = "correction_required"
     elif findings:
         outcome = "report_only"

@@ -65,55 +65,44 @@ is a distinct case. A session fixture can charge setup to its first case.
 List every case above 100 ms. Report every case at or above **1 second**
 by Python version, even when another finding needs a fix. Keep its proof,
 classification, owner, and plan to cut cost or review an exception in the
-durable audit or linked issue record. An inherited case that is no slower
-does not block an unrelated change on cost alone.
+durable audit or linked issue record. A slow unchanged case stays report-only
+under the ordinary gate.
 
-For complete serial timing, the controller checks baseline and candidate
-proof for Python 3.11 and 3.14. It binds each full run to its source tree.
-It checks case lists, environments, commands, and seeds. Missing or
-mismatched readable proof stops review. A successful hook with a missing or
-`OSError`-unreadable fixed JUnit file reports timing `UNKNOWN`. Review
-continues without a timing pass, times, or counts. With complete timing, the
-reviewer gets bounded identities, findings, an outcome, and the full candidate
-list above 100 ms. The three slowest cases are not a complete list. A touched
-case above 100 ms is report-only unless repeats corroborate a regression.
-New slow cases and corroborated regressions need correction unless an
-approved integration exception applies. Affected existing cases are changed
-tests or cases explicitly mapped as consumers of changed fixtures in
-`tests/**/conftest.py`. An affected existing case gets two focused repeats
-on each exact tree when its candidate time is at least 1 second. Its baseline
-must be below 1 second, or its candidate time must exceed the baseline. The
-`corroborated_regression` or `uncorroborated_spike` finding reports setup,
-call, and teardown changes. A changed `.py` file not in either `tests/` or
-`template/tests/` also marks each case meeting this rule as potentially affected.
-Unaffected existing cases stay in the full candidate
-inventory. Those at or above 1 second get an `inherited_slow` report-only
-finding; subsecond cases get no individual finding. Neither group gets
-focused repeats or automatic correction.
-Missing repeat proof blocks a decision that needs it.
+### Serial Green commit timing
 
-When only production code changes, an existing slow case may vary by less
-than 1 second. Paired runs can report this as `inherited_variance`. The
-reviewer checks for a causal link. Unrelated variance does not block work.
-A case newly above 1 second, a rise of at least 1 second, or a changed test
-still needs correction and exact timing proof.
+For ordinary serial coding, the trusted controller makes the Green commit with
+its installed hook. It reads the fixed JUnit files for Python 3.11 and 3.14.
+With valid candidate files, a new or modified case strictly above 1.000
+seconds blocks the handoff. A case at exactly 1.000 seconds passes this rule.
+Classify cases from the accepted Red checkpoint and Red-to-Green diff. An
+unchanged case stays report-only under this gate, even when changed production
+code, shared fixtures, or helpers may affect its time. Report its time and
+possible cause. A valid paired comparison can show a signed time change, but
+it does not add an ordinary hard gate.
 
-For an existing touched case that stays above 100 ms and below 1 second, the
-controller uses the complete baseline and candidate JUnit inventories to mark
-it `touched_slow`. This finding alone does not require correction. A changed
-test file can mark many cases this way without using focused runs. New cases
-above 100 ms get one candidate focused check.
-The controller groups up to 32 cases per
-focused invocation within each Python version. It allows at most 32 focused
-invocations and 900 seconds for the review. The worker receives up to 128
-timing findings and an `omitted_findings` count. Every candidate finding at
-or above 1 second is retained before subsecond findings. More than 128 such
-findings fail validation closed. The stable artifact reason is
-`finding_budget_exhausted`. Validation retains the full-suite JUnit snapshots.
-The private proof keeps the full case inventories. The worker reviews omitted
-subsecond cases in the complete candidate list. An exhausted invocation or
-time budget stops timing review with the stable reason
-`focused_budget_exhausted`.
+Cases above 100 ms are suggestions. Record an owner and follow-up work without
+blocking the main workflow on that target alone. A missing or
+`OSError`-unreadable fixed JUnit file makes timing `UNKNOWN`, with no timing
+pass or case durations. A present malformed or oversized JUnit file needs
+repair. A valid file whose advisory case list exceeds the bounded response
+also yields `UNKNOWN`, without a timing pass.
+
+A paired baseline or focused comparison helps assign cause. If it is absent
+but candidate JUnit is valid, the comparison is `UNKNOWN` and does not block
+by itself. Present malformed or mismatched paired proof needs repair. An
+unknown comparison never waives the candidate JUnit gate above. A controlled
+task-specific budget still applies to its own scope.
+
+### Paired staged-tree diagnosis
+
+The older `validation run --serial-timing` route can compare baseline and
+candidate trees and repeat selected cases. A pending target merge also uses
+`candidate validate` or `candidate status` on its joined staged tree. These
+paired results help diagnose cost and ownership. They must not turn the
+100 ms suggestion into a publication gate. The
+[candidate command reference](serial-gitlab-agent-loop.md#candidate-stage-commit-read-validate-and-status)
+describes the staged-tree fields, timing budgets, and saved status. A changed
+joined tree needs fresh validation and review against its exact target.
 
 For interactive work, read the fixed full candidate JUnit files for both
 supported Python versions after a successful hook. If a fixed file is missing

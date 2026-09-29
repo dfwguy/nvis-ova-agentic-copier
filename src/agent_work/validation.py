@@ -363,6 +363,8 @@ class _Record(BaseModel):
     junit_timings: tuple[_PersistedJUnitTiming, ...] = Field(default=(), max_length=2)
     timing_status: Literal["complete", "unknown"] | None = None
     timing_unknown: dict[str, str] | None = None
+    timing_comparison_status: Literal["unknown"] | None = None
+    timing_comparison_reason: Literal["baseline_unavailable"] | None = None
     artifact_failure: _PersistedArtifactFailure | None = None
     requested_baseline_tree: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
     requested_baseline_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
@@ -396,6 +398,23 @@ class _Record(BaseModel):
             self.timing_status == "complete" and self.state != "terminal-success"
         ):
             raise ValueError("invalid timing status")
+        if self.timing_comparison_status == "unknown":
+            if (
+                self.timing_comparison_reason != "baseline_unavailable"
+                or self.state != "terminal-success"
+                or self.returncode != 0
+                or self.timing_status != "complete"
+                or self.timing_unknown is not None
+                or not _valid_junit_artifacts(self.candidate_tree, self.junit_artifacts)
+                or tuple(item.environment for item in self.junit_timings)
+                != ("py311", "py314")
+                or not all(item.timing_complete for item in self.junit_timings)
+                or self.timing_baseline_tree is not None
+                or self.timing_transcript_sha256 is not None
+            ):
+                raise ValueError("invalid timing comparison evidence")
+        elif self.timing_comparison_reason is not None:
+            raise ValueError("invalid timing comparison evidence")
         terminal = self.state in {
             "terminal-success",
             "terminal-failure",
@@ -555,6 +574,8 @@ class JudgeValidationReport:
     timing_failure_code: str | None = None
     timing_status: Literal["complete", "unknown"] | None = None
     timing_unknown: dict[str, str] | None = None
+    timing_comparison_status: Literal["unknown"] | None = None
+    timing_comparison_reason: Literal["baseline_unavailable"] | None = None
 
     @property
     def exit_code(self) -> int | None:
@@ -944,6 +965,21 @@ def _junit_timing_summary(
     )
 
 
+def _candidate_timing_summaries(
+    captured: tuple[tuple[str, bytes, int], ...], *, serial: bool
+) -> tuple[_PersistedJUnitTiming, ...]:
+    return tuple(
+        summary
+        for environment, artifact, _count in captured
+        if (
+            summary := _junit_timing_summary(
+                cast(Literal["py311", "py314"], environment), artifact, serial=serial
+            )
+        )
+        is not None
+    )
+
+
 def _junit_summaries(read_artifact: Callable[[Path], bytes | None]) -> tuple[str, ...]:
     """Read each fixed artifact once and return safe aggregate summaries."""
     summaries: list[str] = []
@@ -1216,6 +1252,8 @@ def _report(
         record.timing_failure_code,
         record.timing_status,
         record.timing_unknown,
+        record.timing_comparison_status,
+        record.timing_comparison_reason,
     )
 
 
@@ -1702,6 +1740,10 @@ def run_judge_validation(
             )
         timing_baseline_tree: str | None = None
         timing_transcript_sha256: str | None = None
+        comparison_unknown = False
+        summaries = _candidate_timing_summaries(
+            tuple(captured), serial=dependencies.timing_review_required
+        )
         if dependencies.timing_review_required:
             timing_baseline_tree = dependencies.expected_baseline_tree
             try:
@@ -1714,14 +1756,19 @@ def run_judge_validation(
                 transcript = dependencies.capture_timing_review(
                     candidate_tree, tuple(captured), result.stdout
                 )
-                timing_transcript_sha256 = _timing_transcript_digest(
-                    transcript,
-                    baseline_tree=timing_baseline_tree,
-                    candidate_tree=candidate_tree,
-                    baseline_sha=dependencies.expected_baseline_sha,
-                )
-                if not _timing_artifacts_match(transcript, persisted):
-                    raise JudgeValidationError("timing transcript JUnit pair differs")
+                if transcript is None:
+                    comparison_unknown = True
+                else:
+                    timing_transcript_sha256 = _timing_transcript_digest(
+                        transcript,
+                        baseline_tree=timing_baseline_tree,
+                        candidate_tree=candidate_tree,
+                        baseline_sha=dependencies.expected_baseline_sha,
+                    )
+                    if not _timing_artifacts_match(transcript, persisted):
+                        raise JudgeValidationError(
+                            "timing transcript JUnit pair differs"
+                        )
             except (
                 JudgeValidationError,
                 OSError,
@@ -1729,25 +1776,48 @@ def run_judge_validation(
                 TypeError,
                 RuntimeError,
             ) as error:
-                return _write_terminal(
-                    candidate_tree,
-                    _artifact_failure_record(
+                if isinstance(error, OSError) or (
+                    isinstance(error, TimingCaptureError)
+                    and error.code == "baseline_hook_failed"
+                ):
+                    comparison_unknown = True
+                else:
+                    return _write_terminal(
                         candidate_tree,
-                        result.returncode,
-                        elapsed,
-                        stage="timing_review",
-                        reason=(
-                            "finding_budget_exhausted"
-                            if isinstance(error, FindingBudgetCaptureError)
-                            else "focused_budget_exhausted"
-                            if isinstance(error, FocusedTimingCaptureError)
-                            else "invalid_timing"
+                        _artifact_failure_record(
+                            candidate_tree,
+                            result.returncode,
+                            elapsed,
+                            stage="timing_review",
+                            reason=(
+                                "finding_budget_exhausted"
+                                if isinstance(error, FindingBudgetCaptureError)
+                                else "focused_budget_exhausted"
+                                if isinstance(error, FocusedTimingCaptureError)
+                                else "invalid_timing"
+                            ),
+                            junit_artifacts=persisted,
+                            timing_failure_code=_timing_failure_code(error),
                         ),
-                        junit_artifacts=persisted,
-                        timing_failure_code=_timing_failure_code(error),
-                    ),
-                    dependencies,
-                )
+                        dependencies,
+                    )
+            if comparison_unknown:
+                if len(summaries) != 2 or not all(
+                    summary.timing_complete for summary in summaries
+                ):
+                    return _write_terminal(
+                        candidate_tree,
+                        _artifact_failure_record(
+                            candidate_tree,
+                            result.returncode,
+                            elapsed,
+                            stage="timing_review",
+                            reason="invalid_timing",
+                            junit_artifacts=persisted,
+                        ),
+                        dependencies,
+                    )
+                timing_baseline_tree = None
         return _write_terminal(
             candidate_tree,
             _Record(
@@ -1759,17 +1829,11 @@ def run_judge_validation(
                 elapsed_seconds=elapsed,
                 timing_baseline_tree=timing_baseline_tree,
                 timing_transcript_sha256=timing_transcript_sha256,
-                junit_timings=tuple(
-                    summary
-                    for environment, artifact, _count in captured
-                    if (
-                        summary := _junit_timing_summary(
-                            cast(Literal["py311", "py314"], environment),
-                            artifact,
-                            serial=dependencies.timing_review_required,
-                        )
-                    )
-                    is not None
+                junit_timings=summaries,
+                timing_status="complete" if comparison_unknown else None,
+                timing_comparison_status="unknown" if comparison_unknown else None,
+                timing_comparison_reason=(
+                    "baseline_unavailable" if comparison_unknown else None
                 ),
             ),
             dependencies,
@@ -2117,6 +2181,7 @@ def _verify_required_timing(
         record.requested_baseline_tree is not None
         or record.requested_baseline_sha is not None
         or record.timing_transcript_sha256 is not None
+        or record.timing_comparison_status is not None
     ) and not dependencies.timing_review_required:
         raise JudgeValidationError("required timing baseline was omitted")
     if not dependencies.timing_review_required:
@@ -2126,7 +2191,10 @@ def _verify_required_timing(
     if record.requested_baseline_sha != dependencies.expected_baseline_sha:
         raise JudgeValidationError("required timing baseline commit changed")
     if record.state == "terminal-success":
-        if record.timing_status == "unknown":
+        if (
+            record.timing_status == "unknown"
+            or record.timing_comparison_status == "unknown"
+        ):
             return
         baseline_tree = dependencies.expected_baseline_tree
         transcript = dependencies.read_timing_transcript(candidate_tree)

@@ -26,20 +26,22 @@ Use this skill's `metadata.model-tier`. The live Architect router maps it to a
 model. Each frontend uses its own configured map. Do not name a provider model
 in this skill.
 
-The TDD Judge delegates this review after the validation session's one hook
+The TDD Judge delegates this review after the Green commit's one hook
 run. In interactive work, use the exact staged tree and its available immutable
 candidate JUnit snapshots, digests, and counts. A new or modified test strictly
 above 1.000 seconds is the ordinary hard block; exactly 1.000 is allowed.
 Send 0.100-second suggestions to a separate follow-up. Absent paired proof
 makes baseline regression `UNKNOWN` without waiving the full-JUnit gate;
 malformed or mismatched present proof is invalid. Controlled task-specific
-hard budgets still apply. In serial work, require the
-available Python 3.11 and 3.14 baseline and candidate timing proof bound to exact source
-trees. Use only controller-owned source/run digests, counts, completeness,
-candidate slow-case data, findings, and transcript outcome. The controller
-keeps full inventories and exact-source repeats private. If the hook passes
-but a fixed JUnit file is missing or raises `OSError`, set timing to `UNKNOWN`
-and keep reviewing. Do not claim a timing pass. Reject other missing, partial, or mismatched
-serial proof. Never request controller-private snapshot paths or treat
+hard budgets still apply. In serial work, require the available Python 3.11
+and 3.14 Green hook JUnit digests, counts, and complete bounded case list
+above 0.100 seconds. Bind them to the Green SHA and tree. If the serial Green
+hook passes but a JUnit file is missing or `OSError`-unreadable, use timing
+`UNKNOWN` and keep reviewing without a timing pass. A valid readable JUnit
+file with an overflowing bounded advisory case summary also has timing
+`UNKNOWN`. Malformed, oversized, or invalid present JUnit data blocks review.
+A failed hook or mismatched commit
+identity proof still fails. The legacy staged-tree route still rejects
+malformed proof. Never request controller-private snapshot paths or treat
 model prose as validation evidence. Return the timing receipt to the Judge,
 never to specialist review.

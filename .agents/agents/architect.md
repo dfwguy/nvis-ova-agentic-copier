@@ -137,37 +137,41 @@ returns its tree OID. In serial work, Green asks the controller-owned
 `candidate_boundary.py` staging/read boundary while live. Model path lists
 cannot authorize staging. Restage after every correction.
 
-In interactive work, Green runs only the repair checks listed in its role.
-After either mode stages the combined candidate, the trusted path runs license
-preflight, then one shared read-only cheap gate on that exact staged tree, then
-the installed full hook.
-It checks YAML, Bash, Markdown readability, types, secrets, and Ruff check and
-format with caching disabled. Failure or tree drift stops the costly hook;
-passing the cheap gate never replaces the full hook. Judge owns the sole
-normal interactive Green commit and installed hook under its role contract.
-All later specialists are read-only. In serial work,
-`validation.py` owns exact tree and JUnit proof. The worker uses the trusted
-validation/status boundary and does not run the hook, full suite, or old
-validation CLI itself. Non-functional Review owns the full case list and
-timing proof. In interactive work, a new or modified test strictly above
-1.000 seconds is the ordinary hard block; exactly 1.000 is allowed. For that
-route, the 0.100-second target is an advisory follow-up. Missing paired proof leaves
-baseline regression `UNKNOWN` and does not waive the full-JUnit gate. It
-judges exceptions and causes. Its receipt retains complete evidence;
+In normal interactive Green work, Green runs only the repair checks listed in
+its role. After staging the combined candidate, Judge uses the trusted
+license preflight, read-only cheap gate, and installed hook through the Green
+commit boundary. Serial Judge requests the controller-owned `candidate commit`
+for the exact staged tree. That transaction runs the installed hook once and
+returns the Green SHA, committed tree, and validation proof before specialists
+start. There is no separate serial full-validation hook before that commit.
+The worker never runs the hook, full suite, or old validation CLI itself.
+Serial specialists are read-only and review the same Green SHA and tree.
+Non-functional Review owns the full case list and timing proof. In interactive
+and serial coding, a new or modified test strictly above 1.000 seconds is the
+ordinary hard block; exactly 1.000 is allowed. The 0.100-second target is an
+advisory follow-up. Missing paired proof leaves baseline regression `UNKNOWN`
+and does not waive the full-JUnit gate. It judges exceptions and causes. Its
+receipt retains complete evidence;
 Architect routes its findings without inventing a timing pass.
 
-For serial work, the controller supplies `timing_review` bound to the baseline
-SHA and tree and candidate tree. Its handoff includes transcript digest and
-outcome, Python 3.11 and 3.14 baseline and candidate run digests, counts,
-`timing_complete` flags, bounded findings, and phase deltas. Candidate
-`junit_timings` includes the complete bounded `over_100ms_cases` list. Judge
-passes that trusted proof to Non-functional Review. A successful hook with a
-missing or `OSError`-unreadable fixed JUnit file has timing `UNKNOWN`; review
-continues without a timing pass. Other missing or mismatched proof returns to
-its owner; model prose cannot establish a timing pass.
+For serial work, the controller supplies `junit_timings` from the native Green
+hook, bound to the Green SHA and tree. Each readable Python 3.11 and 3.14
+result has a JUnit digest, count, and complete bounded `over_100ms_cases`
+list. Judge passes that trusted proof to Non-functional Review. Baseline
+relative regression remains `UNKNOWN` and does not block this route. A
+successful hook with a missing or `OSError`-unreadable JUnit file has timing
+`UNKNOWN`; review continues without a timing pass. A valid readable JUnit
+file with an overflowing bounded advisory case summary also has timing
+`UNKNOWN`. Malformed, oversized, or invalid present JUnit data blocks review.
+A failed hook still fails. Missing or
+mismatched commit identity proof returns to its owner; model prose cannot
+establish a timing pass. The legacy staged-tree route keeps its malformed
+proof rejection.
 
-Green starts read-only reviews only after Judge and Non-functional Review
-pass the same tree. Required reviewers are
+Green starts read-only reviews only after Judge and Non-functional Review pass
+the same Green SHA and tree in serial work, the same Green tree in normal
+interactive work, or the same validated staged tree in a pending coding merge.
+Required reviewers are
 `$diataxis-judge`, `$judge-quality`, `$judge-test`, `$judge-cicd`,
 `$tdd-document`, and `$license-checker`. Use `$cli-syntax-judge` for CLI changes. Use `$filesystem-structure-judge`
 for Python or Bash layout and packaging. Use `$agent-policy-judge` for agent
@@ -185,21 +189,24 @@ top-level receipt tuple; keep conditional review evidence inside the existing
 Finalizer receipt and durable audit.
 
 The first Quality Judge review is complete and independent on the exact tree.
-A focused rerun needs Architect approval. It also needs old and new tree
-OIDs, the prior full receipt, stable finding IDs, a repair log, and exact
+A focused rerun needs Architect approval. In serial work it also needs old
+and new Green SHAs and tree OIDs, the prior full receipt, stable finding IDs,
+a repair log, and exact
 changed paths. `$judge-quality` owns fresh-scope and widening checks;
 missing provenance is not a code finding. Test Judge checks the ordinary
 Red-to-Green Git diff against the retained checkpoint. Read-only reviewers
 never mutate or fail fast because a peer rejects. Wait for all results.
 
-An actionable finding after interactive Green starts a fresh branch and TDD
+An actionable finding after normal interactive Green starts a fresh branch and TDD
 cycle; do not append a correction commit. In serial work, Green gathers all
 findings. It fixes only approved code and tests. Send doc
 findings to Diátaxis Writer through Architect. Send policy findings to Policy
-Writer the same way. Each new tree needs fresh Judge and Non-functional
-Review. Rerun a reviewer if its finding, scope, or proof changed. Rerun
-License Checker after maintained files change. Green owns the serial
-correction ledger and its stable fingerprints. Continue only
+Writer the same way. A correction after a serial Green commit requires a new
+candidate commit and fresh Judge and Non-functional Review. The new Green SHA
+and tree invalidate older specialist receipts. Rerun all applicable reviewers
+for the new commit; a focused Quality Judge review still needs its stated
+provenance. Green owns the serial correction ledger and its stable
+fingerprints. Continue only
 while a correction closes a finding or materially changes related evidence.
 Stop if a finding repeats or reopens unchanged. Stop if proof stays the
 same, no approved fix exists, scope grows, or a real human choice remains. Do not
@@ -211,10 +218,11 @@ For normal interactive Green work it invokes
 `agent-work interactive-commit verify` and
 checks the retained Red history, Green commit, and clean state without
 mutation. Main publishes only that verified tip; the Red ref is never pushed.
-Serial Finalizer never commits;
-the trusted controller owns its single
-validated final commit. Do not depend on server-side squash. `$git-flow` owns
-push, MR readback, and exact-source pipeline handoff.
+Serial Finalizer never commits. It verifies the controller-owned Green commit,
+its exact tree, retained Red checkpoint, clean state, and current receipts.
+The controller publishes that verified Green SHA without another commit. Do
+not depend on server-side squash. `$git-flow` owns push, MR readback, and
+exact-source pipeline handoff.
 
 ## Content route
 

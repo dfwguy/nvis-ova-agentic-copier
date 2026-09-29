@@ -32,10 +32,11 @@ check the index against that OID without writing a Git object. Check for
 unstaged or untracked maintained files. The paths and diff must fit that base
 and tree. Reject a lost or wrong identity before review.
 
-For serial review, get the live controller-owned `candidate read` snapshot
-after candidate staging and, for coding, after Judge validation. Require its
-immutable current issue and session, base commit/tree, candidate tree OID,
-and controller-bound canonical changed-path inventory, including each path's
+For serial review, get a live `candidate read` snapshot from the controller.
+For coding, get it after Judge approves the Green commit. Check its issue,
+session, base commit and tree, and candidate tree OID. For coding, also check
+`commit_sha` and `committed_tree`. The committed tree must match the candidate
+tree. Require the controller's changed-path list, including each path's
 old/new mode, blob ID, and size. For every changed path, account for both old
 and new sides: confirm explicit absence where a side does not exist, and read
 the full content of every present side. Use independent, controller-authorized
@@ -53,6 +54,8 @@ each present side. Git evidence proves returned bytes and tree identity;
 delivery alone does not prove comprehension. Read through the trusted
 boundary within its deadline; worker prose and an unverified broker response
 do not prove content.
+For coding, match the read commit to Judge's verified commit response.
+Content and remediation reads remain tree-bound.
 Check the snapshot identity before review and again before the verdict. Reject
 a missing, failed, rejected, or stale expected read. After any correction,
 require a new stage/read and review of its new tree. Restaging voids prior

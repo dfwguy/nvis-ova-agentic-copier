@@ -30,7 +30,8 @@ Do not duplicate the production review.
 Require the accepted mode-specific Red identity and the ordinary Git diff from
 that checkpoint to the Green candidate. For interactive work, use Main's commit
 SHA, approved test paths, and durable local ref. For serial work, use the
-trusted tree checkpoint report. Verify that the checkpoint paths match the
+trusted tree checkpoint report and controller-owned Green SHA/tree. Verify
+that the checkpoint paths match the
 accepted Red test paths. Use the diff to distinguish the checkpointed failing
 tests from later Green production and allowed test repairs. Missing, mismatched,
 or replaced checkpoint evidence is a Major provenance defect.
