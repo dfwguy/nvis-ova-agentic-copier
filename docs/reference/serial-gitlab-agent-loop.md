@@ -1787,6 +1787,12 @@ exact `loop retry` plan for that IID. Its preview must pass the shared recovery
 checks and the `safely_retryable` inventory gate before the command resets the
 automatic retry budget.
 
+| Protocol retry evidence | Handling |
+| --- | --- |
+| Retained attempt | The condition history records the bounded origin and reason, its attempt number, and the controller-observed completion time. It does not retain worker output or other untrusted text. |
+| Eligible replay | A due retry reuses only a clean retained checkout, or the exact retained Red checkpoint when its tests and tree still match. |
+| Unsafe retained checkout | A dirty checkout without exact Red-only proof, or a changed or unclear checkout, blocks the item and preserves its checkout. Use reviewed recovery; automatic replay does not modify it. |
+
 Automatic exact-pipeline repair has its own budget: at most three repair
 workflows for one exact retained owner. After each failed attempt, the ledger
 records `automatic_repair_count` and a 20-minute `automatic_repair_at` deadline.
