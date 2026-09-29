@@ -261,7 +261,7 @@ def check_candidate_gate(
     environment: Mapping[str, str] | None = None,
 ) -> CommandResult:
     """Wire the real isolated snapshot for a source repository."""
-    return run_candidate_gate(
+    result = run_candidate_gate(
         candidate_tree,
         candidate_snapshot=lambda tree: candidate_snapshot(
             tree, source, run_command, environment
@@ -270,3 +270,25 @@ def check_candidate_gate(
         run_command=run_command,
         environment=_environment(environment, source),
     )
+    if result.returncode:
+        return result
+    try:
+        source = source.resolve()
+        hook_path = Path(
+            _checked(
+                ("git", "rev-parse", "--git-path", "hooks/pre-commit"),
+                source,
+                run_command,
+                environment,
+            )
+        )
+        if not hook_path.is_absolute():
+            hook_path = source / hook_path
+        hook_ready = hook_path.is_file() and os.access(hook_path, os.X_OK)
+    except (OSError, RuntimeError):
+        hook_ready = False
+    if current_staged_tree() != candidate_tree:
+        return CommandResult(2, "", "candidate tree changed during cheap gate")
+    if not hook_ready:
+        return CommandResult(2, "", "pre-commit-hook failed")
+    return result

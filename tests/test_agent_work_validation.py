@@ -25,6 +25,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from agent_work import validation
+from agent_work.cheap_gate import check_candidate_gate
 from agent_work.cli import _read_validation_artifact
 from agent_work.ledger import state_home
 from agent_work.ports import CommandResult as PortCommandResult
@@ -345,6 +346,115 @@ def test_judge_missing_gate_fails_closed_before_record_junit_or_hook() -> None:
     assert state.writes == []
     assert removed == []
     assert hooks == []
+
+
+@pytest.mark.parametrize("initial_hook", ("missing", "not-executable"))
+def test_hook_preflight_allows_same_tree_retry_after_install(
+    initial_hook: str, tmp_path: Path
+) -> None:
+    state = ValidationStateFake()
+    dependencies, _ = _dependencies(state)
+    source = tmp_path / "source"
+    (source / ".git" / "objects").mkdir(parents=True)
+    hook_path = source / "configured-hooks" / "pre-commit"
+    hook_path.parent.mkdir()
+    if initial_hook == "not-executable":
+        hook_path.write_text("#!/bin/sh\nexit 0\n")
+        hook_path.chmod(0o644)
+
+    cheap_check_fails = [True]
+    cheap_commands: list[tuple[str, ...]] = []
+    hook_lookups: list[tuple[str, ...]] = []
+    hook_runs: list[tuple[str, ...]] = []
+    removed: list[Path] = []
+
+    def run(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        directory = kwargs.get("current_directory")
+        if command == ("git", "rev-parse", "HEAD"):
+            assert directory == source
+            return CommandResult(0, _OTHER_CANDIDATE, "")
+        if command == ("git", "rev-parse", "--git-common-dir"):
+            assert directory == source
+            return CommandResult(0, ".git", "")
+        if command == ("git", "rev-parse", "--git-path", "hooks/pre-commit"):
+            assert directory == source
+            hook_lookups.append(command)
+            return CommandResult(0, "configured-hooks/pre-commit\n", "")
+        if command == ("git", "init", "--quiet"):
+            assert isinstance(directory, Path)
+            (directory / ".git").mkdir()
+            return CommandResult(0, "", "")
+        if command == ("git", "write-tree"):
+            assert isinstance(directory, Path) and directory != source
+            return CommandResult(0, _CANDIDATE, "")
+        if command == ("git", "update-ref", "HEAD", _OTHER_CANDIDATE):
+            assert isinstance(directory, Path) and directory != source
+            return CommandResult(0, "", "")
+        if command == ("git", "read-tree", _CANDIDATE):
+            assert isinstance(directory, Path) and directory != source
+            return CommandResult(0, "", "")
+        if command == ("git", "checkout-index", "--all"):
+            assert isinstance(directory, Path) and directory != source
+            return CommandResult(0, "", "")
+        if command == ("git", "status", "--porcelain", "--untracked-files=all"):
+            assert isinstance(directory, Path) and directory != source
+            return CommandResult(0, "", "")
+        if command == ("git", "ls-files", "-z"):
+            assert isinstance(directory, Path) and directory != source
+            return CommandResult(0, "", "")
+        if command == ("git", "hook", "run", "pre-commit"):
+            hook_runs.append(command)
+            return CommandResult(0, "", "")
+        if command[0] == "git":
+            pytest.fail(f"unexpected Git command: {command}")
+        cheap_commands.append(command)
+        return CommandResult(1 if cheap_check_fails[0] else 0, "", "")
+
+    dependencies = replace(
+        dependencies,
+        run_command=run,
+        remove_junit_artifact=removed.append,
+        check_candidate_gate=lambda candidate: check_candidate_gate(
+            candidate,
+            source=source,
+            current_staged_tree=lambda: _CANDIDATE,
+            run_command=run,
+        ),
+    )
+
+    cheap_failure = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert cheap_failure.state == "preflight-failure"
+    assert cheap_failure.hook_failures[0].hook_id == "yamllint"
+    assert hook_lookups == []
+    assert len(cheap_commands) == 1
+    assert state.writes == []
+    assert removed == []
+    assert hook_runs == []
+
+    cheap_check_fails[0] = False
+    missing_report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert missing_report.state == "preflight-failure"
+    assert missing_report.hook_failures[0].hook_id == "pre-commit-hook"
+    assert hook_lookups
+    assert state.writes == []
+    assert removed == []
+    assert hook_runs == []
+
+    hook_path.write_text("#!/bin/sh\nexit 0\n")
+    hook_path.chmod(0o755)
+    installed_report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert installed_report.state == "terminal-success"
+    assert state.records[_CANDIDATE]["state"] == "terminal-success"
+    assert hook_runs == [("git", "hook", "run", "pre-commit")]
 
 
 def test_license_violation_preflight_keeps_candidate_without_session_or_hook() -> None:

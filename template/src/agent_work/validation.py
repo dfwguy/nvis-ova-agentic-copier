@@ -62,7 +62,7 @@ _MAX_HOOK_LINE_BYTES = 256
 _MAX_HOOK_FAILURE_BYTES = 4_096
 _HOOK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 _CHEAP_GATE_ID = re.compile(
-    r"^(yamllint|shellcheck|readability|ty|kingfisher|ruff-check|ruff-format) failed(?:$|:)"
+    r"^(pre-commit-hook|yamllint|shellcheck|readability|ty|kingfisher|ruff-check|ruff-format) failed(?:$|:)"
 )
 _SAFE_PATH = re.compile(r"^(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+$")
 _READABILITY_LINE = re.compile(
@@ -1378,6 +1378,7 @@ def run_judge_validation(
         if dependencies.current_staged_tree() != candidate_tree:
             raise JudgeValidationError("staged tree changed during cheap gate")
         if gate_failed:
+            failure_id = cheap_gate_failure_id(gate_result)
             return JudgeValidationReport(
                 candidate_tree,
                 True,
@@ -1385,12 +1386,12 @@ def run_judge_validation(
                 "preflight-failure",
                 False,
                 None,
-                "cheap candidate gate failed",
                 (
-                    HookFailure(
-                        cheap_gate_failure_id(gate_result), (_FALLBACK_HOOK_LINE,)
-                    ),
+                    "pre-commit hook missing or not executable; run uv run pre-commit install"
+                    if failure_id == "pre-commit-hook"
+                    else "cheap candidate gate failed"
                 ),
+                (HookFailure(failure_id, (_FALLBACK_HOOK_LINE,)),),
             )
         if dependencies.current_staged_tree() != candidate_tree:
             raise JudgeValidationError("candidate tree is not the current staged tree")
