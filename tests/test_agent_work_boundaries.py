@@ -5330,6 +5330,7 @@ def test_bind_retained_commit_rebinds_only_an_exact_current_default_merge(
     (
         ("correction_required", "corroborated_regression", 0),
         ("report_only", "touched_slow", 2),
+        ("report_only", "inherited_variance", 0),
     ),
 )
 def test_serial_judge_passes_exact_baseline_and_rejects_missing_timing_proof(
@@ -5420,7 +5421,7 @@ def test_serial_judge_passes_exact_baseline_and_rejects_missing_timing_proof(
                 "reason": reason,
                 "phase_deltas": (
                     {"setup": 0.0, "call": 0.8, "teardown": 0.0}
-                    if reason == "corroborated_regression"
+                    if reason in {"corroborated_regression", "inherited_variance"}
                     else None
                 ),
             },

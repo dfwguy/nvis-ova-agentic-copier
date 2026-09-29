@@ -463,7 +463,10 @@ inventories and omission count.
 The outcome is `clear` when there are no findings, `report_only` for findings
 that need review but no correction, or `correction_required` when a new slow
 or corroborated regressed case needs correction. A `touched_slow` finding
-alone is report-only.
+alone is report-only. An `inherited_variance` finding reports a corroborated
+increase below 1 second in an existing slow case without a changed test or
+mapped helper. The Non-functional Reviewer must confirm no causal impact
+before it can proceed.
 While the original terminal timing failure is current, `candidate validate`
 and `candidate status` report its safe `timing_failure_code` and bind it to the
 evidence ID. Once a retry starts, status reports the retry state. It includes

@@ -63,6 +63,12 @@ Use only that result. Do not ask for private JUnit files or state-root paths.
 Never run or replace a test suite. A later Finalizer run cannot stand in for
 this review.
 
+For serial `inherited_variance`, trace changed production paths into the case's
+test, fixtures, helpers, and callers. Review both versions' phase evidence.
+Approve only with case-specific proof that the delta is unrelated. Reject and
+route possible or unknown causal impact to Architect. `report_only` and
+opposite version directions alone are not proof.
+
 Use Read, Grep, and Glob tools when this frontend has them. If it does not,
 use Bash only to read Judge's files, comparator proof, and task or test files.
 `cat` and `rg` may show text. A checksum may check each file hash. A read-only

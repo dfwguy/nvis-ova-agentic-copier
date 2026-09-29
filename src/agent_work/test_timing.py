@@ -412,9 +412,11 @@ def review_test_timings(
         ]
         for name, seconds in candidate.items():
             original = baseline.get(name)
+            directly_affected = (
+                _changed(name, changed_tests) or name in affected_by_helper
+            )
             touched = (
-                _changed(name, changed_tests)
-                or name in affected_by_helper
+                directly_affected
                 or production_changed
                 and original is not None
                 and seconds >= 1
@@ -428,12 +430,21 @@ def review_test_timings(
                 and (original < 1 or seconds > original)
                 and touched
             ):
+                paired_totals = tuple(
+                    (
+                        sum(baseline_repeat[name].values()),
+                        sum(candidate_repeat[name].values()),
+                    )
+                    for baseline_repeat, candidate_repeat in zip(
+                        baseline_repeats, candidate_repeats, strict=True
+                    )
+                )
                 corroborated = all(
-                    (original >= 1 or sum(baseline_repeats[index][name].values()) < 1)
-                    and sum(candidate_repeats[index][name].values()) >= 1
-                    and sum(candidate_repeats[index][name].values())
-                    > sum(baseline_repeats[index][name].values())
-                    for index in range(2)
+                    (original >= 1 or prior < 1)
+                    and current >= 1
+                    and current > prior
+                    and (directly_affected or original < 1 or current - prior > 0.100)
+                    for prior, current in paired_totals
                 )
                 deltas = {
                     phase: round(
@@ -443,13 +454,27 @@ def review_test_timings(
                     )
                     for phase in _PHASES
                 }
+                focused_increase = (
+                    sum(current - prior for prior, current in paired_totals) / 2
+                )
+                inherited_variance = (
+                    corroborated
+                    and not directly_affected
+                    and original >= 1
+                    and seconds - original < 1
+                    and focused_increase < 1
+                )
                 add_finding(
                     TimingFinding(
                         environment,
                         name,
-                        "corroborated_regression"
-                        if corroborated
-                        else "uncorroborated_spike",
+                        (
+                            "inherited_variance"
+                            if inherited_variance
+                            else "corroborated_regression"
+                            if corroborated
+                            else "uncorroborated_spike"
+                        ),
                         deltas,
                     ),
                     seconds,
