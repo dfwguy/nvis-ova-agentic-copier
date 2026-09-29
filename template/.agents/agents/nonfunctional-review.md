@@ -90,8 +90,12 @@ files. Do not use Bash to run tests, benchmarks, builds, or other checks.
    budget. Apply a task-specific tighter limit when present. Touched cases are
    added or modified tests, including their parameterizations. Also include
    cases affected by a changed shared fixture or helper when they can be
-   identified. Return an unclear impact map to Architect and the test owner
-   for resolution before approval. In serial timing proof, an unsafe parameter
+   identified. A changed `.py` file outside `tests/` and `template/tests/`
+   conservatively marks an existing case as affected when its candidate time
+   reaches 1.000 s and either its baseline was below 1.000 s or its candidate
+   time is slower in that Python version. This is an impact map, not proof
+   that the diff caused the cost. Return an unclear impact map to Architect and the test owner for
+   resolution before approval. In serial timing proof, an unsafe parameter
    becomes `[param_<64 lowercase SHA-256 hex>]` after the safe base test name.
    Treat each emitted ID as a distinct case. Map a touched base test to all its
    parameterizations, and match the emitted ID and Python environment to its
@@ -118,11 +122,15 @@ files. Do not use Bash to run tests, benchmarks, builds, or other checks.
    candidate case at or above 1.000 s with its baseline where present and
    record the case, environment, and proof in the durable audit or linked
    issue record, even when another finding requires return. Review bounded
-   findings and setup,
-   call, and teardown phase deltas for cases that newly cross 1.000 s or
-   worsen while already slow. A new case has no baseline case to repeat.
-   Distinguish inherited slow cases, integration exceptions, and newly
-   observed ordinary cases. One time alone is not a stable regression.
+   findings and the full inventory for cases at or above 1.000 s. For affected
+   existing cases
+   that newly cross 1.000 s or worsen while already slow, review available
+   setup, call, and teardown phase deltas from focused repeats. Unaffected
+   inherited cases and new cases may have no phase deltas; record the available
+   full-inventory and baseline evidence without inventing phases. A new case
+   has no baseline case to repeat. Distinguish inherited slow cases,
+   integration exceptions, and newly observed ordinary cases. One time alone
+   is not a stable regression.
    Report missing cause, owner, reduction plan, or exception review trigger
    in that record. Do not
    invent a limit. CI case times give context; local goals are not CI gates.

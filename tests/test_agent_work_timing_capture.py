@@ -294,6 +294,117 @@ def test_clear_capture_binds_both_full_versions_and_replays_private_transcript(
     )
 
 
+@pytest.mark.parametrize(
+    "production_path",
+    (
+        "src/agent_work/test_timing.py",
+        "template/src/agent_work/test_timing.py",
+        "scripts/check_licenses.py",
+        "template/scripts/check_licenses.py",
+    ),
+)
+def test_production_change_focuses_existing_case_newly_above_one_second(
+    tmp_path: Path, production_path: str
+) -> None:
+    crossing = "tests/test_speed.py::test_crossing"
+    inherited = "tests/test_speed.py::test_inherited"
+    baseline_artifact = (
+        b"<testsuite tests='2' failures='0' errors='0'>"
+        b"<testcase classname='tests.test_speed' name='test_crossing' time='0.22'/>"
+        b"<testcase classname='tests.test_speed' name='test_inherited' time='1.22'/>"
+        b"</testsuite>"
+    )
+    candidate_artifact = (
+        b"<testsuite tests='2' failures='0' errors='0'>"
+        b"<testcase classname='tests.test_speed' name='test_crossing' time='1.22'/>"
+        b"<testcase classname='tests.test_speed' name='test_inherited' time='1.22'/>"
+        b"</testsuite>"
+    )
+    focused_calls: list[tuple[str, ...]] = []
+
+    def run(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        cwd = cast(Path, kwargs["current_directory"])
+        if command[:4] == ("git", "worktree", "add", "--detach"):
+            Path(command[4]).mkdir()
+            return CommandResult(0, "", "")
+        if command == ("git", "hook", "run", "pre-commit"):
+            for environment in ("py311", "py314"):
+                (cwd / f"test-results-{environment}.xml").write_bytes(baseline_artifact)
+            return CommandResult(0, "", "")
+        if command[0].endswith("/pytest"):
+            focused_calls.append(command)
+            environment = cast(Mapping[str, str], kwargs["environment"])
+            assert command[-1] == crossing
+            call_seconds = 0.22 if cwd.name == "baseline" else 1.22
+            Path(environment["AGENT_TIMING_OUTPUT"]).write_text(
+                json.dumps(
+                    {
+                        crossing: {
+                            "setup": 0.0,
+                            "call": call_seconds,
+                            "teardown": 0.0,
+                        }
+                    }
+                )
+            )
+            return CommandResult(0, "", "")
+        if command == ("git", "write-tree"):
+            return CommandResult(
+                0, BASE_TREE if cwd.name == "baseline" else CANDIDATE_TREE, ""
+            )
+        if command == ("git", "rev-parse", f"{BASE_SHA}^{{tree}}"):
+            return CommandResult(0, BASE_TREE, "")
+        if command in {
+            ("git", "rev-parse", "HEAD"),
+            ("git", "rev-parse", "HEAD^{tree}"),
+        }:
+            return CommandResult(
+                0, BASE_SHA if command[-1] == "HEAD" else BASE_TREE, ""
+            )
+        if command[:3] == ("git", "diff", "--name-only"):
+            return CommandResult(0, f"{production_path}\n", "")
+        if command in {
+            ("git", "diff", "--quiet"),
+            ("git", "ls-files", "--others", "--exclude-standard"),
+            ("git", "status", "--porcelain"),
+        } or command[:3] == ("git", "worktree", "remove"):
+            return CommandResult(0, "", "")
+        if len(command) >= 3 and command[1] == "-c":
+            return CommandResult(
+                0,
+                json.dumps(
+                    {
+                        "interpreter": ["3.11", "cpython-311", "linux-x86_64"],
+                        "distributions": [["pytest", "9.0"]],
+                    }
+                ),
+                "",
+            )
+        raise AssertionError(f"unexpected timing capture command: {command}")
+
+    captured = capture_serial_timing_review(
+        baseline_sha=BASE_SHA,
+        candidate_tree=CANDIDATE_TREE,
+        candidate_artifacts=(
+            ("py311", candidate_artifact, 2),
+            ("py314", candidate_artifact, 2),
+        ),
+        changed_paths=(production_path,),
+        dependencies=_dependencies(tmp_path, run),
+    )
+
+    assert len(focused_calls) == 8
+    assert captured["outcome"] == "correction_required"
+    assert {
+        (finding["name"], finding["reason"])
+        for finding in cast(list[dict[str, object]], captured["findings"])
+    } == {
+        (crossing, "corroborated_regression"),
+        (crossing, "touched_slow"),
+        (inherited, "inherited_slow"),
+    }
+
+
 def test_changed_file_with_many_existing_slow_cases_retains_complete_junit_proof(
     tmp_path: Path,
 ) -> None:

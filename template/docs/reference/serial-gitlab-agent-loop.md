@@ -439,13 +439,20 @@ subsecond finding. If more than 128 such findings exist, validation fails closed
 with the stable artifact reason
 `finding_budget_exhausted` and retains the full-suite JUnit snapshots. The
 private transcript keeps the full JUnit inventories and the same omission
-count. A changed test
-file may mark many existing cases above 0.100 s and below 1.000 s as
-`touched_slow` from those inventories without focused repeats. Cases that
-need focused checks are grouped by Python version, with at most 32 case
-selectors per invocation. New cases above 0.100 s need one candidate check.
-An existing case that reaches 1.000 s or worsens above it needs two baseline
-and two candidate checks. Focused checks share a limit of 32 invocations and
+count. Focused checks run only for slow cases affected by the diff. Unaffected
+existing cases above 0.100 s stay in the full candidate inventory. Those at
+or above 1.000 s get an `inherited_slow` report-only finding; subsecond cases
+get no individual finding. Neither group gets focused repeats or automatic
+correction. Cases that need focused checks are grouped by
+Python version, with at most 32 case selectors per invocation. New cases above
+0.100 s need one candidate check. Affected existing cases are changed tests or
+cases explicitly mapped as consumers of changed fixtures in
+`tests/**/conftest.py`. An affected case gets two checks per tree if the
+candidate takes at least 1.000 s. The baseline must be below 1.000 s, or
+the candidate must be slower. A
+changed `.py` file outside both `tests/` and `template/tests/` also marks
+each case that meets this rule as affected.
+Focused checks share a limit of 32 invocations and
 900 seconds across the review. If either limit is exhausted, validation
 reports the stable artifact reason
 `focused_budget_exhausted` and keeps the saved full-suite JUnit snapshots.
@@ -467,10 +474,12 @@ needs correction only if repeats corroborate a regression. For every
 candidate case at or above 1.000 s, the reviewer checks
 the controller's finding and records its classification, owner, and reduction
 or exception plan in the durable audit or linked issue record, even if another
-finding already needs correction. When an existing case first reaches or gets
-slower above 1.000 s, the controller checks two focused repeats per tree and
-Python version under matching conditions. It batches up to 32 cases per
-repeat. Each case's finding reports setup, call, and teardown deltas.
+finding already needs correction. For those affected existing cases, focused
+repeats run per tree and Python version under matching conditions. The
+controller batches up to 32 cases per repeat. The `corroborated_regression`
+or `uncorroborated_spike` finding from each repeated case reports setup,
+call, and teardown deltas. `corroborated_regression` requires correction;
+`uncorroborated_spike` is report-only.
 Missing or mismatched repeat proof blocks a decision that depends on it. One
 slow observation alone does not establish a regression.
 

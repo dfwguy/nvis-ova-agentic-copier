@@ -275,6 +275,7 @@ def review_test_timings(
     changed_tests: tuple[str, ...],
     affected_by_helper: tuple[str, ...],
     run_focused: Callable[..., Mapping[str, Any]],
+    production_changed: bool = False,
 ) -> TimingReview:
     """Compare complete version inventories and bounded exact-source repeats."""
     if (
@@ -283,6 +284,7 @@ def review_test_timings(
         or baseline_tree == candidate_tree
         or set(baseline_runs) != set(_ENVIRONMENTS)
         or set(candidate_runs) != set(_ENVIRONMENTS)
+        or not isinstance(production_changed, bool)
         or any(not is_safe_timing_case_id(name) for name in affected_by_helper)
         or any(
             not (
@@ -356,13 +358,22 @@ def review_test_timings(
             if name in baseline
             and seconds >= 1
             and (baseline[name] < 1 or seconds > baseline[name])
+            and (
+                _changed(name, changed_tests)
+                or name in affected_by_helper
+                or production_changed
+            )
         ]
         critical_count = sum(
             1
             + int(
                 name in baseline
                 and (baseline[name] < 1 or seconds > baseline[name])
-                and (_changed(name, changed_tests) or name in affected_by_helper)
+                and (
+                    _changed(name, changed_tests)
+                    or name in affected_by_helper
+                    or production_changed
+                )
             )
             for name, seconds in candidate.items()
             if seconds >= 1
@@ -401,13 +412,21 @@ def review_test_timings(
         ]
         for name, seconds in candidate.items():
             original = baseline.get(name)
-            touched = _changed(name, changed_tests) or name in affected_by_helper
+            touched = (
+                _changed(name, changed_tests)
+                or name in affected_by_helper
+                or production_changed
+                and original is not None
+                and seconds >= 1
+                and (original < 1 or seconds > original)
+            )
             if original is None and seconds > 0.100:
                 add_finding(TimingFinding(environment, name, "new_slow"), seconds)
             elif (
                 original is not None
                 and seconds >= 1
                 and (original < 1 or seconds > original)
+                and touched
             ):
                 corroborated = all(
                     (original >= 1 or sum(baseline_repeats[index][name].values()) < 1)
@@ -435,13 +454,10 @@ def review_test_timings(
                     ),
                     seconds,
                 )
-                if touched:
-                    add_finding(
-                        TimingFinding(environment, name, "touched_slow"), seconds
-                    )
+                add_finding(TimingFinding(environment, name, "touched_slow"), seconds)
             elif touched and seconds > 0.100:
                 add_finding(TimingFinding(environment, name, "touched_slow"), seconds)
-            elif original is not None and original >= 1 and seconds >= 1:
+            elif original is not None and seconds >= 1:
                 add_finding(TimingFinding(environment, name, "inherited_slow"), seconds)
     findings = (
         critical_findings + subsecond_findings[: _MAX_FINDINGS - len(critical_findings)]
