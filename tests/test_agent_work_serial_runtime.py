@@ -2582,7 +2582,9 @@ def test_late_candidate_protocol_failure_retries_only_a_safe_exact_checkpoint(
             *,
             broker_request: WorkerResultBrokerRequest | None = None,
             build_artifact: Callable[[bytes], bytes] | None = None,
-            candidate_action: Callable[[str, str | None], dict[str, object]]
+            candidate_action: Callable[
+                [str, str | None, dict[str, object] | None], dict[str, object]
+            ]
             | None = None,
         ) -> WorkerInvocation:
             invocation = super().invoke(
@@ -2634,7 +2636,9 @@ def test_late_candidate_protocol_failure_retries_only_a_safe_exact_checkpoint(
             *,
             broker_request: WorkerResultBrokerRequest | None = None,
             build_artifact: Callable[[bytes], bytes] | None = None,
-            candidate_action: Callable[[str, str | None], dict[str, object]]
+            candidate_action: Callable[
+                [str, str | None, dict[str, object] | None], dict[str, object]
+            ]
             | None = None,
         ) -> WorkerInvocation:
             del (
@@ -2748,7 +2752,9 @@ def test_due_protocol_retry_blocks_unverifiable_dirty_candidate_before_worker(
             *,
             broker_request: WorkerResultBrokerRequest | None = None,
             build_artifact: Callable[[bytes], bytes] | None = None,
-            candidate_action: Callable[[str, str | None], dict[str, object]]
+            candidate_action: Callable[
+                [str, str | None, dict[str, object] | None], dict[str, object]
+            ]
             | None = None,
         ) -> WorkerInvocation:
             del (
