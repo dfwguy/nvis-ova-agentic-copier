@@ -2470,6 +2470,8 @@ def _agent_command(
                 str(checkout / ".agents"),
                 "--add-dir",
                 str(checkout / "template" / ".agents"),
+                "--model",
+                "gpt-6-sol",
                 *(("--add-dir", str(broker_directory)) if broker_directory else ()),
                 *(
                     ("--add-dir", str(candidate_directory))
@@ -2627,6 +2629,8 @@ def _candidate_preview_command(
     return (
         executable,
         "exec",
+        "--model",
+        "gpt-6-sol",
         "-C",
         str(checkout),
         "--sandbox",
