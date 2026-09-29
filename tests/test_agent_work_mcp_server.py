@@ -39,9 +39,8 @@ BASE = "a" * 40
 PRIVATE_NONCE = "private-controller-nonce"
 TOOLS = {
     "candidate_status",
-    "candidate_read_manifest",
-    "candidate_read_chunk",
-    "candidate_read_complete",
+    "candidate_changed_paths",
+    "candidate_read",
     "candidate_submit_review",
 }
 
@@ -60,7 +59,7 @@ def _client_round_trip(server: Any, operation: Callable[[Any], Any]) -> Any:
     return asyncio.run(run())
 
 
-def test_candidate_mcp_exposes_five_strict_operation_schemas() -> None:
+def test_candidate_mcp_exposes_four_stateless_operation_schemas() -> None:
     server = _server(lambda _action, _tree, _selector: {"candidate_tree": TREE})
 
     async def list_tools(client: Any) -> Any:
@@ -70,9 +69,14 @@ def test_candidate_mcp_exposes_five_strict_operation_schemas() -> None:
     schemas = {tool.name: tool.input_schema for tool in listed.tools}
     assert set(schemas) == TOOLS
     assert schemas["candidate_status"]["properties"] == {}
-    assert schemas["candidate_read_manifest"]["properties"] == {}
-    assert schemas["candidate_read_complete"]["properties"] == {}
-    assert set(schemas["candidate_read_chunk"]["properties"]) == {
+    assert schemas["candidate_changed_paths"]["properties"] == {}
+    assert set(schemas["candidate_read"]["properties"]) == {
+        "path",
+        "side",
+        "offset",
+        "length",
+    }
+    assert set(schemas["candidate_read"]["required"]) == {
         "path",
         "side",
         "offset",
@@ -95,8 +99,7 @@ def test_candidate_mcp_exposes_five_strict_operation_schemas() -> None:
     ("tool", "arguments", "via_client"),
     [
         ("candidate_status", {"nonce": PRIVATE_NONCE}, True),
-        ("candidate_read_manifest", {"issue_iid": 81}, False),
-        ("candidate_read_complete", {"candidate_tree": TREE}, False),
+        ("candidate_changed_paths", {"issue_iid": 81}, False),
         (
             "candidate_submit_review",
             {
@@ -173,7 +176,7 @@ def test_candidate_mcp_exposes_five_strict_operation_schemas() -> None:
             for severity in ("major", "critical")
         ),
         (
-            "candidate_read_chunk",
+            "candidate_read",
             {
                 "path": "docs/a.md",
                 "side": "new",
@@ -184,7 +187,7 @@ def test_candidate_mcp_exposes_five_strict_operation_schemas() -> None:
             False,
         ),
         (
-            "candidate_read_chunk",
+            "candidate_read",
             {
                 "path": "docs/a.md",
                 "side": "new",
@@ -194,18 +197,18 @@ def test_candidate_mcp_exposes_five_strict_operation_schemas() -> None:
             True,
         ),
         (
-            "candidate_read_chunk",
+            "candidate_read",
             {"path": "docs/a.md", "side": "new", "offset": True, "length": 1},
             False,
         ),
         (
-            "candidate_read_chunk",
+            "candidate_read",
             {"path": "docs/a.md", "side": "deleted", "offset": 0, "length": 1},
             False,
         ),
     ],
 )
-def test_candidate_mcp_rejects_extra_identity_and_invalid_page_arguments(
+def test_candidate_mcp_rejects_extra_identity_and_invalid_range_arguments(
     tool: str, arguments: dict[str, object], *, via_client: bool
 ) -> None:
     calls: list[tuple[str, str, dict[str, object] | None]] = []
@@ -240,11 +243,10 @@ def test_candidate_mcp_rejects_extra_identity_and_invalid_page_arguments(
     ("tool", "arguments", "expected_action", "expected_selector"),
     [
         (
-            "candidate_read_chunk",
+            "candidate_read",
             {"path": "docs/a.md", "side": "new", "offset": 0, "length": 3},
             "read",
             {
-                "mode": "chunk",
                 "path": "docs/a.md",
                 "side": "new",
                 "offset": 0,
@@ -252,10 +254,10 @@ def test_candidate_mcp_rejects_extra_identity_and_invalid_page_arguments(
             },
         ),
         (
-            "candidate_read_complete",
+            "candidate_changed_paths",
             {},
             "read",
-            {"mode": "complete"},
+            {"mode": "changed_paths"},
         ),
         (
             "candidate_submit_review",
@@ -334,20 +336,19 @@ def test_candidate_mcp_stdio_serves_live_broker_without_exposing_private_inputs(
     calls: list[tuple[str, str | None, dict[str, object] | None]] = []
 
     def candidate_action(
-        action: str, tree: str | None, selector: dict[str, object] | None = None
+        action: str, tree: str | None, selector: dict[str, object] | None
     ) -> dict[str, object]:
         calls.append((action, tree, selector))
         if action == "stage":
             return {"candidate_tree": TREE, "state": "staged"}
         if action == "status":
             return {"candidate_tree": TREE, "state": "terminal-success"}
-        assert action == "read" and selector == {"mode": "manifest"}
+        assert action == "read" and selector == {"mode": "changed_paths"}
         return {
             "candidate_tree": TREE,
             "base_sha": BASE,
             "base_tree": "c" * 40,
             "changed_paths": ["docs/a.md"],
-            "paged": True,
             "files": [
                 {
                     "path": "docs/a.md",
@@ -400,12 +401,12 @@ def test_candidate_mcp_stdio_serves_live_broker_without_exposing_private_inputs(
                 listed = await client.list_tools()
                 assert {tool.name for tool in listed.tools} == TOOLS
                 status = await client.call_tool("candidate_status", {})
-                manifest = await client.call_tool("candidate_read_manifest", {})
+                inventory = await client.call_tool("candidate_changed_paths", {})
                 invalid_identity = await client.call_tool(
                     "candidate_status", {"nonce": request.nonce}
                 )
-                invalid_page = await client.call_tool(
-                    "candidate_read_chunk",
+                invalid_range = await client.call_tool(
+                    "candidate_read",
                     {
                         "path": "docs/a.md",
                         "side": "new",
@@ -415,16 +416,16 @@ def test_candidate_mcp_stdio_serves_live_broker_without_exposing_private_inputs(
                 )
                 assert status.is_error is False
                 assert status.structured_content["state"] == "terminal-success"
-                assert manifest.is_error is False
-                assert manifest.structured_content["changed_paths"] == ["docs/a.md"]
+                assert inventory.is_error is False
+                assert inventory.structured_content["changed_paths"] == ["docs/a.md"]
                 assert invalid_identity.is_error is True
-                assert invalid_page.is_error is True
+                assert invalid_range.is_error is True
 
         asyncio.run(asyncio.wait_for(check_stdio(), timeout=10))
         assert calls == [
             ("stage", None, None),
             ("status", TREE, None),
-            ("read", TREE, {"mode": "manifest"}),
+            ("read", TREE, {"mode": "changed_paths"}),
         ]
     finally:
         captured = session.close_and_capture()
@@ -449,7 +450,9 @@ def test_candidate_review_reset_requires_validated_exact_tree(
         nonce=request.nonce, issue_iid=request.issue_iid
     )
 
-    def action(kind: str, _tree: str | None) -> dict[str, object]:
+    def action(
+        kind: str, _tree: str | None, _selector: dict[str, object] | None
+    ) -> dict[str, object]:
         return {
             "candidate_tree": TREE,
             "state": "staged" if kind == "stage" else "terminal-success",

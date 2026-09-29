@@ -10,6 +10,7 @@
 """Controller-owned Git-object candidate read contracts."""
 
 import subprocess
+from base64 import b64decode
 from pathlib import Path
 from typing import cast
 
@@ -43,6 +44,8 @@ def _repository(
     large: bool = False,
     crlf: bool = False,
     authored: bool = False,
+    invalid_utf8: bool = False,
+    git_calls: list[tuple[str, ...]] | None = None,
 ) -> GitRepository:
     config = AgentWorkConfig(
         host="gitlab.example.com",
@@ -75,6 +78,8 @@ def _repository(
             "docs/gone.md",
         ): f"100644 blob {REMOVED}\tdocs/gone.md\0",
         ("ls-tree", "-z", TREE, "--", "docs/gone.md"): "",
+        ("ls-tree", "-z", BASE, "--", "docs/missing.md"): "",
+        ("ls-tree", "-z", TREE, "--", "docs/missing.md"): "",
         ("cat-file", "-s", OLD): "7\n",
         ("cat-file", "-s", NEW): "7\n",
         ("cat-file", "-s", REMOVED): "8\n",
@@ -127,6 +132,8 @@ def _repository(
     def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
         nonlocal head_reads
         args = command[3:]
+        if git_calls is not None:
+            git_calls.append(args)
         if args == ("rev-parse", "HEAD"):
             head_reads += 1
             if drift and head_reads > 1:
@@ -146,89 +153,14 @@ def _repository(
         if oversize and args == ("cat-file", "blob", NEW):
             raise AssertionError("oversized blob must not be fetched")
         if binary and args == ("cat-file", "blob", NEW):
-            return b"\xff" * cast(int, kwargs["max_output_bytes"])
+            return b"after!\0"
+        if invalid_utf8 and args == ("cat-file", "blob", NEW):
+            return b"after!\xff"
         if args not in outputs:
             raise AssertionError(f"unexpected Git blob command: {args}")
         return outputs[args].encode()
 
     return GitRepository(config, run, read_git_blob=read_blob)
-
-
-def test_read_candidate_derives_deletion_and_exact_content_from_git(
-    tmp_path: Path,
-) -> None:
-    evidence = _repository(tmp_path).read_candidate(
-        tmp_path,
-        TREE,
-        base_sha=BASE,
-        changed_paths=("docs/a.md", "docs/gone.md"),
-    )
-    assert evidence == {
-        "candidate_tree": TREE,
-        "base_tree": BASE,
-        "changed_paths": ["docs/a.md", "docs/gone.md"],
-        "files": [
-            {
-                "path": "docs/a.md",
-                "old_mode": "100644",
-                "new_mode": "100644",
-                "old_oid": OLD,
-                "new_oid": NEW,
-                "old_content": "before\n",
-                "new_content": "after!\n",
-            },
-            {
-                "path": "docs/gone.md",
-                "old_mode": "100644",
-                "new_mode": None,
-                "old_oid": REMOVED,
-                "new_oid": None,
-                "old_content": "removed\n",
-                "new_content": None,
-            },
-        ],
-    }
-
-
-def test_read_candidate_preserves_crlf_bytes_from_git_blobs(tmp_path: Path) -> None:
-    evidence = _repository(tmp_path, crlf=True).read_candidate(
-        tmp_path, TREE, base_sha=BASE, changed_paths=("docs/a.md", "docs/gone.md")
-    )
-    files = cast(list[dict[str, str | None]], evidence["files"])
-    assert files[0]["old_content"] == "old\r\nline\r\n"
-    assert files[0]["new_content"] == "new\r\nline\r\n"
-
-
-def test_read_candidate_uses_original_baseline_only_with_ancestor_allowance(
-    tmp_path: Path,
-) -> None:
-    repository = _repository(tmp_path, authored=True)
-
-    evidence = repository.read_candidate(
-        tmp_path,
-        TREE,
-        base_sha=BASE,
-        allow_base_ancestor=True,
-        changed_paths=("docs/a.md",),
-    )
-    files = cast(list[dict[str, str | None]], evidence["files"])
-    assert files[0]["old_content"] == "baseline\n"
-    assert files[0]["new_content"] == "repaired\n"
-    with pytest.raises(RepositoryError, match="candidate changed"):
-        repository.read_candidate(
-            tmp_path,
-            TREE,
-            base_sha=BASE,
-            changed_paths=("docs/a.md",),
-        )
-    with pytest.raises(RepositoryError, match="candidate changed"):
-        repository.read_candidate(
-            tmp_path,
-            TREE,
-            base_sha=UNRELATED,
-            allow_base_ancestor=True,
-            changed_paths=("docs/a.md",),
-        )
 
 
 def test_raw_git_blob_runner_caps_output_and_timeout() -> None:
@@ -277,62 +209,165 @@ def test_raw_git_blob_runner_caps_output_and_timeout() -> None:
         )
 
 
-def test_read_candidate_rejects_oversize_blob_before_fetch(tmp_path: Path) -> None:
-    with pytest.raises(RepositoryError, match="oversize"):
-        _repository(tmp_path, oversize=True).read_candidate(
-            tmp_path,
-            TREE,
-            base_sha=BASE,
-            changed_paths=("docs/a.md", "docs/gone.md"),
-        )
-
-
-def test_read_candidate_accepts_existing_large_source_file(tmp_path: Path) -> None:
-    evidence = _repository(tmp_path, large=True).read_candidate(
-        tmp_path,
-        TREE,
-        base_sha=BASE,
-        changed_paths=("docs/a.md", "docs/gone.md"),
+def test_changed_candidate_paths_inventory_exposes_exact_git_side_metadata(
+    tmp_path: Path,
+) -> None:
+    inventory = _repository(tmp_path).changed_candidate_paths(
+        tmp_path, TREE, base_sha=BASE
     )
-    files = cast(list[dict[str, str | None]], evidence["files"])
-    old_content = files[0]["old_content"]
-    new_content = files[0]["new_content"]
-    assert old_content is not None and len(old_content) == 188_414
-    assert new_content is not None and len(new_content) == 188_414
-
-
-def test_read_candidate_shows_mode_only_change(tmp_path: Path) -> None:
-    evidence = _repository(tmp_path, mode_only=True).read_candidate(
-        tmp_path, TREE, base_sha=BASE, changed_paths=("docs/a.md",)
-    )
-    assert evidence["files"] == [
+    assert inventory["candidate_tree"] == TREE
+    assert inventory["base_tree"] == BASE
+    assert inventory["changed_paths"] == ["docs/a.md", "docs/gone.md"]
+    assert inventory["files"] == [
         {
             "path": "docs/a.md",
             "old_mode": "100644",
-            "new_mode": "100755",
             "old_oid": OLD,
-            "new_oid": OLD,
-            "old_content": "before\n",
-            "new_content": "before\n",
-        }
+            "old_size": 7,
+            "new_mode": "100644",
+            "new_oid": NEW,
+            "new_size": 7,
+        },
+        {
+            "path": "docs/gone.md",
+            "old_mode": "100644",
+            "old_oid": REMOVED,
+            "old_size": 8,
+            "new_mode": None,
+            "new_oid": None,
+            "new_size": None,
+        },
     ]
 
 
-def test_read_candidate_rejects_binary_blob(tmp_path: Path) -> None:
-    with pytest.raises(RepositoryError, match="binary"):
-        _repository(tmp_path, binary=True).read_candidate(
+@pytest.mark.parametrize(
+    ("side", "offset", "length", "expected"),
+    [
+        ("new", 4, 3, b"r!\n"),
+        ("old", 0, 3, b"bef"),
+        ("new", 0, 7, b"after!\n"),
+    ],
+)
+def test_candidate_range_read_is_independent_and_exact(
+    tmp_path: Path, side: str, offset: int, length: int, expected: bytes
+) -> None:
+    read = _repository(tmp_path).read_candidate_range(
+        tmp_path,
+        TREE,
+        base_sha=BASE,
+        path="docs/a.md",
+        side=side,
+        offset=offset,
+        length=length,
+    )
+    assert read["candidate_tree"] == TREE
+    assert read["path"] == "docs/a.md"
+    assert read["side"] == side
+    assert read["offset"] == offset
+    assert read["length"] == length
+    assert read["oid"] == (OLD if side == "old" else NEW)
+    assert b64decode(read["data_base64"], validate=True) == expected
+
+
+def test_repeated_range_reads_do_not_scan_candidate_inventory(
+    tmp_path: Path,
+) -> None:
+    git_calls: list[tuple[str, ...]] = []
+    repository = _repository(tmp_path, git_calls=git_calls)
+    for offset, expected in ((0, b"aft"), (3, b"er!")):
+        read = repository.read_candidate_range(
             tmp_path,
             TREE,
             base_sha=BASE,
-            changed_paths=("docs/a.md", "docs/gone.md"),
+            path="docs/a.md",
+            side="new",
+            offset=offset,
+            length=3,
+        )
+        assert b64decode(read["data_base64"], validate=True) == expected
+    assert not any(args[:2] == ("diff", "--name-only") for args in git_calls)
+    assert not any("docs/gone.md" in args for args in git_calls)
+
+
+@pytest.mark.parametrize(
+    ("path", "side", "offset", "length"),
+    [
+        ("docs/missing.md", "new", 0, 1),
+        ("docs/gone.md", "new", 0, 1),
+        ("docs/a.md", "other", 0, 1),
+        ("docs/a.md", "new", True, 1),
+        ("docs/a.md", "new", 0, False),
+        ("docs/a.md", "new", -1, 1),
+        ("docs/a.md", "new", 0, 0),
+        ("docs/a.md", "new", 6, 2),
+        ("docs/a.md", "new", 0, 131073),
+    ],
+)
+def test_candidate_range_read_rejects_invalid_path_side_or_range(
+    tmp_path: Path, path: str, side: str, offset: int, length: int
+) -> None:
+    with pytest.raises(RepositoryError):
+        _repository(tmp_path).read_candidate_range(
+            tmp_path,
+            TREE,
+            base_sha=BASE,
+            path=path,
+            side=side,
+            offset=offset,
+            length=length,
         )
 
 
-def test_read_candidate_rejects_head_drift_after_objects(tmp_path: Path) -> None:
-    with pytest.raises(RepositoryError, match="changed"):
-        _repository(tmp_path, drift=True).read_candidate(
+def test_stateless_inventory_rejects_oversize_and_head_drift(tmp_path: Path) -> None:
+    for option in ("oversize", "drift"):
+        with pytest.raises(RepositoryError):
+            _repository(
+                tmp_path, oversize=option == "oversize", drift=option == "drift"
+            ).changed_candidate_paths(tmp_path, TREE, base_sha=BASE)
+
+
+def test_stateless_range_keeps_deletion_and_large_file_bounds(tmp_path: Path) -> None:
+    deleted = _repository(tmp_path).read_candidate_range(
+        tmp_path,
+        TREE,
+        base_sha=BASE,
+        path="docs/gone.md",
+        side="old",
+        offset=0,
+        length=8,
+    )
+    assert deleted["oid"] == REMOVED
+    assert b64decode(deleted["data_base64"], validate=True) == b"removed\n"
+    large = _repository(tmp_path, large=True).read_candidate_range(
+        tmp_path,
+        TREE,
+        base_sha=BASE,
+        path="docs/a.md",
+        side="new",
+        offset=188_413,
+        length=1,
+    )
+    assert large["size"] == 188_414
+    assert b64decode(large["data_base64"], validate=True) == b"x"
+
+
+@pytest.mark.parametrize("option", ["oversize", "binary", "invalid_utf8", "head_drift"])
+def test_stateless_range_rejects_unreadable_or_changed_side(
+    tmp_path: Path, option: str
+) -> None:
+    with pytest.raises(RepositoryError):
+        _repository(
+            tmp_path,
+            oversize=option == "oversize",
+            binary=option == "binary",
+            invalid_utf8=option == "invalid_utf8",
+            drift=option == "head_drift",
+        ).read_candidate_range(
             tmp_path,
             TREE,
             base_sha=BASE,
-            changed_paths=("docs/a.md", "docs/gone.md"),
+            path="docs/a.md",
+            side="new",
+            offset=0,
+            length=1,
         )

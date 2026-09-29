@@ -52,6 +52,17 @@ def test_workflow_prompt_requires_live_candidate_read_for_both_lanes() -> None:
     assert "For a content or coding result that requests publication" in prompt
     assert prompt.index("candidate stage") < prompt.index("candidate validate")
     assert prompt.index("candidate validate") < prompt.index("candidate read")
+    assert "candidate_changed_paths" in prompt
+    assert "candidate_read" in prompt
+    assert not any(
+        retired in prompt
+        for retired in (
+            "candidate_read_manifest",
+            "candidate_read_chunk",
+            "candidate_read_complete",
+            "candidate read complete",
+        )
+    )
     assert (
         "After successful coding validation, or directly after content staging"
         in prompt

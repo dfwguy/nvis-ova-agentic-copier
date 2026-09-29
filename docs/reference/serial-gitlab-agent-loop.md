@@ -5,7 +5,7 @@ summary: Look up loop commands, states, data, and limits.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-28
+last_reviewed: 2026-09-29
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to prepare capacity evidence before a worker launch.
@@ -97,9 +97,11 @@ agent-work validation status --candidate-tree TREE
                              [--wait-seconds SECONDS] [--apply] [--json]
 agent-work candidate stage --issue-iid IID [--candidate-socket PATH]
                            [--broker-nonce NONCE] [--apply] [--json]
+agent-work candidate changed-paths --issue-iid IID --candidate-tree TREE
+                                   [--candidate-socket PATH] [--broker-nonce NONCE] [--apply] [--json]
 agent-work candidate read --issue-iid IID --candidate-tree TREE
-                          [--manifest | --complete |
-                           --path PATH --side old|new --offset N --length N]
+                          --path PATH --side {old,new}
+                          --offset NONNEGATIVE_INT --length 1..131072
                           [--candidate-socket PATH] [--broker-nonce NONCE] [--apply] [--json]
 agent-work candidate validate --issue-iid IID --candidate-tree TREE
                               [--candidate-socket PATH] [--broker-nonce NONCE] [--apply] [--json]
@@ -134,7 +136,8 @@ agent-work slow-root reconcile --manifest-file PATH [--json] [--apply] [--debug]
 | `validation window` | A child command after `--` | `--apply` holds one project timing admission while the child runs; `--json` returns a bounded result. |
 | `validation status` | `--candidate-tree TREE` | Optional `--wait-seconds` bounds polling; it stays read-only. Serial work repeats `--serial-timing`, the baseline SHA, and changed paths; status checks the saved timing proof or retry result. |
 | `candidate stage` | Exact issue, private socket, and nonce | The live serial worker requests controller-owned staging of observed paths. |
-| `candidate read` | Same identity and returned tree; optional manifest, chunk, or completion selector | Reads bounded, controller-derived base-to-tree file evidence for Consistency Judge. |
+| `candidate changed-paths` | Same identity and returned tree | Lists canonical changed paths and old and new file metadata from the controller. |
+| `candidate read` | Same identity and returned tree, changed path, side, offset, and length | Reads one bounded byte range from the exact old or new Git blob. |
 | `candidate validate` | Same identity and returned tree | The controller runs or returns the one durable Judge result for that tree. |
 | `candidate status` | Same identity and returned tree | Reads the durable result without rerunning the hook. |
 | `migration preview` | None | Returns the planned migration actions. |
@@ -337,17 +340,19 @@ Its stdio server is `agent_work.mcp_server`.
 | Tool | Model arguments | Result |
 | --- | --- | --- |
 | `candidate_status` | None | Saved status for the bound tree. |
-| `candidate_read_manifest` | None | Manifest of staged changed content. |
-| `candidate_read_chunk` | Changed `path`, `side` (`old` or `new`), nonnegative `offset`, and positive `length` up to 128 KiB | One content chunk from that manifest. |
-| `candidate_read_complete` | None | Completion result after all required chunks are read. |
+| `candidate_changed_paths` | None | Canonical changed paths with old and new mode, OID, and byte size. |
+| `candidate_read` | Changed `path`, `side` (`old` or `new`), nonnegative `offset`, and `length` from 1 to 131072 | Exact range identity and base64 bytes from that side's blob. |
 | `candidate_submit_review` | `verdict` (`approve` or `reject`), bounded `summary`, and up to 32 findings with `severity`, `path`, and `summary` | Recorded advisory review for the bound tree. |
 
 The controller binds the socket, nonce, issue number, and tree outside model
-tool arguments. The broker exposes the exact staged candidate's changed
-content, including old and new sides, within its read limits. It does not
-provide the full repository for a broad quality review. A submitted review
-returns the candidate tree, `review-recorded` state, verdict, summary, and
-findings. An approval with a major or critical finding is rejected.
+tool arguments. The MCP response omits the private nonce, issue number, and
+project ID. The broker exposes the exact staged candidate's changed content,
+including old and new sides, within its read limits. Reads may occur before
+the path inventory and in any order. They are independent and repeatable.
+The broker does not provide the full repository for a broad quality review.
+A submitted review returns the candidate tree, `review-recorded` state,
+verdict, summary, and findings. An approval with a major or critical finding
+is rejected.
 
 The result is advisory. The existing trusted broad Quality Judge remains the
 workflow's authority. The same-UID host cannot prove reviewer authority:
@@ -370,25 +375,24 @@ For an exact, authorized authored-candidate recovery, the original baseline
 supplies the old tree and publication path set. The controller requires that
 baseline to be an ancestor of the current source commit. Other candidates
 use the source commit as their base and require it to be the current head.
-The read receipt's `base_sha` names that actual base. The broker requires a
-40-character lowercase hexadecimal SHA and the same value across paged reads.
+The read response's `base_sha` names that actual base. The broker requires a
+40-character lowercase hexadecimal SHA and the same value across reads.
 
-When the complete accepted JSON response, including identity fields, fits
-512 KiB, a plain `candidate read` receipt holds exact inline evidence:
-`base_tree`, `candidate_tree`, canonical `changed_paths`, and `files` with
-each path's old and new mode, OID, and UTF-8 content. An absent side of an
-addition or deletion is `null`.
+`candidate changed-paths` returns `candidate_tree`, `base_tree`, sorted
+`changed_paths`, and `files`. Each file entry has its `path` and old and new
+mode, OID, and byte size; an absent side of an addition or deletion has null
+metadata. A mode is `100644` or `100755`.
 
-When that response exceeds 512 KiB, a plain read returns the same paged
-manifest as `candidate read --manifest`. It has `paged: true`, the base and
-candidate trees, changed paths, and per-file `path`, old and new mode, OID,
-byte size, and SHA-256. A mode is `100644` or `100755`; absent sides have null
-metadata. Use `candidate read --path PATH --side old|new --offset N
---length N` to get each existing side in contiguous, base64-encoded chunks
-of at most 128 KiB. Empty existing sides need no chunks. After all bytes of
-every existing side are delivered, `candidate read --complete` marks the
-current tree reviewed. Incomplete coverage, drift, replay, and stale reads
-cannot satisfy finalization.
+`candidate read --path PATH --side old|new --offset N --length N` returns one
+range from an existing side. The offset is nonnegative and the requested
+length is 1 to 131072 bytes. The response gives `candidate_tree`, `base_tree`,
+`path`, `side`, `offset`, `length`, `oid`, `size`, and `data_base64`. The returned
+length equals the requested length. Reads can precede inventory, overlap,
+repeat, or arrive in any order. The controller checks the exact issue,
+repository, base, tree, changed path, blob, and requested range on every call.
+There is no cursor, manifest state, completion call, recovery token, or local
+durable read receipt. A missing, rejected, or stale read cannot support
+finalization.
 
 In coding work, `validate` requires the tree ID and runs the Validation Judge
 while the producer is active. Judge checks the tree's license, then runs the
@@ -484,29 +488,25 @@ budget. The worker must not run direct
 A rejected candidate request can add bounded context after its existing safe
 reason: `candidate_broker: <safe reason> [reason=<code> action=<action>
 selector=<mode> request=<ordinal>]`. Actions are `stage`, `read`, `validate`,
-and `status`. Selectors are `none`, `manifest`, `chunk`, and `complete`; only
-`read` can have a selector other than `none`. The ordinal is a canonical
+and `status`. The selector mode is `none`, `changed_paths`, or `range`;
+`changed_paths` and `range` apply only to `read`. The ordinal is a canonical
 decimal number from 1 through 513, or `513+` after that.
 
 | Code | Rejection |
 | --- | --- |
-| `invalid_selector_state` | A valid `manifest`, `chunk`, or `complete` selector conflicts with the current paged read state. |
 | `invalid_request` | Another candidate request is invalid, including a safe controller callback rejection. |
 | `request_limit` | The session has exceeded 512 requests. |
 | `identity_mismatch`, `timeout`, `request_byte_budget`, `candidate_drift`, `invalid_candidate_identity`, `invalid_read_response`, `read_response_oversize`, `response_byte_budget` | The corresponding existing safe failure reason. |
 | `candidate_rejected` | Another allowlisted safe controller callback reason. |
 
-For example, a valid chunk shape rejected by the current paged read state
-reports `reason=invalid_selector_state action=read selector=chunk`; a request
-past the cap reports `reason=request_limit` with its recognized action and
-selector.
-
-The suffix contains no selector path, file content, nonce, or tree ID.
-Unparseable requests, malformed selector shapes, and unsafe callback text
-retain a general diagnostic. A rejection still invalidates the session; the
-suffix does not authorize another request or a finalization result. During a
-live session, read the failed candidate command's diagnostic. If the worker
-exits with the failure, use `loop status --issue-iid IID` or
+For example, a request past the cap reports `reason=request_limit` with its
+recognized action, selector mode, and request ordinal. The suffix contains no
+path, file content, nonce, or tree ID. Unparseable requests, malformed read
+arguments, and unsafe callback text retain a general diagnostic. A rejection
+still invalidates the session; the suffix does not authorize another request
+or a finalization result. During a live session, read the failed candidate
+command's diagnostic. If the worker exits with the failure, use
+`loop status --issue-iid IID` or
 `recovery inventory --issue-iid IID` to inspect the retained safe diagnostic
 before planning recovery.
 
@@ -518,11 +518,12 @@ finalization requires the read tree to match the current candidate. Coding
 also requires a trusted successful Validation Judge result for that tree.
 
 Without `--apply`, each candidate command previews its action on standard
-output and does not contact the socket. Applied `read` without `--json` prints
-labeled, terminal-safe evidence: inline content, manifest details, or base64
-chunks. `--json` returns the machine receipt with the field names above. Live
-requests need both the socket and nonce. `read` succeeds with exit code `0`,
-returns `1` on broker rejection, and returns `2` for invalid syntax.
+output and does not contact the socket. Applied `changed-paths` and `read`
+without `--json` print labeled, terminal-safe inventory or range evidence.
+`--json` returns the machine response with the field names above. Live
+requests need both the socket and nonce. `changed-paths` and `read` succeed
+with exit code `0`, return `1` on broker rejection, and return `2` for invalid
+syntax.
 `validate` and `status` exit nonzero unless the saved result is terminal
 success. The worker uses `--apply --json` so it can parse bounded responses,
 including a failed validation result.

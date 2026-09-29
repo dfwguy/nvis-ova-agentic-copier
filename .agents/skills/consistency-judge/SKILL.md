@@ -18,9 +18,19 @@ metadata:
 
 Use this read-only skill when a changed fact has copies or Architect cannot
 rule that out. In serial work, require a live controller-owned `candidate read`
-for the exact candidate. A paged read needs all old/new side bytes and a
-successful `candidate read --complete` before applicability or review.
-Restaging voids that coverage. If the boundary is unavailable in the selected mode,
+for the exact candidate. Get the controller's canonical inventory, including
+each changed path's old/new mode, blob ID, and size. Account for both sides of
+every path: confirm absence where a side does not exist, and read the full
+content of every present side. Use exact Git ranges by path, side, offset, and
+length, each no larger than 128 KiB. Bind each result to repo, issue, base
+commit/tree, candidate tree, path, side, blob ID, offset, and length. Compare
+the ranges with the full side size; request missing ranges and reject gaps,
+unreadable sides, or mismatched evidence. Account for mode-only changes even
+when content is unchanged. Repeated reads need no hidden cursor, coverage
+bitmap, or completion call. Git proves returned bytes and tree identity; the
+judge owns reading and assessing every changed side. Delivery alone does not
+prove comprehension. Restaging voids prior read proof. If the boundary is
+unavailable in the selected mode,
 record exactly `$consistency-judge: not applicable — trusted pre-finalization candidate tree/read boundary unavailable`
 with mode and capability evidence. A missing, rejected, failed, or stale read
 from an expected boundary blocks finalization.

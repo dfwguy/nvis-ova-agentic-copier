@@ -238,15 +238,27 @@ class RepositoryPort(Protocol):
         self, worktree: Path, base_sha: str, *, allow_base_ancestor: bool = False
     ) -> str: ...
 
-    def read_candidate(
+    def changed_candidate_paths(
         self,
         worktree: Path,
         candidate_tree: str,
         *,
         base_sha: str,
         allow_base_ancestor: bool = False,
-        changed_paths: tuple[str, ...],
-    ) -> dict[str, object]: ...
+    ) -> Mapping[str, object]: ...
+
+    def read_candidate_range(
+        self,
+        worktree: Path,
+        candidate_tree: str,
+        *,
+        base_sha: str,
+        path: str,
+        side: str,
+        offset: int,
+        length: int,
+        allow_base_ancestor: bool = False,
+    ) -> Mapping[str, object]: ...
 
     def judge_candidate(
         self,
@@ -331,7 +343,10 @@ class InvokerPort(Protocol):
         *,
         broker_request: WorkerResultBrokerRequest,
         build_artifact: Callable[[bytes], bytes],
-        candidate_action: Callable[[str, str | None], dict[str, object]] | None = None,
+        candidate_action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ]
+        | None = None,
     ) -> WorkerInvocation: ...
 
 

@@ -36,13 +36,24 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
    In serial work, an applicable receipt must approve the final candidate tree
    and cite a live controller-owned `candidate read` snapshot taken after Judge
    validation. Check its immutable issue and session identity, base commit and
-   tree, candidate tree OID, and canonical changed-path manifest. A full inline
-   old/new response needs no `--complete`. For a paged
-   read, check proof of every old/new side byte. Chunks must be in order and
-   at most 128 KiB. Check that `candidate read --complete` passed before scope
-   or fact review. Restaging voids either mode's coverage. Require fresh stage/read
-   proof after each fix. If
-   the boundary is unavailable in the selected mode, require the exact
+   tree, candidate tree OID, and canonical changed paths from the controller.
+   Check each controller-authorized exact Git read. It must name the path,
+   old/new side, byte offset, and length. Reads may be in any order. Each read
+   is capped at 128 KiB. Check the review of changed and absent sides. Check
+   repo, issue, base, tree, path, side, blob ID, offset, and length for each
+   read. Repeated or direct reads need no hidden cursor, prior manifest state,
+   or completion call. The canonical inventory must give each path's old and
+   new mode, blob ID, and size. Require the Consistency Judge to account for
+   both sides of every path and mark absent sides. For each present side,
+   compare its listed ranges with that side's blob ID and size. The ranges
+   together must cover every byte with no gaps; check mode-only changes too.
+   Missing ranges, unreadable sides, wrong identities, and unaccounted paths
+   or sides block approval. Require the receipt to affirm that the judge read
+   and assessed every present changed side. Git proves returned bytes and tree
+   identity; delivery alone does not prove comprehension. Restaging voids prior
+   read proof. Require fresh stage/read
+   proof after each fix. If the boundary is unavailable in the selected mode,
+   require the exact
    `$consistency-judge: not applicable — trusted pre-finalization candidate tree/read boundary unavailable`
    with mode and capability evidence. A missing, rejected, failed, or stale
    expected read is a block, not N/A. When Temporality Judge applies, check

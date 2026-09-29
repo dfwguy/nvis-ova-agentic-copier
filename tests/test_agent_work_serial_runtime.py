@@ -18,6 +18,7 @@ import json
 import logging
 import re
 import sys
+from base64 import b64encode
 from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace
@@ -929,25 +930,27 @@ class FakeRepository:
         assert allow_base_ancestor is (base_sha == self.single_parent_result)
         return self.candidate_tree
 
-    def read_candidate(
+    def changed_candidate_paths(
         self,
         worktree: Path,
         candidate_tree: str,
         *,
         base_sha: str,
         allow_base_ancestor: bool = False,
-        changed_paths: tuple[str, ...],
     ) -> dict[str, object]:
+        changed_paths = tuple(
+            sorted(
+                set(
+                    self.publication_paths
+                    if allow_base_ancestor and self.publication_paths is not None
+                    else self.paths
+                )
+            )
+        )
         del worktree
         self.candidate_reads.append((base_sha, allow_base_ancestor, changed_paths))
         assert base_sha in {self.current_head, self.single_parent_result}
         assert allow_base_ancestor is (base_sha == self.single_parent_result)
-        expected_paths = (
-            self.publication_paths
-            if allow_base_ancestor and self.publication_paths is not None
-            else self.paths
-        )
-        assert changed_paths == tuple(sorted(set(expected_paths)))
         return {
             "candidate_tree": candidate_tree,
             "base_tree": "a" * 40,
@@ -956,12 +959,47 @@ class FakeRepository:
                 {
                     "path": path,
                     "old_mode": None,
+                    "old_oid": None,
+                    "old_size": None,
                     "new_mode": "100644",
-                    "old_content": None,
-                    "new_content": "content\n",
+                    "new_oid": "d" * 40,
+                    "new_size": len(b"content\n"),
                 }
                 for path in changed_paths
             ],
+        }
+
+    def read_candidate_range(
+        self,
+        worktree: Path,
+        candidate_tree: str,
+        *,
+        base_sha: str,
+        path: str,
+        side: str,
+        offset: int,
+        length: int,
+        allow_base_ancestor: bool = False,
+    ) -> dict[str, object]:
+        del worktree, base_sha
+        expected_paths = (
+            self.publication_paths
+            if allow_base_ancestor and self.publication_paths is not None
+            else self.paths
+        )
+        assert path in expected_paths and side == "new"
+        content = b"content\n"
+        assert 0 <= offset < len(content) and 0 < length <= len(content) - offset
+        return {
+            "candidate_tree": candidate_tree,
+            "base_tree": "a" * 40,
+            "path": path,
+            "side": side,
+            "offset": offset,
+            "length": length,
+            "oid": "d" * 40,
+            "size": len(content),
+            "data_base64": b64encode(content[offset : offset + length]).decode(),
         }
 
     def judge_candidate(
@@ -1258,7 +1296,10 @@ def _broker_invocation_from_intent(
     *,
     broker_request: WorkerResultBrokerRequest | None,
     build_artifact: Callable[[bytes], bytes] | None,
-    candidate_action: Callable[[str, str | None], dict[str, object]] | None = None,
+    candidate_action: Callable[
+        [str, str | None, dict[str, object] | None], dict[str, object]
+    ]
+    | None = None,
     returncode: int | None = 0,
 ) -> WorkerInvocation:
     """Model a producer submitting intent through the trusted live callback."""
@@ -1279,28 +1320,42 @@ def _broker_invocation_from_intent(
     except (TypeError, ValueError, WorkerProtocolError) as error:
         return WorkerInvocation(0, "untrusted stdout", str(error), worker_result=None)
     candidate = None
-    reviewed = None
+    inventory_candidate = None
     if (
         candidate_action is not None
         and payload.get("workflow_lane") in {"coding", "content"}
         and payload.get("result_kind") == "ready_to_publish"
     ):
-        staged = candidate_action("stage", None)
+        staged = candidate_action("stage", None, None)
         tree = staged["candidate_tree"]
         assert isinstance(tree, str)
         if payload.get("workflow_lane") == "coding":
-            validated = candidate_action("validate", tree)
+            validated = candidate_action("validate", tree, None)
             if validated["state"] == "terminal-success":
                 candidate = tree
-        candidate_action("read", tree)
-        reviewed = tree
+        inventory = candidate_action("read", tree, {"mode": "changed_paths"})
+        assert inventory["candidate_tree"] == tree
+        files = cast(list[dict[str, object]], inventory["files"])
+        if files and all(
+            "new_content" not in file and "old_content" not in file for file in files
+        ):
+            path = cast(str, files[0]["path"])
+            read = candidate_action(
+                "read",
+                tree,
+                {"path": path, "side": "new", "offset": 0, "length": 1},
+            )
+            assert read["path"] == path
+            assert read["side"] == "new"
+            assert read["data_base64"] == "Yw=="
+        inventory_candidate = tree
     return WorkerInvocation(
         0,
         "untrusted stdout",
         "",
         worker_result=artifact,
         validated_candidate=candidate,
-        reviewed_candidate=reviewed,
+        inventory_candidate=inventory_candidate,
     )
 
 
@@ -1325,7 +1380,10 @@ class FakeInvoker:
         *,
         broker_request: WorkerResultBrokerRequest | None = None,
         build_artifact: Callable[[bytes], bytes] | None = None,
-        candidate_action: Callable[[str, str | None], dict[str, object]] | None = None,
+        candidate_action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ]
+        | None = None,
     ) -> WorkerInvocation:
         del checkout, timeout
         self.prompts.append(prompt)
@@ -1358,7 +1416,10 @@ class ProtocolFailureInvoker:
         *,
         broker_request: WorkerResultBrokerRequest | None = None,
         build_artifact: Callable[[bytes], bytes] | None = None,
-        candidate_action: Callable[[str, str | None], dict[str, object]] | None = None,
+        candidate_action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ]
+        | None = None,
     ) -> WorkerInvocation:
         del checkout, prompt, timeout, broker_request, build_artifact
         return WorkerInvocation(
@@ -1411,7 +1472,10 @@ class ArtifactInvoker:
         *,
         broker_request: WorkerResultBrokerRequest | None = None,
         build_artifact: Callable[[bytes], bytes] | None = None,
-        candidate_action: Callable[[str, str | None], dict[str, object]] | None = None,
+        candidate_action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ]
+        | None = None,
     ) -> WorkerInvocation:
         del checkout, timeout, build_artifact
         assert broker_request is not None
@@ -1513,7 +1577,10 @@ class BatchingInvoker:
         *,
         broker_request: WorkerResultBrokerRequest | None = None,
         build_artifact: Callable[[bytes], bytes] | None = None,
-        candidate_action: Callable[[str, str | None], dict[str, object]] | None = None,
+        candidate_action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ]
+        | None = None,
     ) -> WorkerInvocation:
         del checkout
         self.prompts.append(prompt)
@@ -1627,7 +1694,10 @@ class SingleSessionInvoker:
         *,
         broker_request: WorkerResultBrokerRequest | None = None,
         build_artifact: Callable[[bytes], bytes] | None = None,
-        candidate_action: Callable[[str, str | None], dict[str, object]] | None = None,
+        candidate_action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ]
+        | None = None,
     ) -> WorkerInvocation:
         del timeout
         self.checkouts.append(checkout)
@@ -2238,7 +2308,10 @@ class RedThenGreenInvoker:
         *,
         broker_request: WorkerResultBrokerRequest | None = None,
         build_artifact: Callable[[bytes], bytes] | None = None,
-        candidate_action: Callable[[str, str | None], dict[str, object]] | None = None,
+        candidate_action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ]
+        | None = None,
     ) -> WorkerInvocation:
         del checkout
         self.prompts.append(prompt)
@@ -2298,7 +2371,10 @@ class RedThenGreenArtifactInvoker:
         *,
         broker_request: WorkerResultBrokerRequest | None = None,
         build_artifact: Callable[[bytes], bytes] | None = None,
-        candidate_action: Callable[[str, str | None], dict[str, object]] | None = None,
+        candidate_action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ]
+        | None = None,
     ) -> WorkerInvocation:
         assert broker_request is not None
         self.requests.append(broker_request)
@@ -2335,7 +2411,10 @@ class ProducerOwnedRedThenGreenInvoker:
         *,
         broker_request: WorkerResultBrokerRequest | None = None,
         build_artifact: Callable[[bytes], bytes] | None = None,
-        candidate_action: Callable[[str, str | None], dict[str, object]] | None = None,
+        candidate_action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ]
+        | None = None,
     ) -> WorkerInvocation:
         self.prompts.append(prompt)
         if len(self.prompts) == 1:
@@ -2480,7 +2559,9 @@ def test_serial_publication_respects_trusted_timing_outcome(
             *,
             broker_request: WorkerResultBrokerRequest | None = None,
             build_artifact: Callable[[bytes], bytes] | None = None,
-            candidate_action: Callable[[str, str | None], dict[str, object]]
+            candidate_action: Callable[
+                [str, str | None, dict[str, object] | None], dict[str, object]
+            ]
             | None = None,
         ) -> WorkerInvocation:
             if timing_outcome == "report_only":
@@ -2493,16 +2574,16 @@ def test_serial_publication_respects_trusted_timing_outcome(
                     candidate_action=candidate_action,
                 )
             assert candidate_action is not None
-            staged = candidate_action("stage", None)
+            staged = candidate_action("stage", None, None)
             tree = cast(str, staged["candidate_tree"])
-            validated = candidate_action("validate", tree)
+            validated = candidate_action("validate", tree, None)
             assert cast(dict[str, object], validated["timing_review"])["outcome"] == (
                 "correction_required"
             )
             with pytest.raises(
                 WorkerProtocolError, match="candidate request is invalid"
             ):
-                candidate_action("read", tree)
+                candidate_action("read", tree, {"mode": "changed_paths"})
             return WorkerInvocation(1)
 
     invoker = TimingProbeInvoker()
@@ -2601,17 +2682,19 @@ def test_coding_candidate_read_requires_successful_validation(
             *,
             broker_request: WorkerResultBrokerRequest | None = None,
             build_artifact: Callable[[bytes], bytes] | None = None,
-            candidate_action: Callable[[str, str | None], dict[str, object]]
+            candidate_action: Callable[
+                [str, str | None, dict[str, object] | None], dict[str, object]
+            ]
             | None = None,
         ) -> WorkerInvocation:
             assert candidate_action is not None
-            staged = candidate_action("stage", None)
+            staged = candidate_action("stage", None, None)
             tree = staged["candidate_tree"]
             assert isinstance(tree, str)
             with pytest.raises(
                 WorkerProtocolError, match="candidate request is invalid"
             ):
-                candidate_action("read", tree)
+                candidate_action("read", tree, {"mode": "changed_paths"})
             return super().invoke(
                 checkout,
                 prompt,
@@ -2708,7 +2791,9 @@ def test_atomic_red_boundary_failure_leaves_no_coding_lane_or_checkpoint(
             *,
             broker_request: WorkerResultBrokerRequest | None = None,
             build_artifact: Callable[[bytes], bytes] | None = None,
-            candidate_action: Callable[[str, str | None], dict[str, object]]
+            candidate_action: Callable[
+                [str, str | None, dict[str, object] | None], dict[str, object]
+            ]
             | None = None,
         ) -> WorkerInvocation:
             del checkout, prompt, timeout
@@ -2783,7 +2868,10 @@ class CorrectionDriftInvoker:
         *,
         broker_request: WorkerResultBrokerRequest | None = None,
         build_artifact: Callable[[bytes], bytes] | None = None,
-        candidate_action: Callable[[str, str | None], dict[str, object]] | None = None,
+        candidate_action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ]
+        | None = None,
     ) -> WorkerInvocation:
         del checkout, timeout
         assert broker_request is not None and build_artifact is not None
@@ -3587,7 +3675,9 @@ def test_first_unknown_lane_denies_candidate_validation_before_red(
             *,
             broker_request: WorkerResultBrokerRequest | None = None,
             build_artifact: Callable[[bytes], bytes] | None = None,
-            candidate_action: Callable[[str, str | None], dict[str, object]]
+            candidate_action: Callable[
+                [str, str | None, dict[str, object] | None], dict[str, object]
+            ]
             | None = None,
         ) -> WorkerInvocation:
             assert candidate_action is not None
@@ -3598,7 +3688,7 @@ def test_first_unknown_lane_denies_candidate_validation_before_red(
                 with pytest.raises(
                     WorkerProtocolError, match="candidate request is invalid"
                 ):
-                    candidate_action(action, tree)
+                    candidate_action(action, tree, None)
                 self.denied.append(action)
             return WorkerInvocation(1)
 
@@ -5614,13 +5704,17 @@ def test_authored_candidate_execution_uses_ancestor_validation_only(
             *,
             broker_request: WorkerResultBrokerRequest | None = None,
             build_artifact: Callable[[bytes], bytes] | None = None,
-            candidate_action: Callable[[str, str | None], dict[str, object]]
+            candidate_action: Callable[
+                [str, str | None, dict[str, object] | None], dict[str, object]
+            ]
             | None = None,
         ) -> WorkerInvocation:
             assert candidate_action is not None
 
-            def observed(action: str, tree: str | None) -> dict[str, object]:
-                evidence = candidate_action(action, tree)
+            def observed(
+                action: str, tree: str | None, selector: dict[str, object] | None
+            ) -> dict[str, object]:
+                evidence = candidate_action(action, tree, selector)
                 if action == "read":
                     self.read_base_sha = cast(str, evidence["base_sha"])
                 return evidence
@@ -5654,7 +5748,7 @@ def test_authored_candidate_execution_uses_ancestor_validation_only(
     assert repository.judged_paths == [("authored.py", "recovery.py")]
     assert (
         repository.red_candidate_tree_calls
-        == [(checkpoint.base_sha, ("authored.py", "recovery.py"))] * 5
+        == [(checkpoint.base_sha, ("authored.py", "recovery.py"))] * 4
     )
     assert outcome is not None and outcome.state is RunnerState.PUBLISHING
 
@@ -21612,7 +21706,9 @@ def test_apply_retries_a_worker_exit_in_the_same_activation(tmp_path: Path) -> N
             *,
             broker_request: WorkerResultBrokerRequest | None = None,
             build_artifact: Callable[[bytes], bytes] | None = None,
-            candidate_action: Callable[[str, str | None], dict[str, object]]
+            candidate_action: Callable[
+                [str, str | None, dict[str, object] | None], dict[str, object]
+            ]
             | None = None,
         ) -> WorkerInvocation:
             self.invocations += 1
@@ -23593,13 +23689,15 @@ def test_project_timing_contention_requeues_without_spending_retry_budget(
             *,
             broker_request: WorkerResultBrokerRequest | None = None,
             build_artifact: Callable[[bytes], bytes] | None = None,
-            candidate_action: Callable[[str, str | None], dict[str, object]]
+            candidate_action: Callable[
+                [str, str | None, dict[str, object] | None], dict[str, object]
+            ]
             | None = None,
         ) -> WorkerInvocation:
             assert candidate_action is not None
-            tree = candidate_action("stage", None)["candidate_tree"]
+            tree = candidate_action("stage", None, None)["candidate_tree"]
             assert isinstance(tree, str)
-            assert candidate_action("validate", tree)["state"] == "deferred"
+            assert candidate_action("validate", tree, None)["state"] == "deferred"
             return WorkerInvocation(1, "", "timing admission busy")
 
     repository = DeferredRepository(config)
@@ -23668,14 +23766,16 @@ def test_latest_exact_tree_validation_controls_timing_deferral(
             *,
             broker_request: WorkerResultBrokerRequest | None = None,
             build_artifact: Callable[[bytes], bytes] | None = None,
-            candidate_action: Callable[[str, str | None], dict[str, object]]
+            candidate_action: Callable[
+                [str, str | None, dict[str, object] | None], dict[str, object]
+            ]
             | None = None,
         ) -> WorkerInvocation:
             assert candidate_action is not None
-            tree = candidate_action("stage", None)["candidate_tree"]
+            tree = candidate_action("stage", None, None)["candidate_tree"]
             assert isinstance(tree, str)
             for expected in states:
-                assert candidate_action("validate", tree)["state"] == expected
+                assert candidate_action("validate", tree, None)["state"] == expected
             return WorkerInvocation(1, "", "worker stopped")
 
     observed = list(states)
@@ -23725,15 +23825,17 @@ def test_staging_new_tree_discards_prior_timing_deferral(tmp_path: Path) -> None
             *,
             broker_request: WorkerResultBrokerRequest | None = None,
             build_artifact: Callable[[bytes], bytes] | None = None,
-            candidate_action: Callable[[str, str | None], dict[str, object]]
+            candidate_action: Callable[
+                [str, str | None, dict[str, object] | None], dict[str, object]
+            ]
             | None = None,
         ) -> WorkerInvocation:
             assert candidate_action is not None
-            first = candidate_action("stage", None)["candidate_tree"]
+            first = candidate_action("stage", None, None)["candidate_tree"]
             assert isinstance(first, str)
-            assert candidate_action("validate", first)["state"] == "deferred"
+            assert candidate_action("validate", first, None)["state"] == "deferred"
             repository.candidate_tree = "c" * 40
-            second = candidate_action("stage", None)["candidate_tree"]
+            second = candidate_action("stage", None, None)["candidate_tree"]
             assert second == repository.candidate_tree
             return WorkerInvocation(1, "", "worker stopped after restaging")
 
