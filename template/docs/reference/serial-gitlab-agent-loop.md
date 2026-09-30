@@ -454,6 +454,49 @@ mismatched proof stops session creation.
 An expired session or changed identity stops an operation. These tools grant
 no arbitrary Git, GitLab, publication, approval, or merge access.
 
+#### Opt-in worker validation MCP primitive
+
+The controller can create a separate live Judge validation session through
+`create_live_worker_validation_session`. It binds one staged candidate tree to
+the executing worker record and checked checkout. The repository supplies the
+broker and MCP server as opt-in parts. There is no installed host launch for
+them; the normal worker launch remains unchanged. This session does not stage
+files.
+
+| Worker validation MCP tool | Model arguments | Result |
+| --- | --- | --- |
+| `worker_validation_validate` | None | Runs or returns the controller's validation result for the bound staged tree. |
+| `worker_validation_status` | None | Reads that tree's saved validation status without starting hooks. |
+| `worker_validation_evidence` | One fixed `selector` | Reads a bounded evidence summary or one JUnit or timing detail page. |
+
+These tools use the existing controller route for the staged candidate.
+Ordinary coding work after retained Red uses candidate commit for validation;
+the separate validate and status tools apply only where the controller permits
+staged-tree validation, such as a pending coding merge.
+
+The `view: summary` selector returns `candidate_tree`, `state`, `verdict`,
+`timing_status`, and the exact JUnit artifact identities:
+`environment`, `sha256`, and `test_count`. Detail selectors use `view: junit`
+or `view: timing`, `environment` set to `py311` or `py314`, `offset`
+from 0 to 100000, and `limit` from 1 to 100. Detail replies contain `items`,
+`total`, and `next_offset` for paging. Timing pages also include
+`timing_complete` and page through the complete `over_100ms_cases` list;
+each item contains `name` and `seconds`. An absent explicit verdict is
+`unknown`; a successful state alone does not supply approval. An absent or
+`null` internal timing status also appears as `unknown`. The broker projects
+the saved controller status into these compact fields, even when the internal
+record is large. It rejects a `raw_receipt` field. Replies omit artifact paths,
+raw XML, controller state
+paths, the private connection nonce, and other unlisted gateway fields.
+
+This server lists only these three tools. The model cannot choose a command,
+hook, checkout, issue, tree, path, or arbitrary evidence field. Before any hook
+starts, the broker rejects a non-Judge role, stale ledger revision or workflow
+state and phase, changed branch or HEAD, or an invalid selector. The controller
+checks the supplied tree against its current staged candidate before running
+validation. An oversized projected result fails instead of returning a partial
+result. This primitive does not grant publication, approval, or merge access.
+
 #### Candidate-preview MCP host primitive
 
 Hosts can construct `RoleExecutionProfile.candidate_preview` for role

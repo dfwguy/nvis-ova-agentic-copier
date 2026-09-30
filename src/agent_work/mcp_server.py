@@ -29,6 +29,7 @@ from pydantic import (
 )
 
 from .candidate_boundary import GIT_READ_MAX_CHUNK_BYTES
+from .serial import _worker_validation_projection
 from .worker import (
     CandidateOperation,
     WorkerProtocolError,
@@ -36,7 +37,7 @@ from .worker import (
     candidate_tools_for_role,
     request_candidate_validation,
 )
-from .worker_read import _public_git_value
+from .worker_read import _public_git_value, _validation_selector
 
 CandidateGateway = Callable[
     [CandidateOperation, str, dict[str, object] | None], dict[str, object]
@@ -395,6 +396,85 @@ def create_worker_git_mcp_server(
     def worker_git_commit_candidate(candidate_tree: str) -> CallToolResult:
         """Ask the controller to commit the exact staged coding candidate."""
         return dispatch("git_commit_candidate", candidate_tree)
+
+    return server
+
+
+class _WorkerValidationMCPServer(MCPServer):
+    def __init__(self) -> None:
+        super().__init__("worker-validation")
+
+    async def list_tools(self) -> list[Tool]:
+        """Advertise only three closed Judge operations."""
+        return [
+            tool.model_copy(
+                update={
+                    "input_schema": {**tool.input_schema, "additionalProperties": False}
+                }
+            )
+            for tool in await super().list_tools()
+        ]
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any], context: Any = None
+    ) -> CallToolResult:
+        valid = (
+            name in {"worker_validation_validate", "worker_validation_status"}
+            and arguments == {}
+        ) or (
+            name == "worker_validation_evidence"
+            and set(arguments) == {"selector"}
+            and _validation_selector(arguments.get("selector"))
+        )
+        if not valid:
+            return CallToolResult(
+                content=[
+                    TextContent(text="worker_validation: invalid tool or arguments")
+                ],
+                is_error=True,
+            )
+        return cast(CallToolResult, await super().call_tool(name, arguments, context))
+
+
+def create_worker_validation_mcp_server(
+    gateway: Callable[[str, str, dict[str, object] | None], dict[str, object]],
+    candidate_tree: str,
+) -> MCPServer:
+    """Expose a separate Judge-only exact-candidate validation surface."""
+    server = _WorkerValidationMCPServer()
+
+    def dispatch(
+        action: str, selector: dict[str, object] | None = None
+    ) -> CallToolResult:
+        try:
+            raw = gateway(action, candidate_tree, selector)
+            response = _worker_validation_projection(raw, candidate_tree, selector)
+            encoded = json.dumps(response, ensure_ascii=True)
+            if len(encoded.encode()) > 131_072:
+                raise ValueError("worker validation response too large")
+        except (WorkerProtocolError, OSError, ValueError, TypeError, OverflowError):
+            return CallToolResult(
+                content=[TextContent(text="worker_validation: request failed")],
+                is_error=True,
+            )
+        return CallToolResult(
+            content=[TextContent(text=encoded)], structured_content=response
+        )
+
+    @server.tool()
+    def worker_validation_validate() -> CallToolResult:
+        """Run controller validation of this staged candidate."""
+        return dispatch("validate")
+
+    @server.tool()
+    def worker_validation_status() -> CallToolResult:
+        """Read this candidate's validation state."""
+        return dispatch("status")
+
+    @server.tool()
+    def worker_validation_evidence(selector: dict[str, object]) -> CallToolResult:
+        """Read one bounded summary or evidence page."""
+        return dispatch("evidence", selector)
 
     return server
 
