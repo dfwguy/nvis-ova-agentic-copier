@@ -23,7 +23,7 @@ from base64 import b64encode
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from hashlib import sha256
+from hashlib import sha1, sha256
 from pathlib import Path, PurePosixPath
 from time import monotonic
 from typing import IO, TypedDict
@@ -77,6 +77,15 @@ class CandidateRangeRead(TypedDict):
     oid: str
     size: int
     data_base64: str
+
+
+class CandidateInventoryRead(TypedDict):
+    """Bounded inventory of changed paths and their Git blob metadata."""
+
+    candidate_tree: str
+    base_tree: str
+    changed_paths: list[str]
+    files: list[dict[str, object]]
 
 
 class CommandTimeoutError(RepositoryError):
@@ -1682,15 +1691,28 @@ class GitRepository:
             raise RepositoryError(str(error)) from error
         return parts[0], parts[2], size
 
-    def changed_candidate_paths(
+    def _verify_candidate_identity(
         self,
         worktree: Path,
         candidate_tree: str,
-        *,
         base_sha: str,
-        allow_base_ancestor: bool = False,
-    ) -> dict[str, object]:
-        """Describe the exact changed Git objects without reading their blobs."""
+        candidate_sha: str | None,
+        allow_base_ancestor: bool,
+    ) -> None:
+        """Bind a committed read to objects, or preserve the live staged check."""
+        if candidate_sha is not None:
+            if not all(
+                re.fullmatch(r"[0-9a-f]{40}", value)
+                for value in (candidate_sha, candidate_tree, base_sha)
+            ):
+                raise RepositoryError("candidate identity is invalid")
+            if self._git(
+                "rev-parse", f"{candidate_sha}^{{tree}}", cwd=worktree
+            ) != candidate_tree or not self._is_ancestor(
+                base_sha, candidate_sha, worktree
+            ):
+                raise RepositoryError("candidate changed")
+            return
         if (
             not self._candidate_read_base_is_exact(
                 worktree, base_sha, allow_base_ancestor=allow_base_ancestor
@@ -1698,6 +1720,20 @@ class GitRepository:
             or self._git("write-tree", cwd=worktree) != candidate_tree
         ):
             raise RepositoryError("candidate changed")
+
+    def changed_candidate_paths(
+        self,
+        worktree: Path,
+        candidate_tree: str,
+        *,
+        base_sha: str,
+        candidate_sha: str | None = None,
+        allow_base_ancestor: bool = False,
+    ) -> CandidateInventoryRead:
+        """Describe the exact changed Git objects without reading their blobs."""
+        self._verify_candidate_identity(
+            worktree, candidate_tree, base_sha, candidate_sha, allow_base_ancestor
+        )
         base_tree = self._git("rev-parse", f"{base_sha}^{{tree}}", cwd=worktree)
         if not re.fullmatch(r"[0-9a-f]{40}", base_tree):
             raise RepositoryError("candidate base tree is invalid")
@@ -1745,13 +1781,9 @@ class GitRepository:
                     "new_size": new_size,
                 }
             )
-        if (
-            not self._candidate_read_base_is_exact(
-                worktree, base_sha, allow_base_ancestor=allow_base_ancestor
-            )
-            or self._git("write-tree", cwd=worktree) != candidate_tree
-        ):
-            raise RepositoryError("candidate changed")
+        self._verify_candidate_identity(
+            worktree, candidate_tree, base_sha, candidate_sha, allow_base_ancestor
+        )
         return {
             "candidate_tree": candidate_tree,
             "base_tree": base_tree,
@@ -1769,6 +1801,7 @@ class GitRepository:
         side: str,
         offset: int,
         length: int,
+        candidate_sha: str | None = None,
         allow_base_ancestor: bool = False,
     ) -> CandidateRangeRead:
         """Read one independently authorized byte range from a changed Git blob."""
@@ -1786,13 +1819,9 @@ class GitRepository:
             raise RepositoryError("candidate read path is invalid") from error
         if "\\" in path or "\0" in path:
             raise RepositoryError("candidate read path is invalid")
-        if (
-            not self._candidate_read_base_is_exact(
-                worktree, base_sha, allow_base_ancestor=allow_base_ancestor
-            )
-            or self._git("write-tree", cwd=worktree) != candidate_tree
-        ):
-            raise RepositoryError("candidate changed")
+        self._verify_candidate_identity(
+            worktree, candidate_tree, base_sha, candidate_sha, allow_base_ancestor
+        )
         base_tree = self._git("rev-parse", f"{base_sha}^{{tree}}", cwd=worktree)
         if not re.fullmatch(r"[0-9a-f]{40}", base_tree):
             raise RepositoryError("candidate base tree is invalid")
@@ -1817,12 +1846,16 @@ class GitRepository:
         if (
             len(blob) != size
             or b"\0" in blob
-            or not self._candidate_read_base_is_exact(
-                worktree, base_sha, allow_base_ancestor=allow_base_ancestor
+            or (
+                candidate_sha is not None
+                and sha1(b"blob " + str(len(blob)).encode() + b"\0" + blob).hexdigest()
+                != oid
             )
-            or self._git("write-tree", cwd=worktree) != candidate_tree
         ):
             raise RepositoryError("candidate changed")
+        self._verify_candidate_identity(
+            worktree, candidate_tree, base_sha, candidate_sha, allow_base_ancestor
+        )
         try:
             blob.decode("utf-8")
         except UnicodeDecodeError as error:

@@ -17,6 +17,8 @@ import math
 import re
 import secrets
 import tempfile
+from base64 import b64decode
+from binascii import Error as BinasciiError
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
@@ -26,6 +28,11 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol, cast
 
+from .candidate_boundary import (
+    GIT_READ_MAX_CHUNK_BYTES,
+    CandidateBoundaryError,
+    validate_git_read_paths,
+)
 from .classification import ClassificationError, classify_work, is_protected_policy_path
 from .domain import (
     ACTIVE_STATES,
@@ -54,6 +61,7 @@ from .green_commit import (
     create_green_commit,
     green_commit_ref,
 )
+from .ledger import LedgerError
 from .models import (
     ConditionEvidence,
     GitLabIssue,
@@ -70,7 +78,13 @@ from .models import (
     TransitionIntentRecord,
 )
 from .outcome_projection import replay_outcome_projection
-from .ports import GitLabPort, InvokerPort, LedgerPort, RepositoryPort
+from .ports import (
+    CommittedCandidateRepositoryPort,
+    GitLabPort,
+    InvokerPort,
+    LedgerPort,
+    RepositoryPort,
+)
 from .red_checkpoint import (
     RedCheckpointError,
     RedCheckpointEvidence,
@@ -159,6 +173,189 @@ class _BoundReconcileRepository(Protocol):
         *,
         expected_default_sha: str,
     ) -> str | None: ...
+
+
+_COMMITTED_READ_ROLES = frozenset({"router", "judge", "finalizer"})
+
+
+def read_committed_candidate(
+    issue_iid: int,
+    mr_iid: int,
+    candidate_sha: str,
+    candidate_tree: str,
+    role: str,
+    selector: dict[str, object],
+    *,
+    ledger: LedgerPort,
+    gitlab: GitLabPort,
+    repository: CommittedCandidateRepositoryPort,
+) -> dict[str, object]:
+    """Read an exact published candidate using durable and current identities."""
+    failure = WorkerProtocolError("candidate_broker", "candidate request is invalid")
+    try:
+        if not isinstance(selector, dict):
+            raise failure
+        record = ledger.load_read_only(issue_iid)
+        if (
+            type(issue_iid) is not int
+            or type(mr_iid) is not int
+            or issue_iid <= 0
+            or mr_iid <= 0
+            or role not in _COMMITTED_READ_ROLES
+            or record is None
+            or record.issue_iid != issue_iid
+            or record.project_id != repository.config.project_id
+            or record.merge_request_iid != mr_iid
+            or record.publication_sha != candidate_sha
+            or not all(
+                isinstance(value, str)
+                and len(value) == 40
+                and all(character in "0123456789abcdef" for character in value)
+                for value in (candidate_sha, candidate_tree)
+            )
+        ):
+            raise failure
+        base_sha = (
+            record.correction_identity.baseline_sha
+            if record.correction_identity is not None
+            else record.main_sha
+        )
+        if base_sha is None:
+            raise failure
+        project = gitlab.verify_project()
+        if project.id != record.project_id:
+            raise failure
+
+        def identity_current() -> bool:
+            current = ledger.load_read_only(issue_iid)
+            mr = gitlab.fetch_merge_request(mr_iid)
+            return (
+                current == record
+                and mr.iid == mr_iid
+                and mr.state == "opened"
+                and mr.source_project_id == record.project_id
+                and mr.target_project_id == record.project_id
+                and mr.source_branch == record.source_branch
+                and mr.target_branch == (record.main_branch or project.default_branch)
+                and mr.sha == candidate_sha
+                and gitlab.mr_closes_issue(mr_iid, issue_iid)
+            )
+
+        if not identity_current():
+            raise failure
+        if selector == {"mode": "changed_paths"}:
+            result = dict(
+                repository.changed_candidate_paths(
+                    record.worktree,
+                    candidate_tree,
+                    base_sha=base_sha,
+                    candidate_sha=candidate_sha,
+                )
+            )
+            paths = result.get("changed_paths")
+            files = result.get("files")
+            if (
+                result.get("candidate_tree") != candidate_tree
+                or not isinstance(result.get("base_tree"), str)
+                or len(cast(str, result["base_tree"])) != 40
+                or not isinstance(paths, list)
+                or not isinstance(files, list)
+                or len(paths) != len(files)
+                or not all(isinstance(path, str) for path in paths)
+            ):
+                raise failure
+            validate_git_read_paths(cast(tuple[str, ...], tuple(paths)))
+            if any(
+                not isinstance(item, dict)
+                or cast(dict[str, object], item).get("path") != path
+                or any(
+                    cast(dict[str, object], item).get(f"{side}_mode")
+                    not in {None, "100644", "100755"}
+                    or (cast(dict[str, object], item).get(f"{side}_oid") is None)
+                    != (cast(dict[str, object], item).get(f"{side}_size") is None)
+                    for side in ("old", "new")
+                )
+                for path, item in zip(paths, files, strict=True)
+            ):
+                raise failure
+        else:
+            path = selector.get("path")
+            side = selector.get("side")
+            offset = selector.get("offset")
+            length = selector.get("length")
+            if (
+                set(selector) != {"path", "side", "offset", "length"}
+                or not isinstance(path, str)
+                or not isinstance(side, str)
+                or side not in {"old", "new"}
+                or type(offset) is not int
+                or offset < 0
+                or type(length) is not int
+                or not 0 < length <= GIT_READ_MAX_CHUNK_BYTES
+            ):
+                raise failure
+            validate_git_read_paths((path,))
+            result = dict(
+                repository.read_candidate_range(
+                    record.worktree,
+                    candidate_tree,
+                    base_sha=base_sha,
+                    candidate_sha=candidate_sha,
+                    path=path,
+                    side=side,
+                    offset=offset,
+                    length=length,
+                )
+            )
+            data = result.get("data_base64")
+            if not isinstance(data, str):
+                raise failure
+            decoded = b64decode(data, validate=True)
+            oid = result.get("oid")
+            size = result.get("size")
+            if (
+                result.get("candidate_tree") != candidate_tree
+                or not isinstance(result.get("base_tree"), str)
+                or result.get("path") != path
+                or result.get("side") != side
+                or result.get("offset") != offset
+                or result.get("length") != length
+                or not isinstance(oid, str)
+                or len(oid) != 40
+                or any(character not in "0123456789abcdef" for character in oid)
+                or type(size) is not int
+                or offset + length > size
+                or len(decoded) != length
+                or (
+                    offset == 0
+                    and length == size
+                    and hashlib.sha1(
+                        b"blob " + str(size).encode() + b"\0" + decoded
+                    ).hexdigest()
+                    != oid
+                )
+            ):
+                raise failure
+        if not identity_current():
+            raise failure
+        return result | {
+            "candidate_sha": candidate_sha,
+            "issue_iid": issue_iid,
+            "mr_iid": mr_iid,
+            "role": role,
+        }
+    except (
+        BinasciiError,
+        CandidateBoundaryError,
+        GitLabError,
+        KeyError,
+        LedgerError,
+        OSError,
+        RepositoryError,
+        TypeError,
+        ValueError,
+    ) as error:
+        raise failure from error
 
 
 def create_live_worker_read_session(

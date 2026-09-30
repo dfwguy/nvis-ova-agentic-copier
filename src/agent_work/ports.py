@@ -195,6 +195,8 @@ class LedgerPort(Protocol):
 
     def load(self, issue_iid: int) -> LedgerRecord | None: ...
 
+    def load_read_only(self, issue_iid: int) -> LedgerRecord | None: ...
+
     def list_records(self) -> tuple[LedgerRecord, ...]: ...
 
     def persist(self, record: LedgerRecord) -> LedgerRecord: ...
@@ -357,3 +359,33 @@ class InvokerPort(Protocol):
 
 
 ProjectLockFactory = Callable[[], AbstractContextManager[None]]
+
+
+class CommittedCandidateRepositoryPort(Protocol):
+    """Narrow object-read boundary independent of the live staged candidate."""
+
+    config: AgentWorkConfig
+
+    def changed_candidate_paths(
+        self,
+        worktree: Path,
+        candidate_tree: str,
+        *,
+        base_sha: str,
+        candidate_sha: str | None = None,
+        allow_base_ancestor: bool = False,
+    ) -> Mapping[str, object]: ...
+
+    def read_candidate_range(
+        self,
+        worktree: Path,
+        candidate_tree: str,
+        *,
+        base_sha: str,
+        path: str,
+        side: str,
+        offset: int,
+        length: int,
+        candidate_sha: str | None = None,
+        allow_base_ancestor: bool = False,
+    ) -> Mapping[str, object]: ...

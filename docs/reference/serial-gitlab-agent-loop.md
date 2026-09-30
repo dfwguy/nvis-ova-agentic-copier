@@ -5,7 +5,7 @@ summary: Look up loop commands, states, data, and limits.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-29
+last_reviewed: 2026-09-30
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to prepare capacity evidence before a worker launch.
@@ -115,6 +115,13 @@ agent-work candidate validate --issue-iid IID --candidate-tree TREE
                               [--candidate-socket PATH] [--broker-nonce NONCE] [--apply] [--json]
 agent-work candidate status --issue-iid IID --candidate-tree TREE
                             [--candidate-socket PATH] [--broker-nonce NONCE] [--apply] [--json]
+agent-work candidate committed-changed-paths --issue-iid IID --mr-iid IID
+    --candidate-sha SHA --candidate-tree TREE --role {router,judge,finalizer}
+    [--apply] [--json]
+agent-work candidate committed-read --issue-iid IID --mr-iid IID
+    --candidate-sha SHA --candidate-tree TREE --role {router,judge,finalizer}
+    --path PATH --side {old,new} --offset NONNEGATIVE_INT --length 1..131072
+    [--apply] [--json]
 agent-work migration preview [--json] [--debug]
 agent-work migration apply --plan-file PATH --apply [--json] [--debug]
 agent-work upstream-finding preview --manifest-file PATH --upstream-host HOST --upstream-project-id POSITIVE_INT --upstream-credential-file PATH [--apply] [--json] [--debug]
@@ -151,6 +158,8 @@ agent-work slow-root reconcile --manifest-file PATH [--json] [--apply] [--debug]
 | `candidate read` | Same identity and returned tree, changed path, side, offset, and length | Reads one bounded byte range from the exact old or new Git blob. |
 | `candidate validate` | Same identity and returned tree | Content and remediation work, and coding work with a pending target merge, run or return the durable staged-tree Judge result. |
 | `candidate status` | Same identity and returned tree | Those staged-tree routes read the durable result without rerunning the hook. Ordinary coding work replays `candidate commit` to recover its exact result. |
+| `candidate committed-changed-paths` | Exact issue, open merge request, current commit, tree, and review role | Reads changed paths and old and new Git blob metadata after a restart, without a live candidate socket. |
+| `candidate committed-read` | Same identity, changed path, side, offset, and length | Reads one bounded byte range from the exact committed Git blob. |
 | `migration preview` | None | Returns the planned migration actions. |
 | `migration apply` | Reviewed `--plan-file PATH` and `--apply` | Applies only unchanged, preflighted actions. |
 | `upstream-finding preview` | Manifest, upstream host, project ID, and credential file | `--apply` is the only mutation switch. |
@@ -683,6 +692,34 @@ syntax.
 `validate` and `status` exit nonzero unless the saved result is terminal
 success. The worker uses `--apply --json` so it can parse bounded responses,
 including a failed validation result.
+
+#### Committed candidate reads after restart
+
+The controller-owned `candidate committed-changed-paths` and
+`candidate committed-read` commands inspect an exact published commit without
+a live worker socket or nonce. They require the issue number, merge request
+number, commit SHA, tree ID, and a review role of `router`, `judge`, or
+`finalizer`. The role argument selects the review context; it is not an
+authentication credential. A bare command previews the request without
+reading the ledger, GitLab, or Git. `--apply` performs the read-only checks and
+returns the result; `--json` emits its fields.
+
+For each applied request, the controller checks the durable issue record, the
+current project and open merge request, its source and target branches, source
+SHA, and closing relation to the issue. It checks that the commit has the
+requested tree and that the saved base is its ancestor. It reads changed
+paths or the requested byte range from Git objects, then rechecks the issue
+and merge request identity. A mismatch rejects the read. The inventory
+returns `candidate_tree`, `base_tree`, `changed_paths`, and `files`. A range
+returns the requested path, side, offset, length, blob OID, size, and
+`data_base64`, with `candidate_tree` and `base_tree`. Both responses also
+include `candidate_sha`, `issue_iid`, `mr_iid`, and `role`.
+
+Committed reads do not stage files, run validation, or change the index or
+worktree. A dirty checkout remains intact. They add no read receipt or other
+store; the finalizer uses its existing workflow receipt. The live staged
+`stage`, `commit` or `validate`, and `read` sequence still governs work before
+publication. These commands do not approve or merge a merge request.
 
 ### `validation window`, `validation run`, and `validation status`
 
