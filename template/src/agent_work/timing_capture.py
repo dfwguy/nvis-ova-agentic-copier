@@ -717,11 +717,6 @@ def capture_serial_timing_review(
                     if path.startswith("tests/") and not path.endswith("/conftest.py")
                 ),
                 affected_by_helper=affected,
-                production_changed=any(
-                    path.endswith(".py")
-                    and not path.startswith(("tests/", "template/tests/"))
-                    for path in changed_paths
-                ),
                 run_focused=_focused_runner(
                     dependencies,
                     base=base,
