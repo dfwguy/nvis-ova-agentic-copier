@@ -125,6 +125,7 @@ from .worker import (
     worker_exit_evidence,
 )
 from .worker_read import (
+    WorkerGitBrokerSession,
     WorkerReadBrokerSession,
     WorkerReadSessionIdentity,
     create_worker_read_broker,
@@ -425,6 +426,213 @@ def create_live_worker_read_session(
         identity,
         identity_check=identity_check,
         read_action=read_action,
+        timeout_seconds=timeout_seconds,
+        temporary_directory=temporary_directory,
+    )
+
+
+def _worker_git_projection(
+    action: str, response: dict[str, object]
+) -> dict[str, object]:
+    """Expose only bounded operation results from full controller evidence."""
+    fields = {
+        "git_stage_candidate": ("candidate_tree", "state", "changed_path_count"),
+        "git_candidate_status": (
+            "candidate_tree",
+            "state",
+            "timing_status",
+            "changed_path_count",
+        ),
+        "git_commit_candidate": (
+            "candidate_tree",
+            "committed_tree",
+            "commit_sha",
+            "red_sha",
+            "state",
+            "timing_status",
+        ),
+    }
+    result: dict[str, object] = {}
+    for key in fields[action]:
+        value = response.get(key)
+        if value is None:
+            continue
+        if key in {"candidate_tree", "committed_tree", "commit_sha", "red_sha"}:
+            if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}", value):
+                raise ValueError("worker_git: invalid result identity")
+        elif key == "changed_path_count":
+            if type(value) is not int or not 0 <= value <= 1_000_000:
+                raise ValueError("worker_git: invalid path count")
+        elif not isinstance(value, str) or len(value.encode("utf-8")) > 64:
+            raise ValueError("worker_git: invalid result state")
+        result[key] = value
+    return result
+
+
+def create_live_worker_git_session(
+    record: LedgerRecord,
+    issue: GitLabIssue,
+    *,
+    ledger: LedgerPort,
+    repository: RepositoryPort,
+    candidate_action: Callable[
+        [str, str | None, dict[str, object] | None], dict[str, object]
+    ],
+    timeout_seconds: float,
+    temporary_directory: Path | None = None,
+) -> WorkerGitBrokerSession:
+    """Create an opt-in Git session bound to one live worker and checkout."""
+    if (
+        record.state is not RunnerState.EXECUTING
+        or record.phase is not WorkflowPhase.WORKFLOW
+        or record.source_sha is None
+        or issue.iid != record.issue_iid
+    ):
+        raise SegmentError("worker git identity is incomplete")
+    source_sha = record.source_sha
+    correction = record.correction_identity
+    authored = (
+        correction is not None and correction.mode == "authored_candidate_recovery"
+    )
+    candidate_base = correction.baseline_sha if authored and correction else source_sha
+    expected_head = repository.head(record.worktree)
+    if (
+        authored
+        and correction is not None
+        and (
+            correction.project_id != record.project_id
+            or correction.issue_iid != record.issue_iid
+            or correction.worktree != record.worktree
+            or correction.source_branch != record.source_branch
+            or correction.workflow_lane is not record.workflow_lane
+            or correction.head_sha != source_sha
+            or correction.red_checkpoint is None
+            or correction.red_checkpoint.project_id != record.project_id
+            or correction.red_checkpoint.issue_iid != record.issue_iid
+            or correction.red_checkpoint.source_branch != record.source_branch
+            or correction.red_checkpoint.base_sha != candidate_base
+        )
+    ):
+        raise SegmentError("worker git correction identity is invalid")
+    if expected_head != source_sha:
+        if (
+            record.workflow_lane is not WorkflowLane.CODING
+            or record.source_branch != f"agent/issue-{record.issue_iid}"
+            or not re.fullmatch(r"[0-9a-f]{40}", expected_head)
+            or not hasattr(repository, "green_commit_dependencies")
+            or not hasattr(repository, "red_commit_dependencies")
+        ):
+            raise SegmentError("worker git retained Green HEAD proof is unavailable")
+        commit_repository = cast(_CommitRepository, repository)
+        try:
+            green = commit_repository.green_commit_dependencies(record.worktree, Path())
+            red = commit_repository.red_commit_dependencies(record.worktree, Path())
+            red_sha, green_tree, _message = green.commit_identity(expected_head)
+            red_base, red_tree = red.commit_identity(red_sha)
+            proven = (
+                all(
+                    re.fullmatch(r"[0-9a-f]{40}", value)
+                    for value in (red_sha, green_tree, red_tree)
+                )
+                and red_base == candidate_base
+                and (
+                    not authored
+                    or correction is not None
+                    and correction.red_checkpoint is not None
+                    and correction.red_checkpoint.tree_oid == red_tree
+                )
+                and red.read_ref(red_commit_ref(record.issue_iid, candidate_base))
+                == red_sha
+                and green.read_ref(
+                    green_commit_ref(record.issue_iid, candidate_base, green_tree)
+                )
+                == expected_head
+            )
+        except (RepositoryError, ValueError, TypeError, AssertionError):
+            proven = False
+        if not proven:
+            raise SegmentError("worker git retained Green HEAD proof is invalid")
+    repository.verify_worktree(record.worktree, record.source_branch, expected_head)
+    identity = WorkerReadSessionIdentity(
+        nonce=secrets.token_hex(16),
+        project_id=record.project_id,
+        issue_iid=record.issue_iid,
+        checkout=record.worktree,
+        phase=record.phase.value,
+        ledger_revision=record.revision,
+        source_sha=record.source_sha,
+    )
+
+    def identity_check(candidate: WorkerReadSessionIdentity) -> bool:
+        current = ledger.load_read_only(record.issue_iid)
+        if (
+            candidate != identity
+            or current is None
+            or current.project_id != record.project_id
+            or current.issue_iid != record.issue_iid
+            or current.worktree != record.worktree
+            or current.revision != record.revision
+            or current.state is not record.state
+            or current.phase is not record.phase
+            or current.workflow_lane is not record.workflow_lane
+            or current.work_kind is not record.work_kind
+            or current.correction_identity != record.correction_identity
+            or current.source_branch != record.source_branch
+            or current.source_sha != record.source_sha
+        ):
+            return False
+        return checkout_check()
+
+    def checkout_check() -> bool:
+        repository.verify_worktree(record.worktree, record.source_branch, expected_head)
+        return repository.head(record.worktree) == expected_head
+
+    def git_action(action: str, tree: str | None) -> dict[str, object]:
+        nonlocal expected_head
+        if action == "git_status":
+            paths = repository.changed_paths(record.worktree)
+            path_bytes = tuple(len(path.encode("utf-8")) for path in paths)
+            if (
+                len(paths) > 128
+                or any(size > 512 for size in path_bytes)
+                or sum(path_bytes) > 16_384
+            ):
+                raise ValueError("worker_git: status too large")
+            return {"changed_paths": list(paths), "dirty": bool(paths)}
+        if action == "git_stage_candidate":
+            response = candidate_action("stage", None, None)
+            return _worker_git_projection(action, response)
+        if action == "git_candidate_status":
+            response = candidate_action("status", tree, None)
+            if response.get("candidate_tree") != tree:
+                raise ValueError("worker_git: candidate status tree changed")
+            return _worker_git_projection(action, response)
+        if action == "git_commit_candidate":
+            if record.workflow_lane is not WorkflowLane.CODING:
+                raise ValueError("worker_git: commit requires coding lane")
+            response = candidate_action("commit", tree, None)
+            commit_sha = response.get("commit_sha")
+            if (
+                response.get("state") != "terminal-success"
+                or response.get("candidate_tree") != tree
+                or response.get("committed_tree") != tree
+                or not isinstance(commit_sha, str)
+                or len(commit_sha) != 40
+                or any(char not in "0123456789abcdef" for char in commit_sha)
+            ):
+                raise ValueError("worker_git: candidate commit is invalid")
+            repository.verify_worktree(
+                record.worktree, record.source_branch, commit_sha
+            )
+            expected_head = commit_sha
+            return _worker_git_projection(action, response)
+        raise ValueError("worker_git: invalid action")
+
+    return WorkerGitBrokerSession(
+        identity,
+        identity_check=identity_check,
+        git_action=git_action,
+        reply_check=checkout_check,
         timeout_seconds=timeout_seconds,
         temporary_directory=temporary_directory,
     )

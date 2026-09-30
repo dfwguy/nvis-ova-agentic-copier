@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import stat
 import tempfile
@@ -28,10 +29,26 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from .worker import _clear_private_directory
 
 WorkerReadAction = Literal["context", "issue", "ledger"]
+_TREE_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 _MAX_FRAME_BYTES = 131_072
 _MAX_SOCKET_PATH_BYTES = 100
 _SOCKET_DIRECTORY_PREFIX = "awr-"
 _SOCKET_BASENAME = "s"
+_PRIVATE_GIT_FIELDS = frozenset(
+    {"nonce", "token", "secret", "credential", "password", "private_key"}
+)
+
+
+def _public_git_value(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            key: _public_git_value(item)
+            for key, item in value.items()
+            if isinstance(key, str) and key.lower() not in _PRIVATE_GIT_FIELDS
+        }
+    if isinstance(value, (list, tuple)):
+        return [_public_git_value(item) for item in value]
+    return value
 
 
 def _socket_path_fits(parent: Path) -> bool:
@@ -296,3 +313,131 @@ def request_worker_read(
     ):
         return cast(dict[str, object], response["value"])
     raise ValueError("worker_read: read failed")
+
+
+class WorkerGitBrokerSession(WorkerReadBrokerSession):
+    """Serve four closed Git operations for one live worker checkout."""
+
+    def __init__(
+        self,
+        identity: WorkerReadSessionIdentity,
+        *,
+        identity_check: Callable[[WorkerReadSessionIdentity], bool],
+        git_action: Callable[[str, str | None], dict[str, object]],
+        reply_check: Callable[[], bool],
+        timeout_seconds: float,
+        temporary_directory: Path | None,
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
+        self._git_action = git_action
+        self._reply_check = reply_check
+        self._staged_tree: str | None = None
+        super().__init__(
+            identity,
+            identity_check=identity_check,
+            read_action=lambda _action: {},
+            timeout_seconds=timeout_seconds,
+            temporary_directory=temporary_directory,
+            clock=clock,
+        )
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                connection, _ = self._socket.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            with connection:
+                connection.settimeout(0.5)
+                try:
+                    request = json.loads(_read_frame(connection))
+                    if not isinstance(request, dict):
+                        raise TypeError("worker_git: invalid request")
+                    action = request.get("action")
+                    expected_keys = (
+                        {"nonce", "action", "candidate_tree"}
+                        if action in {"git_candidate_status", "git_commit_candidate"}
+                        else {"nonce", "action"}
+                    )
+                    if (
+                        set(request) != expected_keys
+                        or request.get("nonce") != self._identity.nonce
+                        or action
+                        not in {
+                            "git_status",
+                            "git_stage_candidate",
+                            "git_candidate_status",
+                            "git_commit_candidate",
+                        }
+                        or self._clock() >= self._deadline
+                        or not self._identity_check(self._identity)
+                    ):
+                        raise ValueError("worker_git: invalid identity or operation")
+                    tree = request.get("candidate_tree")
+                    if action in {"git_candidate_status", "git_commit_candidate"} and (
+                        not isinstance(tree, str)
+                        or _TREE_PATTERN.fullmatch(tree) is None
+                        or tree != self._staged_tree
+                    ):
+                        raise ValueError("worker_git: candidate tree is not staged")
+                    result = self._git_action(cast(str, action), cast(str | None, tree))
+                    if not self._reply_check():
+                        raise ValueError("worker_git: identity changed")
+                    if action == "git_stage_candidate":
+                        staged = result.get("candidate_tree")
+                        if (
+                            not isinstance(staged, str)
+                            or _TREE_PATTERN.fullmatch(staged) is None
+                        ):
+                            raise ValueError("worker_git: invalid candidate tree")
+                        self._staged_tree = staged
+                    public = _public_git_value(result)
+                    encoded = json.dumps(public)
+                    if len(encoded.encode()) > _MAX_FRAME_BYTES:
+                        raise ValueError("worker_git: response too large")
+                    if self._stop.is_set() or self._clock() >= self._deadline:
+                        raise ValueError("worker_git: expired")
+                    _write_frame(connection, {"accepted": True, "value": public})
+                except (
+                    OSError,
+                    ValueError,
+                    TypeError,
+                    ValidationError,
+                    OverflowError,
+                    RuntimeError,
+                ):
+                    try:
+                        _write_frame(connection, {"accepted": False})
+                    except (OSError, ValueError):
+                        pass
+
+
+def request_worker_git(
+    socket_path: Path,
+    nonce: str,
+    action: str,
+    *,
+    candidate_tree: str | None = None,
+    timeout_seconds: float = 10,
+) -> dict[str, object]:
+    """Request one controller-bound worker Git operation."""
+    payload: dict[str, object] = {"nonce": nonce, "action": action}
+    if candidate_tree is not None:
+        payload["candidate_tree"] = candidate_tree
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(timeout_seconds)
+            connection.connect(str(socket_path))
+            _write_frame(connection, payload)
+            response = json.loads(_read_frame(connection))
+    except (OSError, ValueError, TimeoutError):
+        raise ValueError("worker_git: submission failed") from None
+    if (
+        isinstance(response, dict)
+        and response.get("accepted") is True
+        and isinstance(response.get("value"), dict)
+    ):
+        return cast(dict[str, object], response["value"])
+    raise ValueError("worker_git: request failed")
