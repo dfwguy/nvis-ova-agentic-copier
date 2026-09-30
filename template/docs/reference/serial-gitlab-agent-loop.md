@@ -693,12 +693,16 @@ For paired staged-tree diagnosis, the controller compares full-suite baseline
 and candidate JUnit inventories for `py311` and `py314`, bound to exact trees.
 Supplied proof must have matching environments, commands, and seeds. If paired
 proof is supplied, missing parts, malformed data, or mismatches cause
-rejection. With valid candidate JUnit and no paired comparator,
-baseline-relative timing is `UNKNOWN` and does not block the ordinary handoff.
-In that state, validation and saved status keep `timing_status="complete"` for
-the candidate JUnit and return `timing_comparison_status="unknown"` with
+rejection. A verified missing baseline JUnit artifact or a failed baseline
+hook can leave baseline-relative timing `UNKNOWN` when the candidate JUnit
+pair is complete. In that state, validation and saved status keep
+`timing_status="complete"` for the candidate JUnit and return
+`timing_comparison_status="unknown"` with
 `timing_comparison_reason="baseline_unavailable"`. They have no
 `timing_review` transcript. These fields do not claim a comparison pass.
+An unrelated `OSError` during timing capture is terminal:
+`timing_review` reports `invalid_timing` with
+`timing_failure_code="capture_failed"`; private error detail is omitted.
 Complete paired proof retains the existing `timing_review` result.
 
 The worker receives bounded proof identities, an outcome, up to 128 findings,

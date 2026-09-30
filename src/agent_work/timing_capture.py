@@ -96,6 +96,13 @@ class TimingCaptureError(RuntimeError):
         self.code = selected
 
 
+class BaselineJUnitUnavailableError(TimingCaptureError):
+    """The baseline hook did not produce a required JUnit artifact."""
+
+    def __init__(self) -> None:
+        super().__init__("baseline JUnit artifact is unavailable")
+
+
 class FocusedTimingCaptureError(TimingCaptureError):
     """Exact-source focused comparisons exhausted their bounded budget."""
 
@@ -654,8 +661,8 @@ def capture_serial_timing_review(
             try:
                 baseline_xml = _artifact(base / f"test-results-{env}.xml", dependencies)
             except TimingCaptureError as error:
-                if isinstance(error.__cause__, OSError):
-                    raise OSError("baseline JUnit artifact is unavailable") from error
+                if isinstance(error.__cause__, FileNotFoundError):
+                    raise BaselineJUnitUnavailableError() from error
                 raise
             candidate_xml, candidate_count = candidate_by_env[env]
             baseline_cases, baseline_selectors = parse_full_junit_records(baseline_xml)
