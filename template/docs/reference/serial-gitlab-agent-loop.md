@@ -141,7 +141,7 @@ agent-work slow-root reconcile --manifest-file PATH [--json] [--apply] [--debug]
 | `credential rotate` | `--environment-file PATH`, `--unit-name NAME` | `--apply` performs the bounded rotation. |
 | `service-environment migrate` | `--environment-file PATH`, `--unit-name NAME` | Bare invocation previews; choose `--apply` or `--dry-run`. |
 | `worker-result build` | Exact `--issue-iid`, `--input-file PATH`, private `--broker-socket PATH`, and `--broker-nonce NONCE` when applying | The live producer invokes the trusted controller-checkout builder through the socket. An accepted envelope stays in controller memory. |
-| `interactive-commit red` | Worktree, branch, base, Red ref, test-only tree, message, and optional prior Red commit | `--apply` makes a test-only Red commit with `--no-verify`. |
+| `interactive-commit red` | Worktree, branch, base, Red ref, test-only tree, message, and optional prior Red commit | `--apply` preflights and rechecks the exact changed test tree, then makes a test-only Red commit with `--no-verify`. Its JSON result lists accepted missing APIs in `residual_details`. |
 | `interactive-commit green` | Worktree, branch, base, final Red commit and ref, Judge tree, and message | After Judge reads the exact tree, `--apply` runs its license preflight and shared cheap gate, then makes the sole normal Green commit; its installed hook runs the full suite. |
 | `interactive-commit verify` | Green commit, Judge tree, final Red commit and ref, branch, and base | Checks commit, tree, and ancestry read-only. |
 | `reconcile-commit commit` | Worktree, branch, captured source and exact target commits, retained Red ref and commit, Judge tree, and message file | Omitting `--apply` or using `--dry-run` previews without changing Git state. `--apply` checks the pending merge and exact tree, runs the license preflight and shared cheap gate, then makes one normal commit with the source first and target second. The installed hook runs the full suite. |
@@ -212,6 +212,17 @@ The tables list the commands and their use.
 
 Red uses `interactive-commit red --apply` to make each test-only commit with
 `--no-verify`. A later Red commit names its predecessor with `--red-sha`.
+Before the commit, the boundary runs read-only Ruff check, Ruff format check,
+and Ty on the changed Python tests in the exact staged tree. Test-local errors,
+an unavailable preflight, or a tool or malformed-output failure block the
+commit. The boundary rechecks the candidate after preflight. Ty warnings may
+pass. Expected missing production members, package exports, or new modules may
+pass only when trusted source ownership identifies the production package.
+With `--json`, `residual_details` lists each accepted missing API by test path,
+line, and production name. A passing Red preflight is required before any Red ref
+is retained. Preview and Green JSON results list no residual details.
+An applied replay of the exact Red ref preflights the same committed test tree
+again and returns fresh `residual_details`. It makes no new commit or ref update.
 Green keeps tests frozen. After Judge reads the exact staged tree, Judge uses
 `interactive-commit green --apply` to make the sole normal Green commit. The
 installed hook runs the full suite once.
@@ -255,9 +266,9 @@ before it accepts a result.
 | Condition or step | Controller contract |
 | --- | --- |
 | Fresh coding work | The producer may establish coding authority only through this atomic boundary. There is no pre-checkpoint lane write, Red handoff result, or later controller checkpoint command. |
-| Atomic checkpoint transaction | The broker uses controller-observed candidate identity to reject drift, rerun the declared Red command, require its expected failure marker, and bind the complete test-only tree and evidence in one issue-namespaced checkpoint commit ref. It returns controller-owned checkpoint evidence to the still-live producer. |
+| Atomic checkpoint transaction | The broker uses controller-observed candidate identity to reject drift, rerun the declared Red command, require its expected failure marker, and run the same read-only Ruff and Ty preflight on the exact changed test tree before binding evidence in one issue-namespaced checkpoint commit ref. An unavailable preflight, test-local errors, and tool or malformed-output failures block retention. It rechecks the candidate after preflight. Ty warnings may pass; trusted production ownership can allow missing module members, package exports, or new modules. It returns controller-owned checkpoint evidence to the still-live producer. |
 | Canonical correction | The broker returns at most one canonical rejection. It accepts one corrected request only when the controller freshly observes unchanged worktree evidence. A further request, changed paths, stale identity, missing marker, passing command, malformed input, or time-limit failure fails closed. |
-| Retained authority | A retained exact checkpoint binds the coding lane to its project, issue, branch, base, ref, tree, paths, test command, expected marker, nonzero exit, and output digest. It is local recovery evidence and is never pushed. |
+| Retained authority | A retained exact checkpoint binds the coding lane to its project, issue, branch, base, ref, tree, paths, test command, expected marker, nonzero exit, output digest, and `residual_details` for accepted missing APIs. The details have at most 128 entries within the 32 KiB evidence limit. This local recovery evidence is never pushed. |
 | Resume | The controller freshly reloads and verifies the checkpoint before a resumed coding workflow. Missing, stale, malformed, or mismatched identity stops the workflow. It does not recreate a checkpoint from model output. |
 | Failure and retention | The controller preserves the worktree and records only bounded sanitized diagnostics. It retains no raw worker content, rejected values, exception text, command output, unsafe paths, or obsolete Red-stage transport state. |
 | Content lane | Content work does not establish a Red checkpoint. |

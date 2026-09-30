@@ -86,6 +86,8 @@ from .ports import CommandRunner
 from .red_checkpoint import (
     RedCheckpointEvidence,
 )
+from .red_preflight import production_module_exists
+from .red_preflight import run_red_preflight as default_run_red_preflight
 from .repository import CommandResult, RepositoryError, discover_config, run_subprocess
 from .runtime import (
     dispatch as default_dispatch,
@@ -1893,6 +1895,14 @@ def main(
                     environment=environment,
                 ),
                 run_license_preflight=interactive_license_preflight,
+                run_red_preflight=partial(
+                    default_run_red_preflight,
+                    run_command=run_command,
+                    environment=environment,
+                    is_production_module=lambda module: production_module_exists(
+                        module, Path(parsed.worktree)
+                    ),
+                ),
                 check_candidate_gate=candidate_gate
                 or (
                     lambda tree: default_check_candidate_gate(
@@ -1932,7 +1942,11 @@ def main(
                 "judge_tree": final.judge_tree,
             }
             if parsed.action == "verify"
-            else {"applied": report.applied, "new_commit": report.new_commit}
+            else {
+                "applied": report.applied,
+                "new_commit": report.new_commit,
+                "residual_details": report.residual_details,
+            }
         )
         write_stdout(
             json.dumps(payload, sort_keys=True)

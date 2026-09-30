@@ -56,13 +56,20 @@ safely for recovery.
    For Bash, run the selected shell test command and `bash -n` on the script.
 4. **Confirm** that all new tests fail. If a test passes without
    implementation, revise it.
-5. **Prepare exact checkpoint evidence.** Give Architect the evidence-file path
+5. **Check the changed tests** before asking for an interactive commit or serial
+   checkpoint. Run bounded type checks and read-only Ruff check and format checks.
+   Fix errors in test code. A missing production API may remain when the check
+   lists it as a residual. Stop if a tool fails or the check is absent. The
+   trusted boundary reruns the checks on the exact test tree. Interactive Red
+   returns accepted residual details in its output. The serial checkpoint
+   saves them in its evidence.
+6. **Prepare exact checkpoint evidence.** Give Architect the evidence-file path
    and its exact JSON fields: `argv`, `expected_failure`, and `test_paths`.
    `argv` is a bounded, shell-free tuple. It begins with exact `uv run pytest`.
    Its positional test paths or node IDs represent every normalized changed
    `tests/...` path. `expected_failure` is the stable failure marker observed
    in the Red output. The same command must reproduce it with a nonzero exit.
-6. **Return to Architect.** Do not write implementation code. Run before the
+7. **Return to Architect.** Do not write implementation code. Run before the
    Agent Policy Writer, Green, and the Diátaxis Writer. Mutate only `tests/`.
    Return the exact `argv`, evidence-file path and fields, failure evidence,
    changed-test paths, and a short test-diff summary. Architect accepts the Red

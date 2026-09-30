@@ -109,6 +109,9 @@ from .red_checkpoint import (
     create_red_checkpoint,
 )
 from .repository import (
+    CommandResult as RepositoryCommandResult,
+)
+from .repository import (
     GitRepository,
     RepositoryError,
     RepositoryTransientError,
@@ -3106,6 +3109,13 @@ def build_runtime_dependencies(
                 expected_tree_oid=expected_tree_oid,
                 read_evidence=load_red_checkpoint,
                 write_evidence=write_evidence,
+                run_red_preflight=getattr(
+                    repository,
+                    "run_red_preflight",
+                    lambda _worktree, _paths, _tree: RepositoryCommandResult(
+                        1, "", "Red preflight boundary is unavailable"
+                    ),
+                ),
             ),
         )
 

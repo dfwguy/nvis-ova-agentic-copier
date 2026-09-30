@@ -61,6 +61,14 @@ Red's evidence file has exact `argv`, `expected_failure`, and normalized changed
 positional test paths or node IDs. Architect checks the receipt, then selects
 the workflow mode.
 
+Before a Red checkpoint, the Test Writer runs bounded type checks on changed
+Python tests. Run read-only Ruff check and format checks too. Fix errors in
+test code before asking the trusted boundary to save Red. A missing production
+API may remain when the check lists it as a residual. Stop if a tool fails or
+the check is absent. The trusted boundary reruns the checks on the exact test
+tree. Interactive Red returns accepted residual details in its output. The
+serial checkpoint saves them in its evidence.
+
 In interactive work, Main stages the approved test paths and invokes
 `agent-work interactive-commit red --apply`. The trusted boundary creates and
 retains each test-only `--no-verify` Red commit under a named local ref. Main
