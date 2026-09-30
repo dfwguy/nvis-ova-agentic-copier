@@ -2427,7 +2427,7 @@ def _operational_preview(
                 next_action=next_action,
                 operational_plan=plan,
             )
-        if gate.outcome is not None and gate.outcome != "pipeline_wait":
+        if gate.outcome is not None:
             action = gate.outcome
             next_action = gate.next_action or next_action
             plan = _operational_evidence(
@@ -2697,7 +2697,7 @@ def _activate_pipeline_repair_gate(
     gitlab: GitLabPort,
     now: datetime,
 ) -> _RepairActivationDecision | None:
-    """Apply one exact gate consistently before or after pipeline polling."""
+    """Apply one exact failed-pipeline gate."""
     owner = gate.repair_owner
     if (
         owner is None
@@ -2851,13 +2851,6 @@ def _inspect_pipeline_gate(
                 pipeline_url=None,
                 detail="The current default-branch pipeline could not be found.",
                 next_action="Validate default-branch pipeline evidence before selecting work.",
-            )
-        if default_pipeline.status in NONTERMINAL_PIPELINE_STATUSES:
-            return _pipeline_handoff(
-                outcome="pipeline_wait",
-                pipeline_url=default_pipeline.web_url,
-                detail="The current default-branch pipeline is still running.",
-                next_action="Wait for the default-branch pipeline to reach a terminal state.",
             )
         if default_pipeline.status == "failed":
             return _pipeline_handoff(
@@ -5089,15 +5082,6 @@ def dispatch(
             now=wired.clock(),
         )
         if gate.outcome is not None:
-            if resumable and gate.outcome == "pipeline_wait":
-                return _report(
-                    request,
-                    applied=False,
-                    outcome="resume_available",
-                    records=resumable[:1],
-                    project=identity,
-                    prerequisite_projections=prerequisite_projections,
-                )
             return _report(
                 request,
                 applied=False,
@@ -5320,7 +5304,7 @@ def dispatch(
             default_branch=project.default_branch,
             now=wired.clock(),
         )
-        if gate.outcome is not None and gate.outcome != "pipeline_wait":
+        if gate.outcome is not None:
             return _report(
                 request,
                 applied=True,
@@ -5364,46 +5348,6 @@ def dispatch(
                 ),
             )
         poll_delay = _PIPELINE_POLL_INITIAL_SECONDS
-        while gate.outcome == "pipeline_wait" and not immediate_owners:
-            poll_delay, viable = _sleep_for_pipeline_poll(
-                delay=poll_delay,
-                remaining_seconds=remaining_activation_seconds,
-                sleep=wired.sleep,
-            )
-            if not viable:
-                return _report(
-                    request,
-                    applied=True,
-                    outcome="activation_complete",
-                    project=identity,
-                    stop_reason="time_limit",
-                )
-            inventory = tuple(ledger.list_records())
-            gate = _inspect_pipeline_gate(
-                gitlab=gitlab,
-                repository=repository,
-                records=inventory,
-                project_id=project.id,
-                default_branch=project.default_branch,
-                now=wired.clock(),
-            )
-        if gate.outcome is not None and not immediate_owners:
-            return _report(
-                request,
-                applied=True,
-                outcome=gate.outcome,
-                project=identity,
-                stop_reason=gate.outcome,
-                summary=gate.summary,
-                next_action=gate.next_action,
-            )
-        if not immediate_owners:
-            activated_repair, repair_report = activate_pipeline_repair(gate, inventory)
-            if repair_report is not None:
-                return repair_report
-            if activated_repair is not None:
-                immediate_owners = (activated_repair,)
-
         if not immediate_owners and not resume_candidates(
             tuple(ledger.list_records()), now=wired.clock()
         ):
