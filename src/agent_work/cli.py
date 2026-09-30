@@ -86,8 +86,13 @@ from .ports import CommandRunner
 from .red_checkpoint import (
     RedCheckpointEvidence,
 )
-from .repository import CommandResult, discover_config, run_subprocess
-from .runtime import dispatch as default_dispatch
+from .repository import CommandResult, RepositoryError, discover_config, run_subprocess
+from .runtime import (
+    dispatch as default_dispatch,
+)
+from .runtime import (
+    read_committed_candidate_from_current as default_committed_candidate_read,
+)
 from .service_environment import (
     ServiceEnvironmentDependencies,
     ServiceEnvironmentError,
@@ -1052,6 +1057,26 @@ def build_parser() -> argparse.ArgumentParser:
                 "instead of previewing"
             ),
         )
+    for action in ("committed-changed-paths", "committed-read"):
+        committed = candidate_actions.add_parser(
+            action, help="inspect one exact committed candidate"
+        )
+        committed.add_argument("--issue-iid", type=_positive_integer, required=True)
+        committed.add_argument("--mr-iid", type=_positive_integer, required=True)
+        committed.add_argument("--candidate-sha", type=_candidate_tree, required=True)
+        committed.add_argument("--candidate-tree", type=_candidate_tree, required=True)
+        committed.add_argument(
+            "--role", choices=("router", "judge", "finalizer"), required=True
+        )
+        if action == "committed-read":
+            committed.add_argument("--path", required=True)
+            committed.add_argument("--side", choices=("old", "new"), required=True)
+            committed.add_argument("--offset", type=int, required=True)
+            committed.add_argument("--length", type=int, required=True)
+        _common(
+            committed,
+            apply_help="perform the read-only GitLab and Git-object inspection",
+        )
     merge_request = resources.add_parser(
         "merge-request", help="preview or publish one merge request"
     )
@@ -1269,7 +1294,10 @@ def _render_candidate_read(receipt: dict[str, object]) -> str:
     safe = _sanitize_human_value
     lines = ["Candidate read"]
     for key, label in (
+        ("candidate_sha", "Commit"),
         ("candidate_tree", "Tree"),
+        ("mr_iid", "Merge request"),
+        ("role", "Role"),
         ("base_tree", "Base tree"),
         ("base_sha", "Base commit"),
         ("project_id", "Project"),
@@ -1697,6 +1725,9 @@ def main(
     template_update_dependencies: template_update.TemplateUpdateDependencies
     | None = None,
     candidate_request: Callable[..., dict[str, object]] = request_candidate_validation,
+    committed_candidate_read: Callable[
+        [int, int, str, str, str, dict[str, object]], dict[str, object]
+    ] = default_committed_candidate_read,
     publish_template_update: Callable[..., object] | None = None,
     validation_run: _ValidationRunAction | None = None,
     validation_status: _ValidationStatusAction | None = None,
@@ -2851,6 +2882,56 @@ def main(
     ):
         write_stderr("--apply requires --plan-file")
         return 2
+    if parsed.resource == "candidate" and parsed.action in {
+        "committed-changed-paths",
+        "committed-read",
+    }:
+        selector: dict[str, object] = {"mode": "changed_paths"}
+        if parsed.action == "committed-read":
+            if parsed.offset < 0 or not 0 < parsed.length <= GIT_READ_MAX_CHUNK_BYTES:
+                write_stderr("candidate read selector is invalid")
+                return 2
+            selector = {
+                "path": parsed.path,
+                "side": parsed.side,
+                "offset": parsed.offset,
+                "length": parsed.length,
+            }
+        if not parsed.apply:
+            preview: dict[str, object] = {
+                "action": parsed.action,
+                "applied": False,
+                "issue_iid": parsed.issue_iid,
+                "mr_iid": parsed.mr_iid,
+                "candidate_sha": parsed.candidate_sha,
+                "candidate_tree": parsed.candidate_tree,
+                "role": parsed.role,
+                "selector": selector,
+            }
+            write_stdout(
+                json.dumps(preview, separators=(",", ":"), sort_keys=True)
+                if parsed.json
+                else "candidate committed read preview"
+            )
+            return 0
+        try:
+            receipt = committed_candidate_read(
+                parsed.issue_iid,
+                parsed.mr_iid,
+                parsed.candidate_sha,
+                parsed.candidate_tree,
+                parsed.role,
+                selector,
+            )
+        except (WorkerProtocolError, RepositoryError, GitLabError, OSError) as error:
+            write_stderr(str(error))
+            return 1
+        write_stdout(
+            json.dumps(receipt, separators=(",", ":"), sort_keys=True)
+            if parsed.json
+            else _render_candidate_read(receipt)
+        )
+        return 0
     if parsed.resource == "candidate" and parsed.action in {
         "stage",
         "read",

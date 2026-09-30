@@ -126,6 +126,7 @@ from .serial import (
     collect_exact_failed_job_diagnostics,
     correction_identity_matches,
     new_record,
+    read_committed_candidate,
     reconcile_closed_issues,
     record_failed_job_diagnostic_unavailable,
     resume_candidates,
@@ -3152,6 +3153,38 @@ def build_runtime_dependencies(
         ),
         read_validation_admission=lambda: read_validation_admission(
             host=config.host, project_id=config.project_id, environment=os.environ
+        ),
+    )
+
+
+def read_committed_candidate_from_current(
+    issue_iid: int,
+    mr_iid: int,
+    candidate_sha: str,
+    candidate_tree: str,
+    role: str,
+    selector: dict[str, object],
+) -> dict[str, object]:
+    """Wire a fresh, read-only committed candidate inspection invocation."""
+    config = discover_config(
+        current_directory=Path.cwd(),
+        environment=os.environ,
+        run_command=run_subprocess,
+    )
+    return read_committed_candidate(
+        issue_iid,
+        mr_iid,
+        candidate_sha,
+        candidate_tree,
+        role,
+        selector,
+        ledger=JsonLedger(config.state_root, clock=lambda: datetime.now(UTC)),
+        gitlab=GitLabGateway(config, run_subprocess),
+        repository=GitRepository(
+            config,
+            run_subprocess,
+            service_environment=os.environ,
+            diagnostic_sink=lambda _diagnostic: None,
         ),
     )
 

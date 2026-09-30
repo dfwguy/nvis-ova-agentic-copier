@@ -11,6 +11,7 @@
 
 import subprocess
 from base64 import b64decode
+from hashlib import sha1
 from pathlib import Path
 from typing import cast
 
@@ -114,6 +115,8 @@ def _repository(
         outputs[("cat-file", "blob", NEW)] = "new\r\nline\r\n"
     if authored:
         outputs[("rev-parse", "HEAD")] = SOURCE + "\n"
+        outputs[("rev-parse", f"{SOURCE}^{{tree}}")] = TREE + "\n"
+        outputs[("rev-parse", f"{UNRELATED}^{{tree}}")] = TREE + "\n"
         outputs[("rev-parse", "-q", "--verify", f"{BASE}^{{commit}}")] = BASE + "\n"
         outputs[("rev-parse", "-q", "--verify", "MERGE_HEAD")] = ""
         outputs[("ls-files", "--unmerged")] = ""
@@ -141,6 +144,10 @@ def _repository(
         if authored and args == ("merge-base", "--is-ancestor", BASE, "HEAD"):
             return CommandResult(0, "", "")
         if authored and args == ("merge-base", "--is-ancestor", UNRELATED, "HEAD"):
+            return CommandResult(1, "", "")
+        if authored and args == ("merge-base", "--is-ancestor", BASE, SOURCE):
+            return CommandResult(0, "", "")
+        if authored and args == ("merge-base", "--is-ancestor", BASE, UNRELATED):
             return CommandResult(1, "", "")
         if authored and args == ("rev-parse", "-q", "--verify", "MERGE_HEAD"):
             return CommandResult(1, "", "")
@@ -366,6 +373,133 @@ def test_stateless_range_rejects_unreadable_or_changed_side(
             tmp_path,
             TREE,
             base_sha=BASE,
+            path="docs/a.md",
+            side="new",
+            offset=0,
+            length=1,
+        )
+
+
+def test_committed_inventory_reads_36_paths_without_a_staged_index(
+    tmp_path: Path,
+) -> None:
+    paths = tuple(f"docs/file-{number:02}.md" for number in range(36))
+    calls: list[tuple[str, ...]] = []
+    config = AgentWorkConfig(
+        host="gitlab.example.com",
+        project_id=81,
+        checkout=tmp_path,
+        state_root=tmp_path / "state",
+        git_path=Path("/usr/bin/git"),
+        glab_path=Path("/usr/bin/glab"),
+        base_branch="agent/base",
+    )
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        args = command[3:]
+        calls.append(args)
+        if args == ("rev-parse", "HEAD"):
+            return CommandResult(0, SOURCE + "\n", "")
+        if args == ("rev-parse", f"{SOURCE}^{{tree}}"):
+            return CommandResult(0, TREE + "\n", "")
+        if args == ("rev-parse", f"{BASE}^{{tree}}"):
+            return CommandResult(0, BASE + "\n", "")
+        if args == ("merge-base", "--is-ancestor", BASE, SOURCE):
+            return CommandResult(0, "", "")
+        if args == ("diff", "--name-only", "-z", "--no-renames", BASE, TREE):
+            return CommandResult(0, "\0".join(paths) + "\0", "")
+        if args == ("write-tree",):
+            raise AssertionError("committed reads must not depend on the index")
+        if len(args) == 5 and args[:2] == ("ls-tree", "-z"):
+            tree, _, path = args[2:]
+            if path not in paths:
+                raise AssertionError(f"unexpected path: {path}")
+            if tree == BASE:
+                return CommandResult(0, "", "")
+            if tree == TREE:
+                return CommandResult(0, f"100644 blob {NEW}\t{path}\0", "")
+        if args == ("cat-file", "-s", NEW):
+            return CommandResult(0, "7\n", "")
+        raise AssertionError(f"unexpected Git command: {args}")
+
+    inventory = GitRepository(config, run).changed_candidate_paths(
+        tmp_path, TREE, base_sha=BASE, candidate_sha=SOURCE
+    )
+    assert inventory["candidate_tree"] == TREE
+    assert inventory["changed_paths"] == list(paths)
+    assert len(inventory["files"]) == 36
+    assert ("write-tree",) not in calls
+
+
+def test_committed_read_rejects_different_commit_with_same_tree(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(RepositoryError):
+        _repository(tmp_path, authored=True).read_candidate_range(
+            tmp_path,
+            TREE,
+            base_sha=BASE,
+            candidate_sha=UNRELATED,
+            path="docs/a.md",
+            side="new",
+            offset=0,
+            length=1,
+        )
+
+
+def test_committed_range_rechecks_exact_blob_bytes(tmp_path: Path) -> None:
+    original = b"before\n"
+    committed = b"after!\n"
+    altered = b"aftxr!\n"
+
+    def oid(data: bytes) -> str:
+        return sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
+
+    old_oid = oid(original)
+    new_oid = oid(committed)
+    config = AgentWorkConfig(
+        host="gitlab.example.com",
+        project_id=81,
+        checkout=tmp_path,
+        state_root=tmp_path / "state",
+        git_path=Path("/usr/bin/git"),
+        glab_path=Path("/usr/bin/glab"),
+        base_branch="agent/base",
+    )
+    outputs = {
+        ("rev-parse", "HEAD"): SOURCE + "\n",
+        ("rev-parse", f"{SOURCE}^{{tree}}"): TREE + "\n",
+        ("rev-parse", f"{BASE}^{{tree}}"): BASE + "\n",
+        ("ls-tree", "-z", BASE, "--", "docs/a.md"): (
+            f"100644 blob {old_oid}\tdocs/a.md\0"
+        ),
+        ("ls-tree", "-z", TREE, "--", "docs/a.md"): (
+            f"100644 blob {new_oid}\tdocs/a.md\0"
+        ),
+        ("cat-file", "-s", old_oid): f"{len(original)}\n",
+        ("cat-file", "-s", new_oid): f"{len(committed)}\n",
+    }
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        args = command[3:]
+        if args == ("write-tree",):
+            raise AssertionError("committed reads must not depend on the index")
+        if args == ("merge-base", "--is-ancestor", BASE, SOURCE):
+            return CommandResult(0, "", "")
+        if args not in outputs:
+            raise AssertionError(f"unexpected Git command: {args}")
+        return CommandResult(0, outputs[args], "")
+
+    def read_blob(command: tuple[str, ...], **_kwargs: object) -> bytes:
+        assert command[3:] == ("cat-file", "blob", new_oid)
+        return altered
+
+    with pytest.raises(RepositoryError, match="candidate"):
+        GitRepository(config, run, read_git_blob=read_blob).read_candidate_range(
+            tmp_path,
+            TREE,
+            base_sha=BASE,
+            candidate_sha=SOURCE,
             path="docs/a.md",
             side="new",
             offset=0,

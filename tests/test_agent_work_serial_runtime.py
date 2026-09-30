@@ -27398,3 +27398,360 @@ def test_target_advances_between_ordered_commit_check_and_publication_fetch(
     assert repository.current_head == repository.merge_sha
     assert repository.legacy_merge_head is None
     assert repository.dirty is False
+
+
+_COMMITTED_READ_SHA = "c" * 40
+_COMMITTED_READ_TREE = "d" * 40
+_COMMITTED_READ_PATHS = tuple(f"docs/file-{number:02}.md" for number in range(36))
+_COMMITTED_READ_CONTENT = b"after!\n"
+_COMMITTED_READ_OID = hashlib.sha1(
+    b"blob "
+    + str(len(_COMMITTED_READ_CONTENT)).encode()
+    + b"\0"
+    + _COMMITTED_READ_CONTENT
+).hexdigest()
+
+
+class _CommittedReadRepository(FakeRepository):
+    """Model immutable committed objects beside an independently dirty index."""
+
+    def __init__(self, config: AgentWorkConfig) -> None:
+        super().__init__(config)
+        self.paths = _COMMITTED_READ_PATHS
+        self.dirty = True
+        self.reads: list[tuple[str, str]] = []
+
+    def changed_candidate_paths(
+        self,
+        worktree: Path,
+        candidate_tree: str,
+        *,
+        base_sha: str,
+        candidate_sha: str | None = None,
+        allow_base_ancestor: bool = False,
+    ) -> dict[str, object]:
+        del worktree, allow_base_ancestor
+        assert candidate_sha == _COMMITTED_READ_SHA
+        if candidate_tree != _COMMITTED_READ_TREE:
+            raise RepositoryError("candidate changed")
+        assert base_sha == "a" * 40
+        self.reads.append(("inventory", candidate_sha))
+        return {
+            "candidate_tree": candidate_tree,
+            "base_tree": "a" * 40,
+            "changed_paths": list(self.paths),
+            "files": [
+                {
+                    "path": path,
+                    "old_mode": None,
+                    "old_oid": None,
+                    "old_size": None,
+                    "new_mode": "100644",
+                    "new_oid": _COMMITTED_READ_OID,
+                    "new_size": 7,
+                }
+                for path in self.paths
+            ],
+        }
+
+    def read_candidate_range(
+        self,
+        worktree: Path,
+        candidate_tree: str,
+        *,
+        base_sha: str,
+        path: str,
+        side: str,
+        offset: int,
+        length: int,
+        candidate_sha: str | None = None,
+        allow_base_ancestor: bool = False,
+    ) -> dict[str, object]:
+        del worktree, allow_base_ancestor
+        assert candidate_sha == _COMMITTED_READ_SHA
+        if candidate_tree != _COMMITTED_READ_TREE:
+            raise RepositoryError("candidate changed")
+        assert base_sha == "a" * 40
+        if path not in self.paths or side != "new" or offset < 0 or length < 1:
+            raise RepositoryError("candidate read path or range is invalid")
+        content = _COMMITTED_READ_CONTENT
+        if offset + length > len(content):
+            raise RepositoryError("candidate read range is invalid")
+        self.reads.append(("range", candidate_sha))
+        return {
+            "candidate_tree": candidate_tree,
+            "base_tree": "a" * 40,
+            "path": path,
+            "side": side,
+            "offset": offset,
+            "length": length,
+            "oid": _COMMITTED_READ_OID,
+            "size": len(content),
+            "data_base64": b64encode(content[offset : offset + length]).decode(),
+        }
+
+
+def _committed_read_setup(
+    tmp_path: Path,
+) -> tuple[JsonLedger, FakeGitLab, _CommittedReadRepository]:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.PUBLISHING,
+            phase=WorkflowPhase.READY_TO_PUBLISH,
+        ).model_copy(
+            update={
+                "main_sha": "a" * 40,
+                "merge_request_iid": 88,
+                "publication_sha": _COMMITTED_READ_SHA,
+            }
+        )
+    )
+    gitlab = FakeGitLab()
+    gitlab.existing_mr = _mr(sha=_COMMITTED_READ_SHA)
+    return ledger, gitlab, _CommittedReadRepository(config)
+
+
+def _committed_read(
+    ledger: JsonLedger,
+    gitlab: FakeGitLab,
+    repository: _CommittedReadRepository,
+    selector: dict[str, object],
+    *,
+    issue_iid: int = 12,
+    mr_iid: int = 88,
+    candidate_sha: str = _COMMITTED_READ_SHA,
+    candidate_tree: str = _COMMITTED_READ_TREE,
+    role: str = "judge",
+) -> dict[str, object]:
+    return cast(Any, serial).read_committed_candidate(
+        issue_iid,
+        mr_iid,
+        candidate_sha,
+        candidate_tree,
+        role,
+        selector,
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+    )
+
+
+def test_committed_candidate_inventory_and_range_survive_controller_restart(
+    tmp_path: Path,
+) -> None:
+    ledger, gitlab, repository = _committed_read_setup(tmp_path)
+    inventory = _committed_read(ledger, gitlab, repository, {"mode": "changed_paths"})
+    restarted_ledger = JsonLedger(repository.config.state_root, clock=lambda: NOW)
+    read = _committed_read(
+        restarted_ledger,
+        gitlab,
+        repository,
+        {"path": _COMMITTED_READ_PATHS[-1], "side": "new", "offset": 1, "length": 3},
+    )
+    assert inventory["changed_paths"] == list(_COMMITTED_READ_PATHS)
+    assert len(cast(list[object], inventory["files"])) == 36
+    assert read["data_base64"] == b64encode(b"fte").decode()
+    assert repository.dirty is True
+    assert repository.reads == [
+        ("inventory", _COMMITTED_READ_SHA),
+        ("range", _COMMITTED_READ_SHA),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("issue_iid", "mr_iid", "candidate_sha", "candidate_tree", "role"),
+    [
+        (13, 88, _COMMITTED_READ_SHA, _COMMITTED_READ_TREE, "judge"),
+        (12, 89, _COMMITTED_READ_SHA, _COMMITTED_READ_TREE, "judge"),
+        (12, 88, "f" * 40, _COMMITTED_READ_TREE, "judge"),
+        (12, 88, _COMMITTED_READ_SHA, "f" * 40, "judge"),
+        (12, 88, _COMMITTED_READ_SHA, _COMMITTED_READ_TREE, "worker"),
+    ],
+)
+def test_committed_candidate_read_rejects_wrong_bound_identity(
+    tmp_path: Path,
+    issue_iid: int,
+    mr_iid: int,
+    candidate_sha: str,
+    candidate_tree: str,
+    role: str,
+) -> None:
+    ledger, gitlab, repository = _committed_read_setup(tmp_path)
+    with pytest.raises(WorkerProtocolError, match="candidate_broker"):
+        _committed_read(
+            ledger,
+            gitlab,
+            repository,
+            {"mode": "changed_paths"},
+            issue_iid=issue_iid,
+            mr_iid=mr_iid,
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+            role=role,
+        )
+    assert repository.reads == []
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        {"path": "docs/other.md", "side": "new", "offset": 0, "length": 1},
+        {"path": _COMMITTED_READ_PATHS[0], "side": "new", "offset": -1, "length": 1},
+        {"path": _COMMITTED_READ_PATHS[0], "side": "new", "offset": 0, "length": 0},
+        {"path": _COMMITTED_READ_PATHS[0], "side": "new", "offset": 6, "length": 2},
+    ],
+)
+def test_committed_candidate_read_rejects_unowned_path_or_invalid_range(
+    tmp_path: Path, selector: dict[str, object]
+) -> None:
+    ledger, gitlab, repository = _committed_read_setup(tmp_path)
+    with pytest.raises(WorkerProtocolError, match="candidate_broker"):
+        _committed_read(ledger, gitlab, repository, selector)
+    assert repository.dirty is True
+
+
+@pytest.mark.parametrize(
+    ("mr_update", "closes_issue"),
+    [
+        ({"source_project_id": 99}, True),
+        ({"source_branch": "agent/issue-13"}, True),
+        ({"sha": "f" * 40}, True),
+        ({}, False),
+    ],
+)
+def test_committed_candidate_read_rejects_mr_identity_or_closing_drift(
+    tmp_path: Path, mr_update: dict[str, object], closes_issue: bool
+) -> None:
+    ledger, gitlab, repository = _committed_read_setup(tmp_path)
+    assert gitlab.existing_mr is not None
+    gitlab.existing_mr = gitlab.existing_mr.model_copy(update=mr_update)
+    gitlab.closing_results = [closes_issue]
+    with pytest.raises(WorkerProtocolError, match="candidate_broker"):
+        _committed_read(ledger, gitlab, repository, {"mode": "changed_paths"})
+    assert repository.reads == []
+
+
+def test_committed_candidate_read_rejects_same_length_altered_blob_response(
+    tmp_path: Path,
+) -> None:
+    ledger, gitlab, repository = _committed_read_setup(tmp_path)
+
+    class AlteredReadRepository(_CommittedReadRepository):
+        def read_candidate_range(
+            self,
+            worktree: Path,
+            candidate_tree: str,
+            *,
+            base_sha: str,
+            path: str,
+            side: str,
+            offset: int,
+            length: int,
+            candidate_sha: str | None = None,
+            allow_base_ancestor: bool = False,
+        ) -> dict[str, object]:
+            result = super().read_candidate_range(
+                worktree,
+                candidate_tree,
+                base_sha=base_sha,
+                path=path,
+                side=side,
+                offset=offset,
+                length=length,
+                candidate_sha=candidate_sha,
+                allow_base_ancestor=allow_base_ancestor,
+            )
+            return result | {"data_base64": b64encode(b"aftxr!\n").decode()}
+
+    altered = AlteredReadRepository(repository.config)
+    with pytest.raises(WorkerProtocolError, match="candidate_broker"):
+        _committed_read(
+            ledger,
+            gitlab,
+            altered,
+            {"path": _COMMITTED_READ_PATHS[0], "side": "new", "offset": 0, "length": 7},
+        )
+    assert altered.dirty is True
+
+
+@pytest.mark.parametrize("mode", ["inventory", "range"])
+@pytest.mark.parametrize("drift", ["ledger", "merge_request"])
+def test_committed_candidate_read_rejects_identity_drift_during_repository_read(
+    tmp_path: Path, mode: str, drift: str
+) -> None:
+    ledger, gitlab, repository = _committed_read_setup(tmp_path)
+
+    def change_identity() -> None:
+        if drift == "ledger":
+            record = ledger.load(12)
+            assert record is not None
+            ledger.persist(record.model_copy(update={"publication_sha": "f" * 40}))
+        else:
+            assert gitlab.existing_mr is not None
+            gitlab.existing_mr = gitlab.existing_mr.model_copy(
+                update={"source_branch": "agent/issue-13"}
+            )
+
+    class DriftingRepository(_CommittedReadRepository):
+        def changed_candidate_paths(
+            self,
+            worktree: Path,
+            candidate_tree: str,
+            *,
+            base_sha: str,
+            candidate_sha: str | None = None,
+            allow_base_ancestor: bool = False,
+        ) -> dict[str, object]:
+            result = super().changed_candidate_paths(
+                worktree,
+                candidate_tree,
+                base_sha=base_sha,
+                candidate_sha=candidate_sha,
+                allow_base_ancestor=allow_base_ancestor,
+            )
+            if mode == "inventory":
+                change_identity()
+            return result
+
+        def read_candidate_range(
+            self,
+            worktree: Path,
+            candidate_tree: str,
+            *,
+            base_sha: str,
+            path: str,
+            side: str,
+            offset: int,
+            length: int,
+            candidate_sha: str | None = None,
+            allow_base_ancestor: bool = False,
+        ) -> dict[str, object]:
+            result = super().read_candidate_range(
+                worktree,
+                candidate_tree,
+                base_sha=base_sha,
+                path=path,
+                side=side,
+                offset=offset,
+                length=length,
+                candidate_sha=candidate_sha,
+                allow_base_ancestor=allow_base_ancestor,
+            )
+            if mode == "range":
+                change_identity()
+            return result
+
+    drifting = DriftingRepository(repository.config)
+    selector: dict[str, object] = (
+        {"mode": "changed_paths"}
+        if mode == "inventory"
+        else {"path": _COMMITTED_READ_PATHS[0], "side": "new", "offset": 0, "length": 1}
+    )
+    with pytest.raises(WorkerProtocolError, match="candidate_broker"):
+        _committed_read(ledger, gitlab, drifting, selector)
+    assert drifting.reads == [
+        ("inventory" if mode == "inventory" else "range", _COMMITTED_READ_SHA)
+    ]
