@@ -497,6 +497,34 @@ checks the supplied tree against its current staged candidate before running
 validation. An oversized projected result fails instead of returning a partial
 result. This primitive does not grant publication, approval, or merge access.
 
+#### Opt-in worker-result MCP primitive
+
+`create_worker_handoff_mcp_server` exposes one tool, `worker_submit_result`,
+for a live worker to submit bounded intent. The host supplies the trusted
+`issue_iid` when it creates the server. The tool takes one `intent` object;
+the model cannot supply an issue number, nonce, project ID, checkout, source
+commit, candidate tree, or protocol version. Unknown fields are rejected.
+
+| Tool | Model arguments | Result |
+| --- | --- | --- |
+| `worker_submit_result` | `intent` with `workflow_lane`, `result_kind`, `change_summary`, `next_action`, and the fields needed for that result kind | A bounded acceptance response from the existing live worker-result broker. |
+
+The tool accepts the six existing result kinds: `ready_to_publish`,
+`red_checkpoint_ready`, `retryable`, `needs_human`, `split_required`, and
+`suggest_close`. For `suggest_close`, the public `suggest_close_evidence`
+contains only `reason` and `evidence`; the server adds the trusted issue
+number before calling the broker. The server returns `accepted: true` only
+after the broker accepts the result. It omits private identity and nonce from
+the model-visible response. A canonical, safe broker diagnostic permits one
+corrected submission while the worker is live. Noncanonical errors return a
+generic failure. A request after acceptance fails closed.
+
+This is an opt-in host primitive. A host must explicitly wire the MCP server
+into the worker launch before the worker handles submissions through it. The
+factory's default handoff source is `AgentInvoker` in `src/agent_work/worker.py`.
+The MCP tool does not publish, approve, merge, or close anything; the
+controller's existing result checks and transitions retain those decisions.
+
 #### Candidate-preview MCP host primitive
 
 Hosts can construct `RoleExecutionProfile.candidate_preview` for role
@@ -1307,7 +1335,7 @@ It takes one request. It may take one fix. It keeps its own state.
 | Argparse usage failure | Exits `2`. |
 | Input object | One strict `WorkerResultBuildInput` JSON object containing only bounded worker intent. The live producer stores it in private scratch and invokes the controller-checkout builder through the broker. Unknown fields are rejected. |
 | Required worker intent | `workflow_lane`, `result_kind`, `change_summary`, and `next_action`. |
-| Optional worker intent | `merge_request_draft`, `error_code`, `redacted_summary`, `split_plan`, and `red_checkpoint_request`. |
+| Optional worker intent | `rejection_route`, `merge_request_draft`, `error_code`, `redacted_summary`, `split_plan`, `red_checkpoint_request`, and `suggest_close_evidence`. |
 | Program-owned values | Protocol version; project and issue identity; ledger revision; expected state and phase; completed phase; changed paths; checkpoint dependencies; and the accepted envelope are controller-derived or controller-verified. The input must not contain them. |
 | Non-authoritative discussion | Specialist receipts and audit prose may remain AI-to-AI context. They are not program authorization and `audit_summary` is not an input field. |
 
@@ -1333,6 +1361,7 @@ The other result kinds preserve their distinct controller transitions:
 | `retryable` | A bounded transient outcome. Include the applicable error code and redacted summary when available. The controller schedules ordinary retained-worktree recovery. |
 | `needs_human` | A blocker requiring human authority or a decision. Provide the bounded redacted summary, next action, and applicable error code. |
 | `split_required` | An oversized fresh workflow. Use `workflow_lane: unknown` and a `split_plan` of 2–25 ordered, independently mergeable slices. It needs no receipts, audit, merge-request draft, or error code. |
+| `suggest_close` | Recommend human closure with corroborated `suggest_close_evidence`: `reason` is `duplicate`, `superseded`, `already-satisfied`, or `no-longer-applicable`; `evidence` has 1–16 nonempty items. The worker never closes the issue. |
 
 | Failure or output rule | Contract |
 | --- | --- |
@@ -1757,7 +1786,7 @@ worker process, are never controller state or a handoff result.
 
 | Envelope field or check | Contract |
 | --- | --- |
-| Result | `red_checkpoint_ready` for the synchronous coding Red boundary, or `ready_to_publish`, `retryable`, `needs_human`, or `split_required` for a workflow-owning result. Broker acceptance adds verified checkpoint evidence before it returns `red_checkpoint_ready`. |
+| Result | `red_checkpoint_ready` for the synchronous coding Red boundary, or `ready_to_publish`, `retryable`, `needs_human`, `split_required`, or `suggest_close` for a workflow-owning result. Broker acceptance adds verified checkpoint evidence before it returns `red_checkpoint_ready`. |
 | Content | Include bounded worker intent, diagnostic, and next action. Specialist receipts and audit prose are discussion context only. |
 | Trusted runner | Before changing state, freshly check the nonce, ledger, configured numeric project, revision, branch, source SHA, state, phase, accepted envelope, observed changed paths, and applicable controller-owned checkpoints. |
 | Broker result | `AgentInvoker` accepts one request, then at most one corrected request after a canonical rejection. The broker keeps an accepted result only in controller memory. |
