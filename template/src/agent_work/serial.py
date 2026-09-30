@@ -128,6 +128,7 @@ from .worker_read import (
     WorkerGitBrokerSession,
     WorkerReadBrokerSession,
     WorkerReadSessionIdentity,
+    WorkerValidationBrokerSession,
     create_worker_read_broker,
 )
 
@@ -467,6 +468,255 @@ def _worker_git_projection(
             raise ValueError("worker_git: invalid result state")
         result[key] = value
     return result
+
+
+def _worker_validation_projection(
+    response: dict[str, object], tree: str, selector: dict[str, object] | None
+) -> dict[str, object]:
+    """Project a controller report into one bounded public validation view."""
+    if "raw_receipt" in response:
+        raise ValueError("worker_validation: raw response is invalid")
+    if response.get("candidate_tree") != tree:
+        raise ValueError("worker_validation: candidate response changed")
+    state = response.get("state")
+    if not isinstance(state, str) or len(state) > 64:
+        raise ValueError("worker_validation: response state invalid")
+    verdict = response.get("verdict")
+    if verdict is not None and verdict not in {"approve", "reject", "unknown"}:
+        raise ValueError("worker_validation: response verdict invalid")
+    timing_status = response.get("timing_status")
+    if timing_status is None:
+        timing_status = "unknown"
+    if not isinstance(timing_status, str) or len(timing_status) > 64:
+        raise ValueError("worker_validation: timing status invalid")
+    result: dict[str, object] = {
+        "candidate_tree": tree,
+        "state": state,
+        "verdict": verdict if verdict is not None else "unknown",
+        "timing_status": timing_status,
+    }
+    if selector is not None and selector != {"view": "summary"} and "items" in response:
+        raw_items = response["items"]
+        total = response.get("total")
+        next_offset = response.get("next_offset")
+        offset = cast(int, selector["offset"])
+        limit = cast(int, selector["limit"])
+        if (
+            not isinstance(raw_items, list)
+            or len(raw_items) > limit
+            or type(total) is not int
+            or not 0 <= total <= 100_000
+            or offset + len(raw_items) > total
+            or next_offset != (offset + limit if offset + limit < total else None)
+            or selector["view"] == "timing"
+            and type(response.get("timing_complete")) is not bool
+        ):
+            raise ValueError("worker_validation: evidence page invalid")
+        items: list[dict[str, object]] = []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                raise TypeError("worker_validation: evidence item invalid")
+            item = cast(dict[str, object], item)
+            if selector["view"] == "junit":
+                environment, sha256, count = (
+                    item.get("environment"),
+                    item.get("sha256"),
+                    item.get("test_count"),
+                )
+                if (
+                    environment != selector["environment"]
+                    or not isinstance(sha256, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", sha256) is None
+                    or type(count) is not int
+                    or not 0 <= count <= 1_000_000
+                ):
+                    raise ValueError("worker_validation: JUnit page invalid")
+                items.append(
+                    {"environment": environment, "sha256": sha256, "test_count": count}
+                )
+            else:
+                name, seconds = item.get("name"), item.get("seconds")
+                if (
+                    not isinstance(name, str)
+                    or len(name) > 512
+                    or name.startswith("/")
+                    or "\\" in name
+                    or ".." in name.split("/")
+                    or not isinstance(seconds, (int, float))
+                    or isinstance(seconds, bool)
+                    or not math.isfinite(seconds)
+                    or seconds < 0
+                ):
+                    raise ValueError("worker_validation: timing page invalid")
+                items.append({"name": name, "seconds": seconds})
+        result.update({"items": items, "total": total, "next_offset": next_offset})
+        if selector["view"] == "timing":
+            result["timing_complete"] = response["timing_complete"]
+        return result
+    artifacts = response.get("junit_artifacts", [])
+    if not isinstance(artifacts, list) or len(artifacts) > 100:
+        raise ValueError("worker_validation: JUnit response invalid")
+    public_artifacts: list[dict[str, object]] = []
+    for item in artifacts:
+        if not isinstance(item, dict):
+            raise TypeError("worker_validation: JUnit artifact invalid")
+        item = cast(dict[str, object], item)
+        environment, sha256, test_count = (
+            item.get("environment"),
+            item.get("sha256"),
+            item.get("test_count"),
+        )
+        if (
+            not isinstance(environment, str)
+            or re.fullmatch(r"[A-Za-z0-9_-]{1,32}", environment) is None
+            or not isinstance(sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", sha256) is None
+            or type(test_count) is not int
+            or not 0 <= test_count <= 1_000_000
+        ):
+            raise TypeError("worker_validation: JUnit artifact invalid")
+        public_artifacts.append(
+            {"environment": environment, "sha256": sha256, "test_count": test_count}
+        )
+    if selector is None or selector == {"view": "summary"}:
+        result["junit_artifacts"] = public_artifacts
+        return result
+    environment = selector["environment"]
+    offset = cast(int, selector["offset"])
+    limit = cast(int, selector["limit"])
+    if selector["view"] == "junit":
+        items: list[dict[str, object]] = [
+            item for item in public_artifacts if item["environment"] == environment
+        ]
+    else:
+        timings = response.get("junit_timings", [])
+        if not isinstance(timings, list) or len(timings) > 100:
+            raise TypeError("worker_validation: timing response invalid")
+        items = []
+        timing_complete = False
+        seen_timing = False
+        for timing in timings:
+            if not isinstance(timing, dict):
+                raise TypeError("worker_validation: timing response invalid")
+            timing = cast(dict[str, object], timing)
+            if timing.get("environment") != environment:
+                continue
+            if seen_timing or type(timing.get("timing_complete")) is not bool:
+                raise ValueError("worker_validation: timing completeness invalid")
+            seen_timing = True
+            timing_complete = cast(bool, timing["timing_complete"])
+            cases = timing.get("over_100ms_cases", [])
+            if not isinstance(cases, list) or len(cases) > 10_000:
+                raise ValueError("worker_validation: timing cases invalid")
+            for case in cases:
+                if not isinstance(case, dict):
+                    raise TypeError("worker_validation: timing case invalid")
+                case = cast(dict[str, object], case)
+                name, seconds = case.get("name"), case.get("seconds")
+                if (
+                    not isinstance(name, str)
+                    or len(name) > 512
+                    or name.startswith("/")
+                    or "\\" in name
+                    or ".." in name.split("/")
+                    or not isinstance(seconds, (int, float))
+                    or isinstance(seconds, bool)
+                    or not math.isfinite(seconds)
+                    or seconds < 0
+                ):
+                    raise TypeError("worker_validation: timing case invalid")
+                items.append({"name": name, "seconds": seconds})
+        result["timing_complete"] = timing_complete
+    total = len(items)
+    result.update(
+        {
+            "items": items[offset : offset + limit],
+            "total": total,
+            "next_offset": offset + limit if offset + limit < total else None,
+        }
+    )
+    return result
+
+
+def create_live_worker_validation_session(
+    record: LedgerRecord,
+    issue: GitLabIssue,
+    *,
+    ledger: LedgerPort,
+    repository: RepositoryPort,
+    candidate_action: Callable[
+        [str, str | None, dict[str, object] | None], dict[str, object]
+    ],
+    candidate_tree: str,
+    role: str,
+    timeout_seconds: float,
+    temporary_directory: Path | None = None,
+) -> WorkerValidationBrokerSession:
+    """Bind Judge validation to one staged candidate in a live workflow."""
+    if role != "judge":
+        raise ValueError("worker_validation: judge role required")
+    if (
+        record.state is not RunnerState.EXECUTING
+        or record.phase is not WorkflowPhase.WORKFLOW
+        or record.workflow_lane is not WorkflowLane.CODING
+        or record.source_sha is None
+        or issue.iid != record.issue_iid
+        or re.fullmatch(r"[0-9a-f]{40}", candidate_tree) is None
+    ):
+        raise ValueError("worker_validation: identity is incomplete")
+    expected_head = repository.head(record.worktree)
+    if expected_head != record.source_sha:
+        raise ValueError("worker_validation: source identity changed")
+    repository.verify_worktree(record.worktree, record.source_branch, expected_head)
+    identity = WorkerReadSessionIdentity(
+        nonce=secrets.token_hex(16),
+        project_id=record.project_id,
+        issue_iid=record.issue_iid,
+        checkout=record.worktree,
+        phase=record.phase.value,
+        ledger_revision=record.revision,
+        source_sha=record.source_sha,
+    )
+
+    def identity_check(candidate: WorkerReadSessionIdentity) -> bool:
+        current = ledger.load_read_only(record.issue_iid)
+        if (
+            candidate != identity
+            or current is None
+            or current.project_id != record.project_id
+            or current.issue_iid != record.issue_iid
+            or current.revision != record.revision
+            or current.state is not record.state
+            or current.phase is not record.phase
+            or current.workflow_lane is not record.workflow_lane
+            or current.worktree != record.worktree
+            or current.source_sha != record.source_sha
+            or current.source_branch != record.source_branch
+        ):
+            return False
+        try:
+            repository.verify_worktree(
+                record.worktree, record.source_branch, expected_head
+            )
+            return repository.head(record.worktree) == expected_head
+        except (ValueError, RuntimeError, OSError):
+            return False
+
+    def validation_action(
+        action: str, selector: dict[str, object] | None
+    ) -> dict[str, object]:
+        operation = "validate" if action == "validate" else "status"
+        report = candidate_action(operation, candidate_tree, None)
+        return _worker_validation_projection(report, candidate_tree, selector)
+
+    return WorkerValidationBrokerSession(
+        identity,
+        identity_check=identity_check,
+        validation_action=validation_action,
+        candidate_tree=candidate_tree,
+        timeout_seconds=timeout_seconds,
+        temporary_directory=temporary_directory,
+    )
 
 
 def create_live_worker_git_session(

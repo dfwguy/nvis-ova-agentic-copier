@@ -441,3 +441,144 @@ def request_worker_git(
     ):
         return cast(dict[str, object], response["value"])
     raise ValueError("worker_git: request failed")
+
+
+def _validation_selector(value: object) -> bool:
+    """Check one closed, bounded evidence page selector."""
+    if not isinstance(value, dict):
+        return False
+    value = cast(dict[str, object], value)
+    if value == {"view": "summary"}:
+        return True
+    environment = value.get("environment")
+    offset = value.get("offset")
+    limit = value.get("limit")
+    return (
+        set(value) == {"view", "environment", "offset", "limit"}
+        and value.get("view") in {"junit", "timing"}
+        and isinstance(environment, str)
+        and environment in {"py311", "py314"}
+        and type(offset) is int
+        and 0 <= offset <= 100_000
+        and type(limit) is int
+        and 1 <= limit <= 100
+    )
+
+
+class WorkerValidationBrokerSession(WorkerReadBrokerSession):
+    """Serve only validation and bounded evidence for one staged Judge tree."""
+
+    def __init__(
+        self,
+        identity: WorkerReadSessionIdentity,
+        *,
+        identity_check: Callable[[WorkerReadSessionIdentity], bool],
+        validation_action: Callable[[str, dict[str, object] | None], dict[str, object]],
+        candidate_tree: str,
+        timeout_seconds: float,
+        temporary_directory: Path | None,
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
+        self._validation_action = validation_action
+        self._candidate_tree = candidate_tree
+        super().__init__(
+            identity,
+            identity_check=identity_check,
+            read_action=lambda _action: {},
+            timeout_seconds=timeout_seconds,
+            temporary_directory=temporary_directory,
+            clock=clock,
+        )
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                connection, _ = self._socket.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            with connection:
+                connection.settimeout(0.5)
+                try:
+                    request = json.loads(_read_frame(connection))
+                    if not isinstance(request, dict):
+                        raise TypeError("worker_validation: invalid request")
+                    action = request.get("action")
+                    selector = request.get("selector")
+                    expected = (
+                        {"nonce", "action", "candidate_tree", "selector"}
+                        if action == "evidence"
+                        else {"nonce", "action", "candidate_tree"}
+                    )
+                    if (
+                        set(request) != expected
+                        or action not in {"validate", "status", "evidence"}
+                        or request.get("nonce") != self._identity.nonce
+                        or request.get("candidate_tree") != self._candidate_tree
+                        or (action == "evidence" and not _validation_selector(selector))
+                        or self._clock() >= self._deadline
+                        or not self._identity_check(self._identity)
+                    ):
+                        raise ValueError(
+                            "worker_validation: identity or request invalid"
+                        )
+                    result = self._validation_action(
+                        cast(str, action), cast(dict[str, object] | None, selector)
+                    )
+                    encoded = json.dumps(result, ensure_ascii=True)
+                    if len(encoded.encode()) > _MAX_FRAME_BYTES:
+                        raise ValueError("worker_validation: response limit exceeded")
+                    if (
+                        self._stop.is_set()
+                        or self._clock() >= self._deadline
+                        or not self._identity_check(self._identity)
+                    ):
+                        raise ValueError("worker_validation: identity changed")
+                    _write_frame(connection, {"accepted": True, "value": result})
+                except (
+                    OSError,
+                    ValueError,
+                    TypeError,
+                    ValidationError,
+                    OverflowError,
+                    RuntimeError,
+                ):
+                    try:
+                        _write_frame(connection, {"accepted": False})
+                    except (OSError, ValueError):
+                        pass
+
+
+def request_worker_validation(
+    socket_path: Path,
+    nonce: str,
+    action: str,
+    *,
+    candidate_tree: str,
+    selector: dict[str, object] | None = None,
+    timeout_seconds: float = 3600,
+) -> dict[str, object]:
+    """Request one closed validation operation from a live controller."""
+    payload: dict[str, object] = {
+        "nonce": nonce,
+        "action": action,
+        "candidate_tree": candidate_tree,
+    }
+    if selector is not None:
+        payload["selector"] = selector
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(timeout_seconds)
+            connection.connect(str(socket_path))
+            _write_frame(connection, payload)
+            response = json.loads(_read_frame(connection))
+    except (OSError, ValueError, TimeoutError):
+        raise ValueError("worker_validation: submission failed") from None
+    if (
+        isinstance(response, dict)
+        and response.get("accepted") is True
+        and isinstance(response.get("value"), dict)
+    ):
+        return cast(dict[str, object], response["value"])
+    raise ValueError("worker_validation: request failed")
