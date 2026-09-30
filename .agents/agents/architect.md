@@ -154,19 +154,10 @@ and does not waive the full-JUnit gate. It judges exceptions and causes. Its
 receipt retains complete evidence;
 Architect routes its findings without inventing a timing pass.
 
-For serial work, the controller supplies `junit_timings` from the native Green
-hook, bound to the Green SHA and tree. Each readable Python 3.11 and 3.14
-result has a JUnit digest, count, and complete bounded `over_100ms_cases`
-list. Judge passes that trusted proof to Non-functional Review. Baseline
-relative regression remains `UNKNOWN` and does not block this route. A
-successful hook with a missing or `OSError`-unreadable JUnit file has timing
-`UNKNOWN`; review continues without a timing pass. A valid readable JUnit
-file with an overflowing bounded advisory case summary also has timing
-`UNKNOWN`. Malformed, oversized, or invalid present JUnit data blocks review.
-A failed hook still fails. Missing or
-mismatched commit identity proof returns to its owner; model prose cannot
-establish a timing pass. The legacy staged-tree route keeps its malformed
-proof rejection.
+For serial work, a missing or unreadable JUnit file or a valid overflowing
+advisory summary leaves timing `UNKNOWN` without a timing pass. Malformed,
+oversized, or invalid present proof, a failed hook, or missing or mismatched
+Green identity blocks review.
 
 Green starts read-only reviews only after Judge and Non-functional Review pass
 the same Green SHA and tree in serial work, the same Green tree in normal
