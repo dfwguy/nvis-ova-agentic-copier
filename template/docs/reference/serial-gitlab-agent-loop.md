@@ -1524,7 +1524,7 @@ Check pipelines first. Use the current SHA. Do not use an old one.
 | No immediate active record | Choose only the earliest due retry by `(retry_at, issue IID)`; future or undated retries remain queued. |
 | Multiple retained active records | Status and inventory report every record in deterministic order and classify each issue independently. Ordinary unpinned admission remains capacity-one and fails closed. A reviewed exact-IID recovery may advance its stale or missing target only when retained identities are disjoint and no different verified live owner exists. |
 | Successful pipeline | Clear its observation. |
-| Nonterminal default-branch pipeline | Wait in the activation. Do not select new work. |
+| Present default-branch pipeline with a valid nonterminal status | Keep checking the exact open-MR inventory. Park any exact pending MR observer, then select another eligible issue if one exists. Do not poll the default-branch pipeline in this activation; the next timer activation checks it again. |
 | New exact pending MR observer | When the applied issue moves from `PUBLISHING` to `OBSERVING`, it reports `outcome=activation_complete` and `stop_reason=pipeline_wait` without polling. The wrapper previews once. |
 | Retained exact nonterminal MR observer | Park it from ordinary ownership only when its SHA, retained owner, worktree, configured project, and target match. Later preview or apply may report eligible and start another item. If none exists, it may be idle and yield to the timer. Parking does not create `pipeline_wait`. |
 | Missing, malformed, inaccessible, identity, or check-pipeline evidence | Fail closed. Default-branch evidence blocks ordinary work. Ownerless open-MR evidence is non-owning and item-local. A retained inexact or stale `OBSERVING` claimant stays visible for item-local `_observe` reconciliation before fresh work. It blocks or repairs when identity cannot be established. |
@@ -1606,14 +1606,14 @@ project or item is safe to run.
 | Liveness event | Scheduler action |
 | --- | --- |
 | Active Python activation | Advance at most one issue. Keep its active-work budget. That budget is 10,800 seconds. |
-| Nonterminal default-branch pipeline during `loop run --apply` | Stay in the activation. Poll after 5 seconds. Poll again after 10 seconds. Then poll after 20 seconds. Cap the poll at 30 seconds. Resume promptly when the evidence becomes terminal. |
+| Present default-branch pipeline with a valid nonterminal status during `loop run --apply` | Do not poll or wait in the activation. Continue the exact open-MR inventory and ordinary selection. The next timer activation checks its state again. Missing, malformed, failed, or canceled default-branch evidence still blocks unrelated work. |
 | New exact pending MR observer | On its `PUBLISHING` to `OBSERVING` transition, finish with `outcome=activation_complete` and `stop_reason=pipeline_wait` without polling. The wrapper then makes one fresh preview. |
 | Retained exact nonterminal MR observer | Park it from ordinary ownership when its SHA, retained owner, worktree, configured project, and target match. Parking does not create `pipeline_wait`; later preview or apply may select another item or be idle. It never starts more than one worker at a time. |
 | Repair uncertainty handoff | When an applied `loop.run` report has schema version `1`, `outcome=activation_complete`, and `stop_reason=needs_repair`, the wrapper emits that report and exits `0`. It does not preview eligibility or start another worker in that service pass. |
-| Wrapper continuation | Continue after a valid `prerequisite_labels_reconciled`, `awaiting-human`, `blocked`, `failed`, or `complete` report. Make one fresh read-only eligibility check and one fresh read-only preselection-pipeline check. For an ordinary terminal handoff, start another applied activation only for `eligible`. Immediately after the exact `activation_complete/pipeline_wait` publication handoff, one preview may start another applied activation for `eligible`, `resume_available`, or `repair_ready`. A top-level `pipeline_wait/pipeline_wait` exits. Re-query GitLab, then fast-forward the clean service base. This housekeeping is outside the per-issue budget. |
+| Wrapper continuation | Continue after a valid `prerequisite_labels_reconciled`, `awaiting-human`, `blocked`, `failed`, or `complete` report. Make one fresh read-only eligibility check and one fresh read-only preselection-pipeline check. For an ordinary terminal handoff, start another applied activation only for `eligible`. Immediately after the exact `activation_complete/pipeline_wait` publication handoff, one preview may start another applied activation for `eligible`, `resume_available`, or `repair_ready`. Re-query GitLab, then fast-forward the clean service base. This housekeeping is outside the per-issue budget. |
 | Exact failed current-source pipeline | Activate `repair`. Run the repair workflow. Run it in the same applied activation. |
 | Handoff or idle | A future `retry-wait` remains a handoff. A future `time-limit` or `segment-limit` remains a handoff. A human or safety block remains a handoff. Missing, failed, or unrecognized evidence remains a handoff. `idle` means no eligible or resumable work exists. |
-| Timer and scope | `OnUnitInactiveSec=20min` starts after the service exits, including a `service_time_limit` yield. The next timer activation checks for work and may resume retained work. It is not the active-pipeline polling cadence. The activation deadline and systemd outer timeout still apply. The loop is serial for each host and project. It is not multi-host coordination. |
+| Timer and scope | `OnUnitInactiveSec=20min` starts after the service exits, including a `service_time_limit` yield. The next timer activation checks for work and may resume retained work. It also rechecks a valid pending default-branch pipeline. A retained exact MR observer may poll within a later activation. The activation deadline and systemd outer timeout still apply. The loop is serial for each host and project. It is not multi-host coordination. |
 
 ## Ledger, worktrees, and audit
 
@@ -1995,10 +1995,12 @@ the new MR. It never recreates its branch, commit, or MR.
 
 If all three retries lack the closing relation, the controller keeps the bound
 MR in `Observing` at `PipelineWait`. It does not set `retry_at` or look up a
-pipeline. The same applied activation keeps observing. Once the relation
-appears, absent or nonterminal pipeline evidence for that exact SHA leaves the
-durable record in `Observing` at `PipelineWait`. The activation polls it.
-Terminal failed evidence starts repair. Only a true GitLab transport or API
+pipeline. That activation hands off as `activation_complete/pipeline_wait`.
+A later activation checks the relation again. Once the relation appears, absent or nonterminal pipeline evidence for that exact SHA leaves the
+durable record in `Observing` at `PipelineWait`. For a pending pipeline, the
+new observer hands off as `activation_complete/pipeline_wait` without polling.
+A later activation may poll the retained observer. Terminal failed evidence
+starts repair. Only a true GitLab transport or API
 failure uses safe, bounded backoff. Its durable check evidence is sanitized. An
 immutable identity mismatch blocks. It does not use an eventual-consistency
 retry. The bounded post-create publication and closing reconciliation does not

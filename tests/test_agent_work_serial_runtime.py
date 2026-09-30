@@ -1293,10 +1293,12 @@ class SequencedPipelineGitLab(FakeGitLab):
         *,
         default_statuses: tuple[str, ...] = ("success",),
         merge_request_statuses: tuple[str, ...] = ("success",),
+        default_sha: str = "d" * 40,
     ) -> None:
         super().__init__()
         self.default_statuses = list(default_statuses)
         self.merge_request_statuses = list(merge_request_statuses)
+        self.default_sha = default_sha
 
     @staticmethod
     def _next_status(statuses: list[str]) -> str:
@@ -1309,7 +1311,7 @@ class SequencedPipelineGitLab(FakeGitLab):
         return PipelineEvidence(
             id=1,
             status=self._next_status(self.default_statuses),
-            sha="d" * 40,
+            sha=self.default_sha,
             web_url="https://pipeline/main",
         )
 
@@ -21686,13 +21688,15 @@ def test_newly_published_running_pipeline_yields_without_polling(
     assert gitlab.created_merge_requests == 1
 
 
-def test_apply_polls_preselection_pipeline_until_success_then_selects_work(
+def test_apply_selects_work_while_default_pipeline_is_running(
     tmp_path: Path,
 ) -> None:
-    """A nonterminal default pipeline does not defer eligible work to another run."""
+    """A present running default pipeline does not delay eligible work."""
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
-    gitlab = SequencedPipelineGitLab(default_statuses=("running", "success"))
+    gitlab = SequencedPipelineGitLab(
+        default_statuses=("running",), default_sha="b" * 40
+    )
     clock = AdvancingMonotonicClock()
 
     report = dispatch(
@@ -21709,7 +21713,8 @@ def test_apply_polls_preselection_pipeline_until_success_then_selects_work(
     assert report.stop_reason == "segment_limit"
     assert report.segments_run == 1
     assert gitlab.eligible_calls == 1
-    assert clock.delays == [5]
+    assert clock.delays == []
+    assert gitlab.default_statuses == ["running"]
 
 
 def test_apply_polls_retained_observing_record_until_terminal_pipeline(
@@ -21818,12 +21823,12 @@ def test_apply_retained_pipeline_polls_do_not_consume_segment_budget(
     assert len(report.items[-1].phase_timings) == 64
 
 
-def test_apply_pipeline_polling_uses_capped_exponential_backoff(tmp_path: Path) -> None:
-    """Polling delays increase without consuming the bounded segment budget."""
+def test_apply_pending_default_pipeline_does_not_poll(tmp_path: Path) -> None:
+    """A pending default pipeline permits selection without any timed poll."""
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     gitlab = SequencedPipelineGitLab(
-        default_statuses=("running", "running", "running", "running", "success")
+        default_statuses=("running",), default_sha="b" * 40
     )
     clock = AdvancingMonotonicClock()
 
@@ -21837,16 +21842,18 @@ def test_apply_pipeline_polling_uses_capped_exponential_backoff(tmp_path: Path) 
         ),
     )
 
-    assert clock.delays == [5, 10, 20, 30]
+    assert clock.delays == []
     assert report.segments_run == 1
     assert gitlab.eligible_calls == 1
 
 
-def test_preview_pipeline_wait_never_sleeps(tmp_path: Path) -> None:
-    """Preview reports one pending observation and remains read-only."""
+def test_preview_pending_default_pipeline_selects_without_sleep(tmp_path: Path) -> None:
+    """Preview can name eligible work while the default pipeline is running."""
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
-    gitlab = SequencedPipelineGitLab(default_statuses=("running",))
+    gitlab = SequencedPipelineGitLab(
+        default_statuses=("running",), default_sha="b" * 40
+    )
     clock = AdvancingMonotonicClock()
 
     report = dispatch(
@@ -21859,17 +21866,20 @@ def test_preview_pipeline_wait_never_sleeps(tmp_path: Path) -> None:
         ),
     )
 
-    assert report.stop_reason == "pipeline_wait"
+    assert report.outcome == "eligible"
+    assert gitlab.eligible_calls == 1
     assert clock.delays == []
 
 
-def test_apply_pipeline_polling_stops_at_deadline_without_selecting_work(
+def test_apply_pending_default_pipeline_selects_before_deadline(
     tmp_path: Path,
 ) -> None:
-    """An exhausted activation deadline preserves pending evidence and stops safely."""
+    """A pending default pipeline does not consume the activation deadline."""
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
-    gitlab = SequencedPipelineGitLab(default_statuses=("running",))
+    gitlab = SequencedPipelineGitLab(
+        default_statuses=("running",), default_sha="b" * 40
+    )
     clock = AdvancingMonotonicClock()
 
     report = dispatch(
@@ -21882,9 +21892,9 @@ def test_apply_pipeline_polling_stops_at_deadline_without_selecting_work(
         ),
     )
 
-    assert report.stop_reason == "time_limit"
-    assert report.items == ()
-    assert gitlab.eligible_calls == 0
+    assert report.outcome == "activation_complete"
+    assert gitlab.eligible_calls == 1
+    assert clock.delays == []
 
 
 @pytest.mark.parametrize("apply", (False, True))
@@ -21916,25 +21926,15 @@ def test_loop_run_checks_clear_pipeline_inventory_before_ordinary_selection(
     assert gitlab.preselection_calls == expected_calls
 
 
-@pytest.mark.parametrize(
-    ("status", "expected_outcome", "expected_stop_reason"),
-    (
-        ("failed", "pipeline_blocked", "pipeline_blocked"),
-        ("running", "activation_complete", "time_limit"),
-    ),
-)
-def test_loop_run_default_branch_pipeline_prevents_fresh_selection(
+def test_loop_run_failed_default_branch_pipeline_prevents_fresh_selection(
     tmp_path: Path,
-    status: str,
-    expected_outcome: str,
-    expected_stop_reason: str,
 ) -> None:
-    """A failed or nonterminal default pipeline fails closed before issue lookup."""
+    """A failed default pipeline still blocks fresh selection."""
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     gitlab = FakeGitLab()
     gitlab.default_branch_pipeline = PipelineEvidence(
-        id=1, status=status, sha="b" * 40, web_url="https://pipeline/main"
+        id=1, status="failed", sha="b" * 40, web_url="https://pipeline/main"
     )
 
     clock = AdvancingMonotonicClock()
@@ -21948,15 +21948,13 @@ def test_loop_run_default_branch_pipeline_prevents_fresh_selection(
         ),
     )
 
-    assert report.outcome == expected_outcome
-    assert report.stop_reason == expected_stop_reason
+    assert report.outcome == "pipeline_blocked"
+    assert report.stop_reason == "pipeline_blocked"
     assert report.items == ()
-    if status == "failed":
-        assert report.summary is not None
-        assert "https://pipeline/main" in report.summary
-        assert report.next_action
-    else:
-        assert clock.delays == [5]
+    assert report.summary is not None
+    assert "https://pipeline/main" in report.summary
+    assert report.next_action
+    assert clock.delays == []
     assert gitlab.eligible_calls == 0
     assert gitlab.preselection_calls == ["pipeline_for_ref:main"]
 
@@ -22263,6 +22261,64 @@ def test_loop_run_parks_an_exact_pending_observer_and_selects_fresh_work(
     assert applied.stop_reason == "segment_limit"
     assert clock.delays == []
     assert ledger.load(observer.issue_iid) == observer
+
+
+def test_loop_run_selects_fresh_work_beside_pending_default_and_mr_pipelines(
+    tmp_path: Path,
+) -> None:
+    """Two exact pending pipelines leave an earlier published MR observable."""
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    observer = ledger.persist(
+        _record(
+            tmp_path,
+            state=RunnerState.OBSERVING,
+            phase=WorkflowPhase.PIPELINE_WAIT,
+        ).model_copy(update={"merge_request_iid": 88})
+    )
+    fresh = _issue(iid=13)
+    gitlab = FakeGitLabWithEligibleIssues(
+        _issue().model_copy(update={"labels": ("agent::running",)}), fresh
+    )
+    gitlab.issues[fresh.iid] = fresh
+    gitlab.default_branch_pipeline = PipelineEvidence(
+        id=1, status="running", sha="b" * 40, web_url="https://pipeline/main"
+    )
+    merge_request = _mr(sha=observer.source_sha or "a" * 40)
+    gitlab.open_merge_request_inventory = (merge_request,)
+    gitlab.pipeline_by_merge_request[(merge_request.iid, merge_request.sha)] = (
+        PipelineEvidence(
+            id=4,
+            status="running",
+            sha=merge_request.sha,
+            web_url="https://pipeline/4",
+        )
+    )
+    clock = AdvancingMonotonicClock()
+    dependencies = replace(
+        _dependencies(config, ledger, gitlab, FakeRepository(config)),
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+
+    preview = dispatch(
+        CommandRequest(command="loop.run"), apply=False, dependencies=dependencies
+    )
+    assert preview.outcome == "eligible"
+    assert gitlab.eligible_calls == 1
+    applied = dispatch(
+        CommandRequest(command="loop.run", max_segments=1),
+        apply=True,
+        dependencies=dependencies,
+    )
+
+    assert [item.issue_iid for item in applied.items] == [fresh.iid]
+    assert applied.stop_reason == "segment_limit"
+    assert clock.delays == []
+    assert ledger.load(observer.issue_iid) == observer
+    assert f"pipeline_for_sha:{merge_request.iid}:{merge_request.sha}" in (
+        gitlab.preselection_calls
+    )
 
 
 @pytest.mark.parametrize("pipeline_status", ("running", "canceled"))

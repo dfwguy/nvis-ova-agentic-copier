@@ -43,9 +43,10 @@ Use one clear plan.
 The installed service can process consecutive terminally handed-off issues in
 one run. It also checks for ready work after it fixes prerequisite labels.
 Each issue has its own bounded run. Empty queues and saved retry waits return
-to the 20-minute timer. An applied run waits for nonterminal default-branch
-pipeline proof in place. A new exact merge-request observer moves from
-`PUBLISHING` to `OBSERVING`, then returns `activation_complete/pipeline_wait`
+to the 20-minute timer. If the default-branch pipeline is valid but still
+active, the run checks exact MRs and may choose new work. The timer
+checks the pipeline again. A new exact MR observer moves from `PUBLISHING` to `OBSERVING`, then returns
+`activation_complete/pipeline_wait`
 without polling. The wrapper previews once. Later, it parks a retained observer
 only when its SHA, owner, worktree, project, and target are exact. That parking
 can start another item or yield idle to the timer.
@@ -437,9 +438,10 @@ systemctl --user status "$unit_name.timer"
 ```
 
 The timer schedules the next bounded run 20 minutes after the service goes
-inactive. That run checks for new and resumable work. The timer does not set
-the pace for an active pipeline wait. In a run, one worker owns the issue's
-full flow session. Its Architect, Red, Green, and
+inactive. That run checks for new and resumable work. It also rechecks a
+valid default-branch pipeline that was still active. A later activation may
+poll a retained exact MR observer. In a run, one worker owns the issue's full
+flow session. Its Architect, Red, Green, and
 read-only judges pass context to each other. The runner restores the saved
 worktree and coarse `WORKFLOW` state, not a sidecar checkpoint for each role.
 The service has a 190-minute outer timeout. It includes the approved 180-minute
@@ -598,8 +600,9 @@ systemctl --user status "$unit_name.service"
 ```
 
 Use `--max-segments` or `--max-activation-seconds` for smaller work limits.
-The run advances one issue. With `--apply`, it polls a nonterminal
-default-branch pipeline after 5, 10, and 20 seconds. The cap is 30 seconds. A
+The run advances one issue. With `--apply`, it does not wait for a valid,
+active default-branch pipeline. It checks every open MR against its source SHA
+and may choose another issue. The timer checks the pipeline again. A
 current-SHA MR pipeline moves from `PUBLISHING` to `OBSERVING` only when its
 owner, worktree, project, and target are exact. That activation hands off as
 `outcome=activation_complete` and `stop_reason=pipeline_wait` without polling.
@@ -839,9 +842,10 @@ preview after an identity rotation, ledger revision, or a change to target,
 repository, merge-request, or pipeline evidence. Neither plan prints secrets.
 
 Keep the timer stopped if the command reports a conflict, a higher-priority
-owner, a blocked default-branch pipeline, or a nonterminal pipeline.
-Follow the reported safe next action. Do not select another issue or change
-retained artifacts.
+owner, a blocked default-branch pipeline, or unresolved pipeline evidence.
+A valid, active default-branch pipeline alone does not require a timer stop.
+Follow the reported safe next action. For a block, do not select another issue
+or change retained artifacts.
 
 Re-enable the timer only when the expected checkpoint has been reached and you
 understand the reported status:

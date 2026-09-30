@@ -29,8 +29,10 @@ related:
 # Recoverable serial agent-loop architecture
 
 One run owns one bounded issue flow. After a handoff, the systemd wrapper checks
-its report. It refreshes project and default-branch proof. It polls a live
-default-branch pipeline in place. An exact MR observer hands off after
+its report. It refreshes project and default-branch proof. If the
+default-branch pipeline is valid but still active, the run checks exact MRs and
+may pick new work. The timer checks the pipeline again. An exact MR observer
+hands off after
 publication. Later, a new activation parks it. The loop can then admit
 other work. Only idle or saved handoffs return control to the timer.
 
@@ -225,7 +227,7 @@ internal agent handoffs.
 | Phase | Action | Required evidence or authority | Stop or next state |
 | --- | --- | --- | --- |
 | Lock and reconcile | Acquire the local lock. Reconcile GitLab issues, MRs, worktree, branches, and ledger. | The single-project lock and durable evidence. | Continue to pipeline checks. |
-| Pipeline gate | Check each newest default-branch and open-MR pipeline. Require its exact current source SHA. | Exact current-source pipeline evidence. | Missing, malformed, inaccessible, or nonterminal default-branch evidence blocks and polls in place. A new exact observer returns `activation_complete/pipeline_wait` without polling. Later ordinary admission parks a live MR only when its SHA, owner, worktree, project, and target match. Parking does not hand off; it may select another item or be idle. Ownerless evidence is non-owning and item-local. A stale or inexact claim stays visible for `_observe`. It runs before fresh work and blocks or repairs if identity is unclear. An exact failed MR pipeline enters `repair` only with one proven retained owner. |
+| Pipeline gate | Check each newest default-branch and open-MR pipeline. Require its exact current source SHA. | Exact current-source pipeline evidence. | Missing, malformed, inaccessible, failed, or canceled default-branch evidence blocks unrelated work. A valid but unfinished pipeline permits exact MR checks and another issue. There is no wait; the timer checks it again. A new exact observer returns `activation_complete/pipeline_wait` without polling. Later ordinary admission parks a live MR only when its SHA, owner, worktree, project, and target match. Parking does not hand off; it may select another item or be idle. Ownerless evidence is non-owning and item-local. A stale or inexact claim stays visible for `_observe`. It runs before fresh work and blocks or repairs if identity is unclear. An exact failed MR pipeline enters `repair` only with one proven retained owner. |
 | Retained-work recovery | Resume one durable immediate `agent::running` record. Guarded clean pre-checkpoint `BLOCKED` work may resume after exact proof; other blocked work needs its applicable reviewed recovery plan. | Status and inventory report each retained issue independently. A reviewed exact-IID `loop recover` plan can reconcile a stale or missing target, but another live owner occupies the one-item capacity. Ordinary admission remains fail-closed when more than one immediate record exists. | It never handles a uniquely owned failed current-source MR pipeline. |
 | Human block | A failed or canceled default-branch pipeline blocks unrelated work. An ownerless failed or canceled open-MR pipeline stays item-local. | Earlier gates and targeted recovery must allow selection. | Continue only when that authority exists. |
 | Prerequisite projection | Derive and reconcile prerequisite-label projections from one complete marker and live-state proof before selection. | A changed projection. | End as housekeeping. Claim no work. Create no record, worktree, or worker session. |
@@ -261,11 +263,9 @@ Red, Green, documentation, or judges.
 Default activation allows 16 workflow attempts in a 10,800-second
 (three-hour) budget. Each owning invocation gets positive, ceil-rounded time
 left. Exhaustion follows durable-worktree retry and recovery. Retryable worker
-failures are immediately due and continue. Nonterminal default-branch or exact
-current-MR evidence rechecks in place. Delays are 5, 10, then 20 seconds,
-capped at 30. It resumes when evidence is terminal. The 20-minute timer starts
-after the service becomes inactive, including a service-time yield. It never
-paces an active pipeline wait.
+failures are immediately due and continue. If the default-branch pipeline is
+valid but still active, the run does not wait. It checks exact MRs and may pick new work. The 20-minute timer starts when the
+service exits, even after a service-time yield. Its next run checks the pipeline.
 
 Future retries, human or safety blocks, missing, failed, or unrecognized
 evidence, activation deadline, service-time yield, and systemd timeout are
