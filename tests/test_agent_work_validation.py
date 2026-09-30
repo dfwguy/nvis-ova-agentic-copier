@@ -1922,10 +1922,7 @@ class _FocusedCommandCaptureError(TimingCaptureError):
 
 @pytest.mark.parametrize(
     "capture_error",
-    (
-        _BaselineHookCaptureError("PRIVATE_TOKEN=secret /private/hook"),
-        OSError("PRIVATE_TOKEN=secret /private/path"),
-    ),
+    (_BaselineHookCaptureError("PRIVATE_TOKEN=secret /private/hook"),),
 )
 def test_baseline_capture_failure_preserves_candidate_junit_and_reports_unknown(
     capture_error: Exception,
@@ -1980,11 +1977,92 @@ def test_baseline_capture_failure_preserves_candidate_junit_and_reports_unknown(
         observe_judge_validation(candidate_tree=_CANDIDATE, dependencies=dependencies)
 
 
+def test_missing_baseline_junit_capture_error_preserves_candidate_junit() -> None:
+    from agent_work.timing_capture import BaselineJUnitUnavailableError
+
+    state = ValidationStateFake()
+    dependencies, _calls = _dependencies(state)
+    junit = (
+        b"<testsuite tests='1' failures='0' errors='0'>"
+        b"<testcase classname='tests.test_speed' name='test_existing' time='0.2'/>"
+        b"</testsuite>"
+    )
+
+    def capture(
+        _tree: str, _artifacts: tuple[tuple[str, bytes, int], ...], _output: str
+    ) -> None:
+        raise BaselineJUnitUnavailableError()
+
+    dependencies = replace(
+        dependencies,
+        read_artifact=lambda _path: junit,
+        timing_review_required=True,
+        expected_baseline_tree=_OTHER_CANDIDATE,
+        expected_baseline_sha="c" * 40,
+        capture_timing_review=capture,
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert report.state == "terminal-success"
+    assert report.timing_status == "complete"
+    assert report.timing_comparison_status == "unknown"
+    assert report.timing_comparison_reason == "baseline_unavailable"
+    assert len(report.junit_artifacts) == len(report.junit_timings) == 2
+
+
+def test_generic_timing_capture_os_error_is_terminal_and_redacts_detail() -> None:
+    state = ValidationStateFake()
+    dependencies, calls = _dependencies(state)
+    junit = (
+        b"<testsuite tests='1' failures='0' errors='0'>"
+        b"<testcase classname='tests.test_speed' name='test_existing' time='0.2'/>"
+        b"</testsuite>"
+    )
+
+    def capture(
+        _tree: str, _artifacts: tuple[tuple[str, bytes, int], ...], _output: str
+    ) -> None:
+        raise OSError("PRIVATE_TOKEN=secret /private/timing-evidence")
+
+    dependencies = replace(
+        dependencies,
+        read_artifact=lambda _path: junit,
+        timing_review_required=True,
+        expected_baseline_tree=_OTHER_CANDIDATE,
+        expected_baseline_sha="c" * 40,
+        capture_timing_review=capture,
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    status = observe_judge_validation(
+        candidate_tree=_CANDIDATE, dependencies=dependencies
+    )
+
+    assert calls == [("git", "hook", "run", "pre-commit")]
+    assert report.state == status.state == "terminal-artifact-failure"
+    assert report.artifact_failure is not None
+    assert (report.artifact_failure.stage, report.artifact_failure.reason) == (
+        "timing_review",
+        "invalid_timing",
+    )
+    assert state.records[_CANDIDATE]["timing_failure_code"] == "capture_failed"
+    artifacts = state.records[_CANDIDATE]["junit_artifacts"]
+    assert isinstance(artifacts, list)
+    assert len(artifacts) == 2
+    assert "PRIVATE_TOKEN" not in str(state.records[_CANDIDATE])
+    assert "/private/timing-evidence" not in str(status)
+
+
 @pytest.mark.parametrize(
     ("baseline_artifact", "comparison_unknown"),
     (
         ("missing", True),
-        ("read_error", True),
+        ("read_error", False),
         ("malformed", False),
         ("oversized", False),
     ),
@@ -2094,7 +2172,12 @@ def test_real_baseline_junit_read_preserves_candidate_validation_only_when_unava
     else:
         assert report.state == "terminal-artifact-failure"
         assert report.artifact_failure is not None
-        assert report.artifact_failure.stage == "timing_review"
+        assert (report.artifact_failure.stage, report.artifact_failure.reason) == (
+            "timing_review",
+            "invalid_timing",
+        )
+        if baseline_artifact == "read_error":
+            assert state.records[_CANDIDATE]["timing_failure_code"] == "capture_failed"
         assert report.timing_comparison_status is None
 
 

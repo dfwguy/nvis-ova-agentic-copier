@@ -31,6 +31,7 @@ from .ports import CommandResult, CommandRunner
 from .test_timing import is_safe_timing_case_id, safe_timing_case_id
 from .timing_admission import TimingAdmissionLease
 from .timing_capture import (
+    BaselineJUnitUnavailableError,
     FindingBudgetCaptureError,
     FocusedTimingCaptureError,
     TimingCaptureError,
@@ -1776,7 +1777,7 @@ def run_judge_validation(
                 TypeError,
                 RuntimeError,
             ) as error:
-                if isinstance(error, OSError) or (
+                if isinstance(error, BaselineJUnitUnavailableError) or (
                     isinstance(error, TimingCaptureError)
                     and error.code == "baseline_hook_failed"
                 ):
