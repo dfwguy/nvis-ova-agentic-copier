@@ -96,6 +96,18 @@ The fresh check covers the full staged tree before review. Main's later
 two-parent commit runs the hook. Send drift or lost proof to Architect. Keep
 and check both proofs.
 
+Before an interactive pre-commit repair, resolve any pending, missing, or lost
+commit result. Never treat a failed or absent result as proof that no Green
+commit exists. Architect may approve production-only repair on the same
+branch only when `HEAD` mechanically equals authentic Red, its ref, base, and
+branch remain intact, and accepted tests stay frozen. The repair must follow
+Red and the original scope without relaxing hooks, configuration, security,
+or identity. After editors stop and Main restages the complete candidate,
+discard prior candidate proof and approvals. Run the full trusted native hook
+for the new tree and require fresh Non-functional Review and all applicable
+reviews. Test edits or any existing Green commit require a fresh branch and
+TDD cycle. Keep the serial route unchanged.
+
 ## Constraints
 
 - Do not edit, stage, push, or call GitLab. Only trusted normal interactive

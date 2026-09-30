@@ -85,8 +85,18 @@ Restaging voids prior reads and reviews. `state_machine.WORKFLOW_RECEIPTS`
 owns the top-level receipt tuple. Keep extra reviews in the Finalizer
 receipt and durable audit.
 
-An actionable finding after an interactive Green commit returns to Architect
-for a fresh branch and TDD cycle. Do not append a correction commit.
+Before the first interactive Green commit, request Architect approval for a
+production-only repair on the same branch. First mechanically prove `HEAD`
+equals authentic Red and retain its ref, base, and branch. Keep accepted tests
+frozen. Resolve pending, missing, or lost commit results before editing and
+prove no Green commit exists. Repair only behavior justified by Red and the
+original scope. Do not relax hooks, configuration, security, or identity.
+After all editors stop, Main restages the complete candidate. Discard prior
+candidate proof and approvals. Get a fresh full Judge native hook,
+Non-functional Review, and all applicable reviews before handoff.
+Test edits or any existing Green commit return to Architect for a fresh branch
+and TDD cycle. Do not append a correction commit. This exception does not
+change the serial route or your allowed checks.
 
 In serial work, gather concrete findings before an edit. A finding needs an owner, path,
 proof, desired result, and approved fix. Send unclear policy or authority
