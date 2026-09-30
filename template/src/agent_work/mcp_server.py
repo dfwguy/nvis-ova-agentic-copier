@@ -29,12 +29,17 @@ from pydantic import (
 )
 
 from .candidate_boundary import GIT_READ_MAX_CHUNK_BYTES
+from .domain import ErrorCode, WorkflowLane, WorkflowPhase
+from .models import BoundaryModel, MergeRequestDraft, SplitPlan
+from .red_checkpoint import RedCheckpointRequest
 from .serial import _worker_validation_projection
 from .worker import (
     CandidateOperation,
     WorkerProtocolError,
     WorkerResultBrokerClientRequest,
+    WorkerResultBuildInput,
     candidate_tools_for_role,
+    is_safe_worker_result_diagnostic,
     request_candidate_validation,
 )
 from .worker_read import _public_git_value, _validation_selector
@@ -475,6 +480,119 @@ def create_worker_validation_mcp_server(
     def worker_validation_evidence(selector: dict[str, object]) -> CallToolResult:
         """Read one bounded summary or evidence page."""
         return dispatch("evidence", selector)
+
+    return server
+
+
+class _PublicSuggestCloseEvidence(BoundaryModel):
+    """Close suggestion data with the controller-owned issue identity omitted."""
+
+    reason: Literal[
+        "duplicate", "superseded", "already-satisfied", "no-longer-applicable"
+    ]
+    evidence: tuple[str, ...] = Field(min_length=1, max_length=16)
+
+    @field_validator("evidence")
+    @classmethod
+    def _valid_evidence(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not item.strip() or len(item) > 2048 for item in value):
+            raise ValueError("evidence must contain nonempty bounded items")
+        return value
+
+
+class WorkerHandoffIntent(BoundaryModel):
+    """Public worker intent; private broker and issue identity are never inputs."""
+
+    workflow_lane: WorkflowLane
+    result_kind: Literal[
+        "ready_to_publish",
+        "red_checkpoint_ready",
+        "retryable",
+        "needs_human",
+        "split_required",
+        "suggest_close",
+    ]
+    rejection_route: WorkflowPhase | None = None
+    change_summary: str = Field(min_length=1, max_length=20_000)
+    next_action: str = Field(min_length=1, max_length=2_000)
+    merge_request_draft: MergeRequestDraft | None = None
+    error_code: ErrorCode | None = None
+    redacted_summary: str = ""
+    split_plan: SplitPlan | None = None
+    suggest_close_evidence: _PublicSuggestCloseEvidence | None = None
+    red_checkpoint_request: RedCheckpointRequest | None = None
+
+
+class _WorkerHandoffMCPServer(MCPServer):
+    def __init__(self) -> None:
+        super().__init__("worker-handoff")
+
+    async def list_tools(self) -> list[Tool]:
+        """Advertise only one closed result-submission tool."""
+        return [
+            tool.model_copy(
+                update={
+                    "input_schema": {**tool.input_schema, "additionalProperties": False}
+                }
+            )
+            for tool in await super().list_tools()
+        ]
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any], context: Any = None
+    ) -> CallToolResult:
+        if name != "worker_submit_result" or set(arguments) != {"intent"}:
+            return CallToolResult(
+                content=[TextContent(text="worker_handoff: invalid tool or arguments")],
+                is_error=True,
+            )
+        try:
+            WorkerHandoffIntent.model_validate(arguments["intent"])
+        except ValidationError:
+            return CallToolResult(
+                content=[TextContent(text="worker_handoff: invalid arguments")],
+                is_error=True,
+            )
+        return cast(CallToolResult, await super().call_tool(name, arguments, context))
+
+
+def create_worker_handoff_mcp_server(
+    gateway: Callable[[WorkerResultBuildInput], dict[str, object]], *, issue_iid: int
+) -> MCPServer:
+    """Submit typed worker intent through the controller-owned result broker."""
+    if issue_iid <= 0:
+        raise ValueError("issue identity must be positive")
+    server = _WorkerHandoffMCPServer()
+
+    @server.tool()
+    def worker_submit_result(intent: WorkerHandoffIntent) -> CallToolResult:
+        """Submit one result for the controller-bound issue."""
+        try:
+            payload = intent.model_dump(exclude_none=True)
+            close_evidence = payload.get("suggest_close_evidence")
+            if isinstance(close_evidence, dict):
+                close_evidence["issue_iid"] = issue_iid
+            response = gateway(WorkerResultBuildInput.model_validate(payload))
+            if not isinstance(response, dict) or response.get("accepted") is not True:
+                raise ValueError("broker did not accept result")
+        except WorkerProtocolError as error:
+            diagnostic = str(error)
+            message = (
+                diagnostic
+                if is_safe_worker_result_diagnostic(diagnostic)
+                else "worker_handoff: request failed"
+            )
+            return CallToolResult(content=[TextContent(text=message)], is_error=True)
+        except (ValidationError, OSError, ValueError, TypeError, OverflowError):
+            return CallToolResult(
+                content=[TextContent(text="worker_handoff: request failed")],
+                is_error=True,
+            )
+        accepted = {"accepted": True}
+        return CallToolResult(
+            content=[TextContent(text=json.dumps(accepted))],
+            structured_content=accepted,
+        )
 
     return server
 
