@@ -41,6 +41,8 @@ related:
 ## Commands
 
 ```text
+agent-work cli-contract inspect --surface {exec,sandbox} [--executable PATH]
+                                [--json] [--debug] [--apply]
 agent-work loop run [--apply] [--max-segments COUNT]
                     [--max-activation-seconds SECONDS]
                     [--json] [--debug]
@@ -130,6 +132,7 @@ agent-work slow-root reconcile --manifest-file PATH [--json] [--apply] [--debug]
 
 | Command | Required input | Optional control or result |
 | --- | --- | --- |
+| `cli-contract inspect` | `--surface exec` or `--surface sandbox` | Read-only advisory report for the exact configured Codex executable; `--executable PATH` selects an absolute binary path; `--apply` changes nothing. |
 | `loop run` | None | `--apply` performs one activation; segment and activation-time limits bound it. |
 | `loop status` | Optional exact `--issue-iid` | Read-only status; `--apply` is accepted for consistency. |
 | `loop retry` | Exact `--issue-iid`; the exact reviewed `--plan-file PATH` when applying | Reuses recovery checks and requires exactly one `safely_retryable` inventory result. |
@@ -164,6 +167,47 @@ agent-work slow-root reconcile --manifest-file PATH [--json] [--apply] [--debug]
 | `migration apply` | Reviewed `--plan-file PATH` and `--apply` | Applies only unchanged, preflighted actions. |
 | `upstream-finding preview` | Manifest, upstream host, project ID, and credential file | `--apply` is the only mutation switch. |
 | `slow-root reconcile` | JSON manifest at `--manifest-file PATH` | Previews 1–100 roots by default; `--apply` creates at most one unmatched confirmed root per invocation. `--debug` shows a traceback on failure. |
+
+### CLI contract inspection
+
+`cli-contract inspect` reports whether the selected Codex binary accepts the
+fixed command forms used by the factory. It is advisory and read-only. It adds
+no required workflow gate and grants no role-launch or sandbox authority.
+The executable comes from `--executable`, then `AGENT_WORK_AGENT_PATH`, then
+one lookup of `codex` on `PATH`. The selected executable path must be absolute.
+`--apply` is accepted for compatibility; inspection is always read-only.
+
+The inspector runs at most five fixed probes: version, root help, surface help,
+help with the factory's option placement, and version again. The surface is
+`exec` or flat `sandbox`. The placement probe puts `--ask-for-approval never`
+before the surface name. Each probe uses an empty temporary home and the
+housekeeping command timeout. It sends no prompt and runs no work payload,
+feature inventory, MCP server, or role profile. It reads no private auth,
+controller state, or user config and makes no network request.
+
+The JSON report gives `executable`, `surface`, `checkout`, `version`,
+`checked_argv`, `state`, and fixed safe `diagnostics`. States are `supported`,
+`unsupported`, `unavailable`, `invalid_output`, and `version_changed`. Exit
+status is `0` for supported grammar, `1` for an inspection failure, and `2`
+for invalid arguments or a request with relative paths. It omits raw help,
+stderr, and exception text. Configuration
+(`effective_config`) and isolation (`isolation`) always remain `unknown`.
+A `supported` state proves only that the sampled help and parse checks passed.
+It does not prove that options take effect or that the sandbox blocks access.
+The two version samples detect reported version drift; they cannot prove that
+the binary was not replaced by another with the same version.
+
+Supported human reports go to stdout. Failed human reports go to stderr and
+leave stdout empty. With `--json`, valid reports go to stdout for either
+outcome; the exit status still shows success or failure. `--debug` is accepted
+for compatibility. It keeps the fixed safe diagnostics and never prints raw
+probe output or a traceback.
+
+Each probe's stdout and stderr must each fit within 65,536 bytes to count as
+evidence. The `evidence_limit` is `accepted-output-only`: this cap limits
+accepted evidence, not the memory used to capture subprocess output. Failed,
+unavailable, ambiguous, or oversized evidence cannot support a `supported`
+report. Existing host audits and live tool checks still own activation proof.
 
 ### Smoke
 

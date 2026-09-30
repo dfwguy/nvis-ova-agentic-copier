@@ -37,6 +37,7 @@ from . import (
 )
 from .candidate_boundary import GIT_READ_MAX_CHUNK_BYTES
 from .cheap_gate import check_candidate_gate as default_check_candidate_gate
+from .cli_contract import CliContractRequest, empty_cli_home, inspect_cli_contract
 from .credential_rotation import (
     CredentialRotationError,
     CredentialRotationReport,
@@ -724,6 +725,25 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the nested resource/action command surface."""
     parser = _AgentWorkParser(prog="agent-work")
     resources = parser.add_subparsers(dest="resource", required=True)
+    cli_contract = resources.add_parser(
+        "cli-contract", help="inspect advisory installed Codex CLI grammar"
+    )
+    cli_contract_actions = cli_contract.add_subparsers(dest="action", required=True)
+    inspect_contract = cli_contract_actions.add_parser(
+        "inspect",
+        help="run fixed harmless help/version probes; isolation stays unknown",
+    )
+    inspect_contract.add_argument(
+        "--surface", choices=("exec", "sandbox"), required=True
+    )
+    inspect_contract.add_argument(
+        "--executable", type=Path, help="absolute executable path"
+    )
+    _common(
+        inspect_contract,
+        apply_help="accepted for compatibility; inspection is always read-only",
+        debug_help="accepted for compatibility; diagnostics remain fixed and safe",
+    )
     interactive_commit = resources.add_parser(
         "interactive-commit", help="retain Red and Green commits or verify history"
     )
@@ -1700,6 +1720,7 @@ def main(
     environment: Mapping[str, str] = os.environ,
     find_executable: Callable[[str], str | None] = shutil.which,
     current_checkout: Callable[[], Path] = Path.cwd,
+    cli_contract_home: Callable[[], AbstractContextManager[Path]] = empty_cli_home,
     checkout_root: Callable[[], Path] = _package_checkout_root,
     home_directory: Callable[[], Path] = _account_home,
     effective_uid: Callable[[], int] = os.geteuid,
@@ -1759,6 +1780,49 @@ def main(
         write_stderr("candidate read selector is invalid")
         return 2
     parsed = build_parser().parse_args(arguments)
+    if parsed.resource == "cli-contract":
+        selected = (
+            str(parsed.executable)
+            if parsed.executable is not None
+            else environment.get("AGENT_WORK_AGENT_PATH")
+        )
+        if selected is None:
+            selected = find_executable("codex")
+        if selected is None:
+            write_stderr("CLI executable unavailable")
+            return 1
+        try:
+            contract_request = CliContractRequest(
+                executable=Path(selected),
+                surface=parsed.surface,
+                checkout=current_checkout(),
+            )
+        except ValueError:
+            write_stderr("CLI contract request is invalid")
+            return 2
+        contract_report = inspect_cli_contract(
+            contract_request,
+            run_command=run_command,
+            isolated_home=cli_contract_home,
+        )
+        if parsed.json:
+            rendered = contract_report.model_dump_json()
+        else:
+            rendered = "\n".join(
+                (
+                    f"CLI contract: {contract_report.state}",
+                    f"Version: {contract_report.version or 'unknown'}",
+                    "Effective config: unknown",
+                    "Isolation: unknown",
+                    "Evidence limit: accepted-output-only",
+                    *contract_report.diagnostics,
+                )
+            )
+        if parsed.json or contract_report.state == "supported":
+            write_stdout(rendered)
+        else:
+            write_stderr(rendered)
+        return 0 if contract_report.state == "supported" else 1
     if parsed.resource == "reconcile-commit":
         try:
             request = ReconcileCommitRequest(
