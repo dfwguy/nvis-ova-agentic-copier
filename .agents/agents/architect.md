@@ -188,8 +188,18 @@ missing provenance is not a code finding. Test Judge checks the ordinary
 Red-to-Green Git diff against the retained checkpoint. Read-only reviewers
 never mutate or fail fast because a peer rejects. Wait for all results.
 
-An actionable finding after normal interactive Green starts a fresh branch and TDD
-cycle; do not append a correction commit. In serial work, Green gathers all
+Before the first normal interactive Green commit, Architect may approve a
+production-only repair on the same branch. Mechanically prove `HEAD` still
+equals the authentic Red checkpoint. Retain its ref, base, and branch, and
+freeze the accepted tests. Resolve any pending, missing, or lost commit result
+before editing; require proof that no Green commit exists. The repair must be
+justified by Red and the original approved scope. Do not relax hooks,
+configuration, security, or identity checks. After all editors stop, Main
+restages the complete candidate. Discard prior candidate proof and approvals.
+Require a fresh full Judge run with the native hook, Non-functional Review,
+and all applicable reviews for the new candidate. Test edits or any existing
+Green commit require a fresh branch and TDD cycle. Do not append a correction
+commit. This exception does not change serial work. In serial work, Green gathers all
 findings. It fixes only approved code and tests. Send doc
 findings to Diátaxis Writer through Architect. Send policy findings to Policy
 Writer the same way. A correction after a serial Green commit requires a new

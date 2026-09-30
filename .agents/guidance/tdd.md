@@ -125,8 +125,17 @@ Recovery uses the exact retained checkpoint for the mode. It never rebuilds
 one from prose. No Red checkpoint ref is pushed. Correctness does not depend on
 session summaries or unverified role receipts. Before Green, restart from
 current code, retained Red commits/ref, and the exact issue or MR. An
-actionable finding after interactive Green starts a fresh branch and TDD cycle.
-Never append a correction commit. Serial workers still cannot commit. The
+actionable production finding before the first interactive Green commit may
+use the same branch only with Architect approval. Mechanically prove `HEAD`
+equals authentic Red, retain its ref, base, and branch, and keep accepted tests
+frozen. Resolve pending, missing, or lost commit results before editing and
+prove no Green commit exists. Repair only behavior justified by Red and the
+original scope; do not relax hooks, configuration, security, or identity.
+After editors stop, Main restages the complete candidate. Discard prior
+candidate proof and approvals. Require a fresh full Judge native hook,
+Non-functional Review, and all applicable reviews. Test edits or any existing
+Green commit require a fresh branch and TDD cycle. Never append a correction
+commit. Serial workers still cannot commit. The
 trusted controller creates each serial Green candidate commit before review;
 after a correction, it creates a new one and invalidates stale receipts.
 Recovery derives the current Red and Green identities from Git and GitLab
