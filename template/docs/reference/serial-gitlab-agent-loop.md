@@ -594,17 +594,36 @@ falls back to `candidate-preview`; that pilot also needs an explicit role value.
 Only Codex supports these profiles. Claude and Pi requests fail before launch.
 Before a role starts, the host audits its effective features in an isolated
 Codex home that carries authentication but no user configuration. It requires
-`shell_tool`, `unified_exec`, and `code_mode_host` all to report `false`.
+`shell_tool`, `unified_exec`, and `code_mode_host` all to report boolean `false`.
 An unavailable feature, a `true` result, or an unreadable result rejects the
 role before launch. The role command also uses `--strict-config`.
 
-The feature audit is not a live tool probe. Before using this route, an
+The host then audits the actual sandbox with the same isolated home, checkout
+directory, read-only mode, and approval policy `never` used for the role launch.
+This second audit must return all five fixed fields with boolean `true`:
+
+| Sandbox audit field | Required denial |
+| --- | --- |
+| `write_denied` | Cannot create or change files. |
+| `network_denied` | Cannot reach the network. |
+| `auth_unreadable` | Cannot open the isolated home's private authentication symlink through its full alias chain. |
+| `source_auth_unreadable` | Cannot open the source authentication path. |
+| `controller_state_unreadable` | Cannot list private controller state or open its known `project.lock` file. |
+
+The audit opens and closes private file descriptors. It must not read secret
+file bytes. Missing target files cannot prove access is denied. Missing,
+incomplete, malformed, or failed proof from either audit stops launch. Extra
+fields, duplicate JSON keys, and values other than boolean `true` also fail.
+There is no retry with a wider profile or the normal user configuration. A host that denies writes but still allows private auth or
+controller reads fails this gate. Passing either audit grants no shell access.
+
+The audits do not prove the live tool inventory. Before using this route, an
 operator must check the selected host's actual tool list and confirm that
 shell, write, and unlisted MCP calls fail. Command settings and fake command
 tests do not prove that those tools are absent. Keep the normal factory route
-until both the effective-feature audit and live tool probe pass and the
-controller is wired to the replacement. These profiles do not change human
-approval or merge authority. The candidate-preview pilot stays advisory.
+until both audits and the live tool probe pass and the controller is wired to
+the replacement. These profiles do not change human approval or merge
+authority. The candidate-preview pilot stays advisory.
 
 For coding and content results, the serial worker uses private `candidate`
 commands in addition to its applicable checkpoint and worker-result

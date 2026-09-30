@@ -3024,6 +3024,7 @@ def build_runtime_dependencies(
         invoke: InvokerPort = AgentInvoker(
             run_subprocess,
             environment=os.environ,
+            controller_state_root=config.state_root,
         )
         checkpoint_store: RuntimeCheckpointStore = RedCheckpointStore(config.state_root)
         create_checkpoint: RuntimeCheckpointCreator = create_red_checkpoint
