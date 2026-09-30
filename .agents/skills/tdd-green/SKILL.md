@@ -16,47 +16,13 @@ metadata:
 
 # Implementer
 
-Use this portable skill for implementation. Read and follow
-[the role instructions](../../agents/tdd-green.md) before acting. That file
-defines the role. This skill works with Claude Code, Codex, and Pi.
-Interactive Green owns production edits and never edits tests. Serial Green
-owns production and test edits. Diátaxis Writer concurrently owns
-`docs/**`, `template/docs/**`, `README.md`, and prose in
-`template/README.md.jinja`. Reviewers do not edit files.
+Use this portable workflow skill for the implementation stage. Before acting,
+read and follow [the role instructions](../../agents/tdd-green.md). That file is
+role-reference material. This directory is the shared skill entry point for
+Claude Code, Codex, and Pi.
 
 ## Model selection
 
-The live Architect delegates this work after each needed preparation receipt
-or N/A and the accepted mode-specific Red checkpoint, beside the Diátaxis
-Writer. It stays live while Green coordinates review feedback. Use this
-skill's `metadata.model-tier`. The Architect router picks the mapping.
-
-For reconciliation, Green gets the rechecked Red proof, source, target, and
-conflict list. Keep new merge proof apart from the saved Red to source proof.
-Judge validates the exact staged candidate while the merge is pending. Main
-commits the passed tree through `agent-work reconcile-commit commit --apply`;
-Finalizer verifies that commit read-only. Do not fold another commit into it.
-
-The workflow owner waits for Green and Diátaxis Writer to stop editing. In interactive work, Main
-stages their combined candidate and returns the tree ID. In serial work,
-Green asks the trusted boundary to stage while still live. The controller
-scans the worktree, normalizes changed paths, stages only allowed files, and
-returns the tree ID. Green's path list cannot grant access. Green and Judge
-do not stage with Git or call the old validation CLI in a serial worker.
-Judge requests the trusted `candidate commit` for that exact tree and reads
-its saved status. The result binds the Green SHA, committed tree, and the
-`$nonfunctional-review` child result through an opaque proof ID. Readable
-JUnit provides counts, hashes, and time data. A successful serial Green hook
-with a missing or `OSError`-unreadable JUnit file carries explicit timing
-`UNKNOWN` without invented times. A valid readable JUnit file with an
-overflowing bounded advisory case summary also has timing `UNKNOWN`.
-Malformed, oversized, or invalid present JUnit data blocks review. A failed
-hook still fails. It does not give private JUnit paths to the worker.
-Interactive Judge evidence includes immutable JUnit snapshots, SHA-256
-digests, and counts for readable results, plus the child receipt.
-
-After a change, use the applicable staging boundary for a new tree. Get a
-fresh serial Green commit and Judge receipt before review or finalization.
-Green uses fast format, lint, and type commands for repair. The trusted
-candidate commit runs one installed hook. There is no separate serial
-full-validation hook before that commit.
+Use this skill's `metadata.model-tier`. The live Architect router resolves the
+delegation mapping. Each frontend maps that tier through its configured model
+mapping. Do not hard-code a provider-specific model name in this skill.
