@@ -70,7 +70,6 @@ def _review(
     *,
     changed_tests: tuple[str, ...] = (),
     affected_by_helper: tuple[str, ...] = (),
-    production_changed: bool = False,
     focused: Callable[..., dict[str, Any]] = _focused,
 ) -> Any:
     from agent_work.test_timing import review_test_timings
@@ -83,9 +82,28 @@ def _review(
         candidate_runs=candidate,
         changed_tests=changed_tests,
         affected_by_helper=affected_by_helper,
-        production_changed=production_changed,
         run_focused=focused,
     )
+
+
+def test_review_rejects_retired_production_changed_keyword() -> None:
+    from agent_work.test_timing import review_test_timings
+
+    baseline, candidate = _runs({CASE: 0.8}, {CASE: 1.3})
+    retired_keyword: dict[str, Any] = {"production_changed": True}
+    with pytest.raises(
+        TypeError, match="unexpected keyword argument 'production_changed'"
+    ):
+        review_test_timings(
+            baseline_tree=BASE_TREE,
+            candidate_tree=CANDIDATE_TREE,
+            baseline_runs=baseline,
+            candidate_runs=candidate,
+            changed_tests=(),
+            affected_by_helper=(),
+            run_focused=_focused,
+            **retired_keyword,
+        )
 
 
 def test_touched_case_just_over_100ms_is_reported_in_both_versions() -> None:
@@ -154,10 +172,11 @@ def test_production_linked_unchanged_case_over_one_second_remains_advisory() -> 
         evidence["cases"] = {CASE: {"setup": 0.0, "call": seconds, "teardown": 0.0}}
         return evidence
 
-    inherited = _review(
-        {CASE: 0.8}, {CASE: 1.3}, production_changed=True, focused=focused
-    )
+    inherited = _review({CASE: 0.8}, {CASE: 1.3}, focused=focused)
     assert requests == []
+    assert {(item.environment, item.reason) for item in inherited.findings} == {
+        (env, "inherited_slow") for env in ENVIRONMENTS
+    }
     changed = _review({CASE: 0.8}, {CASE: 1.3}, changed_tests=(CASE,), focused=focused)
 
     assert inherited.outcome == "report_only"
@@ -239,7 +258,6 @@ def test_untouched_inherited_slow_case_with_opposite_version_deltas_reports_only
         candidate_runs=candidate,
         changed_tests=(),
         affected_by_helper=(),
-        production_changed=True,
         run_focused=focused,
     )
 
@@ -308,7 +326,6 @@ def test_production_only_slow_inventory_does_not_use_focused_budget() -> None:
         candidate_runs=candidate,
         changed_tests=(),
         affected_by_helper=(),
-        production_changed=True,
         run_focused=focused,
     )
 
@@ -343,7 +360,6 @@ def test_inherited_variance_reaching_one_second_remains_advisory(
     result = _review(
         {CASE: 1.25},
         {CASE: 1.25 + full_increase},
-        production_changed=True,
         focused=focused,
     )
 
@@ -471,7 +487,6 @@ def test_production_change_keeps_threshold_impact_within_each_python_version() -
         candidate_runs=candidate,
         changed_tests=(),
         affected_by_helper=(),
-        production_changed=True,
         run_focused=focused,
     )
 

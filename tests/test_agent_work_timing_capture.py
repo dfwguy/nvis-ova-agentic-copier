@@ -396,8 +396,10 @@ def test_production_change_reports_existing_case_without_focused_repeats(
     assert focused_calls == []
     assert captured["outcome"] == "report_only"
     findings = cast(list[dict[str, object]], captured["findings"])
-    assert {finding["name"] for finding in findings} == {crossing, inherited}
-    assert all(finding["reason"] != "new_slow" for finding in findings)
+    assert {(finding["name"], finding["reason"]) for finding in findings} == {
+        (crossing, "inherited_slow"),
+        (inherited, "inherited_slow"),
+    }
     assert set(cast(dict[str, object], captured["runs"])) == {"py311", "py314"}
 
 

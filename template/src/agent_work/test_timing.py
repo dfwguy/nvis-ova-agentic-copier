@@ -275,7 +275,6 @@ def review_test_timings(
     changed_tests: tuple[str, ...],
     affected_by_helper: tuple[str, ...],
     run_focused: Callable[..., Mapping[str, Any]],
-    production_changed: bool = False,
 ) -> TimingReview:
     """Compare complete version inventories and bounded exact-source repeats."""
     if (
@@ -284,7 +283,6 @@ def review_test_timings(
         or baseline_tree == candidate_tree
         or set(baseline_runs) != set(_ENVIRONMENTS)
         or set(candidate_runs) != set(_ENVIRONMENTS)
-        or not isinstance(production_changed, bool)
         or any(not is_safe_timing_case_id(name) for name in affected_by_helper)
         or any(
             not (
