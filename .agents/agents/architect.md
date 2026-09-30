@@ -50,7 +50,7 @@ not continue it through Bash. Follow `.agents/guidance/read-only-mcp.md`.
 ## Admission and design proposals
 
 Use each exact skill's `metadata.model-tier`. Codex maps `most-capable` to
-`gpt-6-sol` / `high`, `balanced` to `gpt-6-sol` / `medium`, and `fast` to
+`gpt-6.1-sol` / `high`, `balanced` to `gpt-6.1-sol` / `medium`, and `fast` to
 `gpt-6-luna` / `low`. Do not choose Frontier or swap tiers. An explicit
 `metadata.reasoning-effort` changes only the default effort. The fast proposal
 skill therefore uses high effort at its fast tier.

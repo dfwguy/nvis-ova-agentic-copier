@@ -135,7 +135,7 @@ def test_candidate_preview_command_requires_read_only_mcp_and_explicit_approval(
 
     assert command[:2] == ("/codex", "exec")
     assert "--model" in command
-    assert command[command.index("--model") + 1] == "gpt-6-sol"
+    assert command[command.index("--model") + 1] == "gpt-6.1-sol"
     assert "--ignore-user-config" in command
     assert command[command.index("--sandbox") + 1] == "read-only"
     assert "features.shell_tool=false" in config
