@@ -397,6 +397,63 @@ the session makes further reads fail. Provider errors return a bounded failure
 without private detail. This interface supplies context only;
 it grants no file, Git, GitLab, publication, approval, or merge operation.
 
+#### Opt-in worker Git MCP primitive
+
+The controller can create a separate live worker Git session through
+`create_live_worker_git_session`. It binds the session to one executing worker
+record and its checked checkout. The repository supplies the broker and MCP
+server as opt-in parts. It does not install a CLI or host launch for them.
+The normal worker launch remains unchanged.
+
+| Worker Git MCP tool | Model arguments | Result |
+| --- | --- | --- |
+| `worker_git_status` | None | `dirty` and up to 128 changed paths from the bound checkout. |
+| `worker_git_stage_candidate` | None | Controller-owned candidate staging and its exact tree. |
+| `worker_git_commit_candidate` | Exact `candidate_tree` returned by staging | Bounded controller commit proof for that tree in coding work after Red. |
+| `worker_git_candidate_status` | Exact `candidate_tree` returned by staging | Bounded controller status summary when its workflow route permits status. |
+
+Status permits at most 512 UTF-8 bytes per path and 16,384 UTF-8 path bytes
+in total. The transport frame limit is 131,072 bytes. An oversized result
+fails instead of returning a partial path list.
+Stage may return `candidate_tree`, `state`, and `changed_path_count`. Candidate
+status may return those fields plus `timing_status`. Commit may return
+`candidate_tree`, `committed_tree`, `commit_sha`, `red_sha`, `state`, and
+`timing_status`. These replies fit the frame. Full JUnit and timing evidence
+stays in the existing controller candidate route.
+
+This server lists only these four tools. The worker-read server keeps its
+three context tools, and the candidate-preview server keeps its own review
+tools. The model cannot supply Git arguments, paths, a checkout, or an issue.
+Before each operation, the broker rechecks the bound project, issue, ledger
+revision, state and phase, lane, work kind, correction identity, branch,
+source commit, checkout, and current HEAD. It does not pin worktree contents
+when the session starts. Tracked edits can precede staging. A later stage
+after a correction replaces the bound tree. The old tree no longer works.
+Commit and candidate status require that session's
+current 40-character lowercase hex tree. The controller decides which of those
+operations its workflow route permits. After stage or status, the broker
+rechecks branch and HEAD before reply. A commit reply must report
+`terminal-success`, the same candidate and committed tree, and a lowercase
+40-character commit SHA. The broker checks the new HEAD and binds later calls
+to that commit. If a commit reply is lost, retrying the same tree in the live
+session returns the same compact proof while the controller identity is valid.
+
+For `authored_candidate_recovery`, `correction_identity.head_sha` stays frozen
+to `record.source_sha`, the original authored source. A new session may start
+at that exact HEAD after the controller checks the correction and Red checkpoint
+identity, branch, and HEAD. This start needs no Green commit proof. A later
+coding session may start at a retained Green HEAD on the exact issue branch
+only when the controller proves the Red and Green commits, refs, and tree
+against `correction_identity.baseline_sha`. An unrelated HEAD, including a
+reset to that baseline, is denied.
+Other routes use `record.source_sha` as the candidate base for the same retained
+Green proof. The ledger source SHA stays bound in every route. In authored
+recovery, it may differ from both the candidate base and Green HEAD.
+The worker supplies no ref or commit SHA for these checks. A missing or
+mismatched proof stops session creation.
+An expired session or changed identity stops an operation. These tools grant
+no arbitrary Git, GitLab, publication, approval, or merge access.
+
 #### Candidate-preview MCP host primitive
 
 Hosts can construct `RoleExecutionProfile.candidate_preview` for role

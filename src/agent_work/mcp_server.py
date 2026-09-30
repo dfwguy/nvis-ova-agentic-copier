@@ -36,6 +36,7 @@ from .worker import (
     candidate_tools_for_role,
     request_candidate_validation,
 )
+from .worker_read import _public_git_value
 
 CandidateGateway = Callable[
     [CandidateOperation, str, dict[str, object] | None], dict[str, object]
@@ -311,6 +312,89 @@ def create_worker_read_mcp_server(
     def worker_ledger() -> CallToolResult:
         """Read bounded ledger identity and workflow state."""
         return read("ledger")
+
+    return server
+
+
+class _WorkerGitMCPServer(MCPServer):
+    def __init__(self) -> None:
+        super().__init__("worker-git")
+
+    async def list_tools(self) -> list[Tool]:
+        """Advertise only the four closed worker Git operations."""
+        return [
+            tool.model_copy(
+                update={
+                    "input_schema": {**tool.input_schema, "additionalProperties": False}
+                }
+            )
+            for tool in await super().list_tools()
+        ]
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any], context: Any = None
+    ) -> CallToolResult:
+        valid = (
+            name in {"worker_git_status", "worker_git_stage_candidate"}
+            and arguments == {}
+        ) or (
+            name in {"worker_git_candidate_status", "worker_git_commit_candidate"}
+            and set(arguments) == {"candidate_tree"}
+            and isinstance(arguments["candidate_tree"], str)
+            and len(arguments["candidate_tree"]) == 40
+            and all(char in "0123456789abcdef" for char in arguments["candidate_tree"])
+        )
+        if not valid:
+            return CallToolResult(
+                content=[TextContent(text="worker_git: invalid tool or arguments")],
+                is_error=True,
+            )
+        return cast(CallToolResult, await super().call_tool(name, arguments, context))
+
+
+def create_worker_git_mcp_server(
+    gateway: Callable[[str, str | None], dict[str, object]],
+) -> MCPServer:
+    """Expose the separate candidate-bound worker Git MCP surface."""
+    server = _WorkerGitMCPServer()
+
+    def dispatch(action: str, tree: str | None = None) -> CallToolResult:
+        try:
+            raw = gateway(action, tree)
+            if len(json.dumps(raw, ensure_ascii=True).encode()) > 131_072:
+                raise ValueError("worker git response too large")
+            response = cast(dict[str, object], _public_git_value(raw))
+            encoded = json.dumps(response, ensure_ascii=True)
+            if len(encoded.encode()) > 131_072:
+                raise ValueError("worker git response too large")
+        except (WorkerProtocolError, OSError, ValueError, TypeError, OverflowError):
+            return CallToolResult(
+                content=[TextContent(text="worker_git: request failed")],
+                is_error=True,
+            )
+        return CallToolResult(
+            content=[TextContent(text=encoded)], structured_content=response
+        )
+
+    @server.tool()
+    def worker_git_status() -> CallToolResult:
+        """Read bounded worktree change status."""
+        return dispatch("git_status")
+
+    @server.tool()
+    def worker_git_stage_candidate() -> CallToolResult:
+        """Ask the controller to stage its current candidate."""
+        return dispatch("git_stage_candidate")
+
+    @server.tool()
+    def worker_git_candidate_status(candidate_tree: str) -> CallToolResult:
+        """Read status for the exact tree staged in this session."""
+        return dispatch("git_candidate_status", candidate_tree)
+
+    @server.tool()
+    def worker_git_commit_candidate(candidate_tree: str) -> CallToolResult:
+        """Ask the controller to commit the exact staged coding candidate."""
+        return dispatch("git_commit_candidate", candidate_tree)
 
     return server
 
