@@ -17,6 +17,7 @@ import re
 import shutil
 import socket
 import stat
+import sys
 import tempfile
 import threading
 import unicodedata
@@ -29,7 +30,14 @@ from time import monotonic
 from types import UnionType
 from typing import Literal, Protocol, Union, cast, get_args, get_origin
 
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    StrictBool,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from .candidate_boundary import (
     GIT_READ_MAX_CHUNK_BYTES,
@@ -2682,6 +2690,106 @@ def _parse_read_only_host_features(result: CommandResult) -> dict[str, bool]:
     return observed
 
 
+class _ReadOnlySandboxEvidence(BoundaryModel):
+    """Strict proof returned by the actual sandbox boundary."""
+
+    write_denied: StrictBool
+    network_denied: StrictBool
+    auth_unreadable: StrictBool
+    source_auth_unreadable: StrictBool
+    controller_state_unreadable: StrictBool
+
+
+def _unique_sandbox_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Reject duplicate fields before validating sandbox JSON."""
+    fields: dict[str, object] = {}
+    for key, value in pairs:
+        if key in fields:
+            raise ValueError("duplicate sandbox evidence field")
+        fields[key] = value
+    return fields
+
+
+_READ_ONLY_SANDBOX_PROBE = """\
+import errno
+import json
+import os
+import socket
+import sys
+from pathlib import Path
+
+DENIED = {errno.EACCES, errno.EPERM}
+
+def descriptor_denied(path: Path, flags: int) -> bool:
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as error:
+        return error.errno in DENIED
+    os.close(descriptor)
+    if flags & os.O_CREAT:
+        Path(path).unlink()
+    return False
+
+def listing_denied(path: Path) -> bool:
+    try:
+        os.listdir(path)
+    except OSError as error:
+        return error.errno in DENIED
+    return False
+
+def network_denied() -> bool:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
+            connection.settimeout(1)
+            connection.connect(("192.0.2.1", 9))
+    except OSError as error:
+        return error.errno in DENIED
+    return False
+
+write_path, auth_path, source_auth_path, state_root = map(Path, sys.argv[1:])
+state_listing_denied = listing_denied(state_root)
+state_file_denied = descriptor_denied(state_root / "project.lock", os.O_RDONLY)
+print(json.dumps({
+    "write_denied": descriptor_denied(write_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL),
+    "network_denied": network_denied(),
+    "auth_unreadable": descriptor_denied(auth_path, os.O_RDONLY),
+    "source_auth_unreadable": descriptor_denied(source_auth_path, os.O_RDONLY),
+    "controller_state_unreadable": state_listing_denied and state_file_denied,
+}))
+"""
+
+
+def _read_only_sandbox_command(
+    executable: str, checkout: Path, home: Path, source: Path, state_root: Path
+) -> tuple[str, ...]:
+    """Build a fixed descriptor-only probe under the role's sandbox controls."""
+    return (
+        executable,
+        "sandbox",
+        "-C",
+        str(checkout),
+        "-c",
+        'approval_policy="never"',
+        "-c",
+        'sandbox_mode="read-only"',
+        "-c",
+        "features.shell_tool=false",
+        "-c",
+        "features.unified_exec=false",
+        "-c",
+        "features.code_mode_host=false",
+        "--",
+        sys.executable,
+        "-I",
+        "-c",
+        _READ_ONLY_SANDBOX_PROBE,
+        str(checkout / (home.parent.name + "-write-probe")),
+        str(home / "auth.json"),
+        str(source / "auth.json"),
+        str(state_root),
+    )
+
+
 def candidate_tools_for_role(role: str) -> tuple[str, ...]:
     """Return the closed MCP tool set for a controller-issued role."""
     if role == "candidate-preview":
@@ -2710,6 +2818,7 @@ def _candidate_preview_command(
         raise RuntimeError("candidate MCP requires executable uv")
     return (
         executable,
+        *(("--ask-for-approval", "never") if role != "candidate-preview" else ()),
         "exec",
         "--model",
         "gpt-6.1-sol",
@@ -2786,6 +2895,10 @@ class AgentInvoker:
         clock: Callable[[], float] = monotonic,
         temporary_directory: Path | None = None,
         trusted_controller_checkout: Path | None = None,
+        controller_state_root: Path | None = None,
+        read_only_sandbox_audit: (
+            Callable[[tuple[str, ...], Mapping[str, str]], Mapping[str, bool]] | None
+        ) = None,
         read_only_host_audit: (
             Callable[[tuple[str, ...], Mapping[str, str]], Mapping[str, bool]] | None
         ) = None,
@@ -2798,6 +2911,8 @@ class AgentInvoker:
         )
         self._clock = clock
         self._read_only_host_audit = read_only_host_audit
+        self._read_only_sandbox_audit = read_only_sandbox_audit
+        self._controller_state_root = controller_state_root
         self._temporary_directory = temporary_directory
         self._trusted_controller_checkout = (
             trusted_controller_checkout or Path(__file__).resolve().parents[2]
@@ -2833,6 +2948,8 @@ class AgentInvoker:
         read_only_role: bool = False,
     ) -> CommandResult:
         """Give a Codex worker an owned session home for exactly one invocation."""
+        if read_only_role and self._controller_state_root is None:
+            raise RuntimeError("read-only sandbox capability unavailable")
         if agent != "codex":
             return self._run_command(
                 command,
@@ -2900,6 +3017,9 @@ class AgentInvoker:
                     raise RuntimeError(
                         "read-only host capability unavailable"
                     ) from None
+                self._audit_read_only_sandbox(
+                    command, home, source, scoped_environment, timeout_seconds
+                )
             return self._run_command(
                 command,
                 stdin=stdin,
@@ -2933,6 +3053,48 @@ class AgentInvoker:
                     raise RuntimeError(
                         "private Codex home cleanup failed"
                     ) from cleanup_error
+
+    def _audit_read_only_sandbox(
+        self,
+        command: tuple[str, ...],
+        home: Path,
+        source: Path,
+        environment: Mapping[str, str],
+        timeout_seconds: int,
+    ) -> None:
+        """Require complete independent sandbox denial proof before role launch."""
+        if self._controller_state_root is None:
+            raise RuntimeError("read-only sandbox capability unavailable")
+        probe = _read_only_sandbox_command(
+            command[0],
+            Path(command[command.index("-C") + 1]),
+            home,
+            source,
+            self._controller_state_root,
+        )
+        try:
+            if self._read_only_sandbox_audit is None:
+                result = self._run_command(
+                    probe,
+                    stdin=None,
+                    timeout_seconds=min(
+                        timeout_seconds, HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS
+                    ),
+                    environment=environment,
+                )
+                if result.returncode != 0:
+                    raise RuntimeError("read-only sandbox capability unavailable")
+                evidence = _ReadOnlySandboxEvidence.model_validate(
+                    json.loads(result.stdout, object_pairs_hook=_unique_sandbox_fields)
+                )
+            else:
+                evidence = _ReadOnlySandboxEvidence.model_validate(
+                    self._read_only_sandbox_audit(probe, environment)
+                )
+            if not all(evidence.model_dump().values()):
+                raise RuntimeError("read-only sandbox capability unavailable")
+        except Exception:  # noqa: BLE001 - injected audit errors must deny launch
+            raise RuntimeError("read-only sandbox capability unavailable") from None
 
     def preflight(self) -> None:
         """Verify the selected agent supports the required worker boundary."""

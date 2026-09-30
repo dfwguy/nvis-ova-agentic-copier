@@ -13,9 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 import pytest
 from mcp.server import MCPServer
@@ -23,8 +23,33 @@ from mcp.types import CallToolResult
 
 from agent_work import mcp_server
 from agent_work.mcp_server import create_candidate_mcp_server
+from agent_work.ports import CommandRunner
 from agent_work.repository import CommandResult
 from agent_work.worker import AgentInvoker, RoleExecutionProfile
+
+
+class _SandboxInvokerConstructor(Protocol):
+    """Declare the approved future constructor contract without untyped values."""
+
+    def __call__(
+        self,
+        run_command: CommandRunner,
+        *,
+        environment: Mapping[str, str],
+        temporary_directory: Path | None = None,
+        controller_state_root: Path | None = None,
+        read_only_host_audit: Callable[
+            [tuple[str, ...], Mapping[str, str]], Mapping[str, bool]
+        ]
+        | None = None,
+        read_only_sandbox_audit: Callable[
+            [tuple[str, ...], Mapping[str, str]], Mapping[str, bool]
+        ]
+        | None = None,
+    ) -> AgentInvoker:
+        """Construct the invoker with the architect-approved audit seams."""
+        ...
+
 
 TREE = "b" * 40
 NONCE = "read-only-role-nonce"
@@ -100,7 +125,7 @@ def test_read_only_role_launch_has_closed_host_tool_profile(
         '[mcp_servers.untrusted]\ncommand = "false"\n'
     )
     (source_home / "config.toml").chmod(0o600)
-    invocation = cast(Any, AgentInvoker)(
+    invocation = cast(_SandboxInvokerConstructor, AgentInvoker)(
         run_command,
         environment={
             "AGENT_WORK_AGENT": "codex",
@@ -109,6 +134,14 @@ def test_read_only_role_launch_has_closed_host_tool_profile(
             "GITLAB_TOKEN": "private-token",
         },
         temporary_directory=tmp_path,
+        controller_state_root=tmp_path,
+        read_only_sandbox_audit=lambda _command, _environment: {
+            "write_denied": True,
+            "network_denied": True,
+            "auth_unreadable": True,
+            "source_auth_unreadable": True,
+            "controller_state_unreadable": True,
+        },
         read_only_host_audit=audit_host,
     ).invoke(
         tmp_path,
@@ -163,7 +196,7 @@ def test_read_only_role_fails_closed_without_supported_host(
         commands.append(command)
         return CommandResult(0, "unexpected", "")
 
-    invoker = cast(Any, AgentInvoker)(
+    invoker = cast(_SandboxInvokerConstructor, AgentInvoker)(
         run_command,
         environment={"AGENT_WORK_AGENT": agent},
         temporary_directory=tmp_path,
@@ -205,10 +238,18 @@ def test_read_only_role_refuses_unsafe_or_unverifiable_host_before_launch(
         commands.append(command)
         return CommandResult(0, "unexpected launch", "")
 
-    invoker = cast(Any, AgentInvoker)(
+    invoker = cast(_SandboxInvokerConstructor, AgentInvoker)(
         run_command,
         environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
         temporary_directory=tmp_path,
+        controller_state_root=tmp_path,
+        read_only_sandbox_audit=lambda _command, _environment: {
+            "write_denied": True,
+            "network_denied": True,
+            "auth_unreadable": True,
+            "source_auth_unreadable": True,
+            "controller_state_unreadable": True,
+        },
         read_only_host_audit=cast(Any, audit_host),
     )
     invocation = invoker.invoke(
@@ -234,10 +275,18 @@ def test_read_only_role_refuses_audit_failure_before_launch(tmp_path: Path) -> N
         commands.append(command)
         return CommandResult(0, "unexpected launch", "")
 
-    invoker = cast(Any, AgentInvoker)(
+    invoker = cast(_SandboxInvokerConstructor, AgentInvoker)(
         run_command,
         environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
         temporary_directory=tmp_path,
+        controller_state_root=tmp_path,
+        read_only_sandbox_audit=lambda _command, _environment: {
+            "write_denied": True,
+            "network_denied": True,
+            "auth_unreadable": True,
+            "source_auth_unreadable": True,
+            "controller_state_unreadable": True,
+        },
         read_only_host_audit=audit_host,
     )
     invocation = invoker.invoke(
@@ -294,10 +343,18 @@ def test_default_host_audit_parses_effective_capabilities_before_launch(
             return CommandResult(audit_exit, audit_output, "")
         return CommandResult(0, "review complete", "")
 
-    invocation = AgentInvoker(
+    invocation = cast(_SandboxInvokerConstructor, AgentInvoker)(
         run_command,
         environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
         temporary_directory=tmp_path,
+        controller_state_root=tmp_path,
+        read_only_sandbox_audit=lambda _command, _environment: {
+            "write_denied": True,
+            "network_denied": True,
+            "auth_unreadable": True,
+            "source_auth_unreadable": True,
+            "controller_state_unreadable": True,
+        },
     ).invoke(
         tmp_path,
         "Inspect the bound candidate.",

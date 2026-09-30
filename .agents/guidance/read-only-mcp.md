@@ -26,6 +26,17 @@ settings alone are not proof. An unavailable or malformed audit, or any value
 other than `false`, stops the opt-in launch before the worker starts. Do not
 retry it with a wider profile or the normal user's configuration.
 
+The host also probes the actual sandbox with the worker's isolated home,
+checkout directory, read-only mode, and approvals set to `never`. Require five
+true results: writes denied, network denied, the private auth symlink
+unreadable, its source auth path unreadable, and private controller state
+unreadable. Check the full auth alias chain and open the known controller
+`project.lock` file to check descriptor access. Do not read private file bytes.
+A missing, incomplete, or failed result from either audit stops launch.
+Requested settings and simulated tests do not prove host isolation. These
+checks grant no shell authority. Keep the pilot closed until live host proof
+passes both audits.
+
 | Host role | Candidate MCP tools |
 |---|---|
 | `router` | `candidate_status`, `candidate_changed_paths`, `candidate_read` |

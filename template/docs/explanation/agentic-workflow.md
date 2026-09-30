@@ -5,7 +5,7 @@ summary: Learn why agent tools share one workflow.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-29
+last_reviewed: 2026-09-30
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to configure enough live-agent capacity for a lane.
@@ -94,11 +94,15 @@ suggestions do not verify specialist receipts or change controller state.
 
 An opt-in host can launch the router, judge, finalizer, or supervisor inspector
 in a separate read-only process with a small set of candidate MCP tools. Each
-role sees only the evidence its host allows. A live capability probe must show
-that the selected host blocks shell and write tools before this route is used.
-The prelaunch audit checks effective feature flags, but it does not prove the
-live tool set. The factory keeps its normal route until the audit and live
-probe pass and the controller is wired to these profiles. The
+role sees only the evidence its host allows. Two audits must pass before launch:
+one checks that shell features are disabled; the other probes the actual
+sandbox. The sandbox must deny writes, network access, both authentication
+paths, and private controller state. A read-only host that can still open those
+private paths fails this gate. Neither audit grants shell authority.
+
+The factory keeps its normal route until both audits and a live tool probe
+pass and the controller is wired to these profiles. Missing proof stops the
+opt-in launch; it cannot fall back to a wider profile. The
 [read-only role profile reference](../reference/serial-gitlab-agent-loop.md#opt-in-read-only-role-profiles)
 lists the tool sets and limits. The candidate-preview pilot is separate and
 remains advisory.
