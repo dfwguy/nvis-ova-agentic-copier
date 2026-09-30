@@ -27,6 +27,7 @@ from pydantic import (
 )
 
 from .domain import RunnerState, WorkflowLane, WorkflowPhase, WorkKind
+from .red_preflight import parse_red_preflight_success
 
 if TYPE_CHECKING:
     from .models import LedgerRecord
@@ -130,6 +131,7 @@ class RedCheckpointEvidence(_CheckpointModel):
     exit_code: int
     expected_failure: str = Field(min_length=1, max_length=2_048)
     output_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    residual_details: tuple[str, ...] = Field(default=(), max_length=128)
 
     @model_validator(mode="after")
     def validate_identity(self) -> RedCheckpointEvidence:
@@ -166,6 +168,9 @@ class RedCheckpointDependencies:
     expected_tree_oid: str
     read_evidence: Callable[[int, int, str], RedCheckpointEvidence | None]
     write_evidence: Callable[[RedCheckpointEvidence], None]
+    run_red_preflight: Callable[[Path, tuple[str, ...], str], CommandResult] | None = (
+        None
+    )
 
 
 def checkpoint_ref(issue_iid: int, base_sha: str) -> str:
@@ -288,9 +293,29 @@ def create_red_checkpoint(
     tree_oid = dependencies.snapshot_test_tree(record.source_sha, request.test_paths)
     if tree_oid != dependencies.expected_tree_oid:
         raise RedCheckpointError("red checkpoint candidate tree changed")
+    if dependencies.run_red_preflight is None:
+        raise RedCheckpointError("red checkpoint preflight boundary is unavailable")
+    preflight = dependencies.run_red_preflight(
+        record.worktree, request.test_paths, tree_oid
+    )
+    details = (
+        parse_red_preflight_success(preflight.stdout)
+        if preflight.returncode == 0 and not preflight.stderr
+        else None
+    )
+    if details is None:
+        raise RedCheckpointError("red checkpoint preflight rejected candidate tests")
+    if (
+        dependencies.current_head(record.worktree) != record.source_sha
+        or tuple(sorted(dependencies.changed_paths(record.worktree)))
+        != request.test_paths
+        or dependencies.snapshot_test_tree(record.source_sha, request.test_paths)
+        != tree_oid
+    ):
+        raise RedCheckpointError("red checkpoint candidate changed during preflight")
     try:
         evidence = RedCheckpointEvidence.model_validate(
-            evidence.model_dump() | {"tree_oid": tree_oid}
+            evidence.model_dump() | {"tree_oid": tree_oid, "residual_details": details}
         )
     except ValidationError as error:
         raise RedCheckpointError("red checkpoint snapshot tree is invalid") from error

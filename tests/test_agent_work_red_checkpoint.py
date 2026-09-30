@@ -15,6 +15,7 @@ import hashlib
 import importlib
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -86,6 +87,19 @@ def _evidence(**changes: object) -> Any:
     return checkpoint.RedCheckpointEvidence(**values)
 
 
+def _preflight_success(*details: str) -> CommandResult:
+    return CommandResult(
+        0,
+        json.dumps(
+            {
+                "residual_diagnostics": ["unresolved-attribute"] * len(details),
+                "residual_details": list(details),
+            }
+        ),
+        "",
+    )
+
+
 class FakeDependencies:
     """Injected trusted boundaries for one checkpoint transaction."""
 
@@ -95,6 +109,7 @@ class FakeDependencies:
         self.paths: tuple[str, ...] = (TEST_PATH,)
         self.command_result = CommandResult(1, "assert 1 == 2\n", "")
         self.after_run: Callable[[], None] | None = None
+        self.after_preflight: Callable[[], None] | None = None
         self.retained: Any | None = None
         self.snapshot_result = TREE_OID
         self.calls: list[tuple[str, object]] = []
@@ -121,6 +136,14 @@ class FakeDependencies:
         self.calls.append(("snapshot", (base_sha, paths)))
         return self.snapshot_result
 
+    def run_red_preflight(
+        self, worktree: Path, paths: tuple[str, ...], tree: str
+    ) -> CommandResult:
+        self.calls.append(("preflight", (worktree, paths, tree)))
+        if self.after_preflight is not None:
+            self.after_preflight()
+        return _preflight_success()
+
     def read_evidence(
         self, project_id: int, issue_iid: int, base_sha: str
     ) -> Any | None:
@@ -131,7 +154,7 @@ class FakeDependencies:
         self.calls.append(("write", evidence))
         self.retained = evidence
 
-    def value(self) -> Any:
+    def value(self, *, with_preflight: bool = False) -> Any:
         checkpoint = _checkpoint_module()
         return checkpoint.RedCheckpointDependencies(
             load_record=self.load_record,
@@ -142,6 +165,7 @@ class FakeDependencies:
             expected_tree_oid=self.snapshot_result,
             read_evidence=self.read_evidence,
             write_evidence=self.write_evidence,
+            **({"run_red_preflight": self.run_red_preflight} if with_preflight else {}),
         )
 
 
@@ -154,21 +178,160 @@ def test_red_checkpoint_apply_reruns_failure_then_snapshots_and_records(
     evidence = checkpoint.create_red_checkpoint(
         issue_iid=81,
         request=_request(),
-        dependencies=dependencies.value(),
+        dependencies=dependencies.value(with_preflight=True),
     )
 
     assert evidence == _evidence()
-    assert [name for name, _value in dependencies.calls] == [
-        "load",
-        "head",
-        "paths",
-        "read",
-        "run",
-        "head",
-        "paths",
-        "snapshot",
-        "write",
-    ]
+    names = [name for name, _value in dependencies.calls]
+    assert names.index("run") < names.index("snapshot") < names.index("preflight")
+    assert names.index("preflight") < names.index("write")
+    rechecks = names[names.index("preflight") + 1 : names.index("write")]
+    assert {"head", "paths", "snapshot"} <= set(rechecks)
+
+
+@pytest.mark.parametrize("preflight_exit", (0, 1))
+def test_red_checkpoint_preflights_exact_test_tree_before_retaining_ref(
+    tmp_path: Path, preflight_exit: int
+) -> None:
+    checkpoint = _checkpoint_module()
+    dependencies = FakeDependencies(tmp_path)
+
+    def preflight(worktree: Path, paths: tuple[str, ...], tree: str) -> CommandResult:
+        dependencies.calls.append(("preflight", (worktree, paths, tree)))
+        return (
+            _preflight_success()
+            if not preflight_exit
+            else CommandResult(1, "", "intrinsic test error")
+        )
+
+    injected = checkpoint.RedCheckpointDependencies(
+        **{**vars(dependencies.value()), "run_red_preflight": preflight}
+    )
+    if preflight_exit:
+        with pytest.raises(checkpoint.RedCheckpointError, match="preflight"):
+            checkpoint.create_red_checkpoint(
+                issue_iid=81, request=_request(), dependencies=injected
+            )
+        assert dependencies.retained is None
+    else:
+        evidence = checkpoint.create_red_checkpoint(
+            issue_iid=81, request=_request(), dependencies=injected
+        )
+        assert evidence.tree_oid == TREE_OID
+
+    names = [name for name, _value in dependencies.calls]
+    assert dependencies.calls[names.index("preflight")] == (
+        "preflight",
+        (dependencies.record.worktree, (TEST_PATH,), TREE_OID),
+    )
+    assert names.index("snapshot") < names.index("preflight")
+    if not preflight_exit:
+        assert names.index("preflight") < names.index("write")
+
+
+def test_red_checkpoint_corrected_preflight_retry_retains_once(tmp_path: Path) -> None:
+    checkpoint = _checkpoint_module()
+    dependencies = FakeDependencies(tmp_path)
+    outcomes = iter((1, 0))
+
+    def preflight(
+        _worktree: Path, _paths: tuple[str, ...], _tree: str
+    ) -> CommandResult:
+        return (
+            CommandResult(1, "", "intrinsic test error")
+            if next(outcomes)
+            else _preflight_success()
+        )
+
+    injected = checkpoint.RedCheckpointDependencies(
+        **{**vars(dependencies.value()), "run_red_preflight": preflight}
+    )
+    with pytest.raises(checkpoint.RedCheckpointError, match="preflight"):
+        checkpoint.create_red_checkpoint(
+            issue_iid=81, request=_request(), dependencies=injected
+        )
+    assert dependencies.retained is None
+
+    evidence = checkpoint.create_red_checkpoint(
+        issue_iid=81, request=_request(), dependencies=injected
+    )
+
+    assert dependencies.retained == evidence
+    assert [name for name, _value in dependencies.calls].count("write") == 1
+
+
+def test_red_checkpoint_requires_preflight_boundary_before_retaining_ref(
+    tmp_path: Path,
+) -> None:
+    checkpoint = _checkpoint_module()
+    dependencies = FakeDependencies(tmp_path)
+    missing = replace(dependencies.value(), run_red_preflight=None)
+
+    with pytest.raises(checkpoint.RedCheckpointError, match="preflight"):
+        checkpoint.create_red_checkpoint(
+            issue_iid=81, request=_request(), dependencies=missing
+        )
+
+    assert dependencies.retained is None
+
+
+@pytest.mark.parametrize("mutation", ("head", "paths", "tree"))
+def test_red_checkpoint_rejects_candidate_mutated_by_successful_preflight(
+    tmp_path: Path, mutation: str
+) -> None:
+    checkpoint = _checkpoint_module()
+    dependencies = FakeDependencies(tmp_path)
+
+    def mutate() -> None:
+        if mutation == "head":
+            dependencies.head = "c" * 40
+        elif mutation == "paths":
+            dependencies.paths = (TEST_PATH, "tests/test_added.py")
+        else:
+            dependencies.snapshot_result = "c" * 40
+
+    dependencies.after_preflight = mutate
+    with pytest.raises(checkpoint.RedCheckpointError, match="changed"):
+        checkpoint.create_red_checkpoint(
+            issue_iid=81,
+            request=_request(),
+            dependencies=dependencies.value(with_preflight=True),
+        )
+
+    assert dependencies.retained is None
+
+
+def test_red_checkpoint_retains_allowed_missing_api_details(tmp_path: Path) -> None:
+    checkpoint = _checkpoint_module()
+    dependencies = FakeDependencies(tmp_path)
+    detail = "tests/test_widget.py:4:agent_work.red_checkpoint.planned_api"
+    injected = replace(
+        dependencies.value(),
+        run_red_preflight=lambda _worktree, _paths, _tree: _preflight_success(detail),
+    )
+
+    evidence = checkpoint.create_red_checkpoint(
+        issue_iid=81, request=_request(), dependencies=injected
+    )
+
+    assert evidence.residual_details == (detail,)
+    assert dependencies.retained == evidence
+
+
+def test_red_checkpoint_rejects_malformed_success_payload(tmp_path: Path) -> None:
+    checkpoint = _checkpoint_module()
+    dependencies = FakeDependencies(tmp_path)
+    injected = replace(
+        dependencies.value(),
+        run_red_preflight=lambda _worktree, _paths, _tree: CommandResult(0, "[]", ""),
+    )
+
+    with pytest.raises(checkpoint.RedCheckpointError, match="preflight"):
+        checkpoint.create_red_checkpoint(
+            issue_iid=81, request=_request(), dependencies=injected
+        )
+
+    assert dependencies.retained is None
 
 
 def test_red_checkpoint_rejects_malformed_snapshot_tree_before_evidence_write(
@@ -182,7 +345,7 @@ def test_red_checkpoint_rejects_malformed_snapshot_tree_before_evidence_write(
         checkpoint.create_red_checkpoint(
             issue_iid=81,
             request=_request(),
-            dependencies=dependencies.value(),
+            dependencies=dependencies.value(with_preflight=True),
         )
 
     assert "snapshot" in [name for name, _value in dependencies.calls]
@@ -716,4 +879,5 @@ def test_retained_red_provenance_contract_preserves_complete_identity() -> None:
         "exit_code": 1,
         "expected_failure": "assert 1 == 2",
         "output_sha256": hashlib.sha256(b"assert 1 == 2\n").hexdigest(),
+        "residual_details": [],
     }

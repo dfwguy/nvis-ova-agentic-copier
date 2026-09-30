@@ -22,6 +22,7 @@ from pydantic import BaseModel, field_validator
 
 from .domain import sanitize_diagnostic
 from .ports import CommandRunner
+from .red_preflight import parse_red_preflight_success
 from .repository import CommandResult, RepositoryError, run_subprocess
 from .validation import cheap_gate_failure_id, license_preflight_compliant
 
@@ -118,6 +119,9 @@ class InteractiveCommitDependencies:
     commit_worktree: Callable[[Path, tuple[str, ...]], CommandResult] | None = None
     run_license_preflight: Callable[[str], CommandResult] | None = None
     check_candidate_gate: Callable[[str], CommandResult] | None = None
+    run_red_preflight: Callable[[Path, tuple[str, ...], str], CommandResult] | None = (
+        None
+    )
 
 
 @dataclass(frozen=True)
@@ -126,6 +130,7 @@ class InteractiveCommitReport:
 
     applied: bool
     new_commit: str | None
+    residual_details: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -248,7 +253,7 @@ def _staged_only(
 
 def _staged_tests_only(
     dependencies: InteractiveCommitDependencies, worktree: Path
-) -> None:
+) -> tuple[str, ...]:
     """Require at least one staged test path and no staged production path."""
     paths = _git(
         dependencies, worktree, ("diff", "--cached", "--name-only", "-z")
@@ -258,6 +263,38 @@ def _staged_tests_only(
         not path.startswith(("tests/", "template/tests/")) for path in changed
     ):
         raise InteractiveCommitError("Red may stage only test paths")
+    return tuple(sorted(changed))
+
+
+def _red_preflight(
+    dependencies: InteractiveCommitDependencies,
+    worktree: Path,
+    paths: tuple[str, ...],
+    tree: str,
+    *,
+    committed: bool,
+) -> tuple[str, ...]:
+    """Validate exact Red tests before commit or ref binding."""
+    if dependencies.run_red_preflight is None:
+        raise InteractiveCommitError("Red preflight boundary is unavailable")
+    result = dependencies.run_red_preflight(worktree, paths, tree)
+    details = (
+        parse_red_preflight_success(result.stdout)
+        if result.returncode == 0 and not result.stderr
+        else None
+    )
+    if details is None:
+        raise InteractiveCommitError("Red preflight rejected candidate tests")
+    _require_equal(
+        _git(dependencies, worktree, ("write-tree",)),
+        tree,
+        "staged Red tree after preflight",
+    )
+    if committed:
+        _clean(dependencies, worktree)
+    else:
+        _staged_only(dependencies, worktree, "Red candidate changed during preflight")
+    return details
 
 
 def _tests_frozen(
@@ -456,6 +493,26 @@ def _require_test_only_commit(
     return parent
 
 
+def _committed_test_paths(
+    dependencies: InteractiveCommitDependencies, worktree: Path, commit: str
+) -> tuple[str, ...]:
+    """Read the already proven test-only paths from one Red commit."""
+    changed = _git(
+        dependencies,
+        worktree,
+        (
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "--no-renames",
+            "-r",
+            "-z",
+            commit,
+        ),
+    )
+    return tuple(sorted(path for path in changed.split("\0") if path))
+
+
 def _verify_red_chain(
     request: InteractiveCommitRequest,
     dependencies: InteractiveCommitDependencies,
@@ -642,7 +699,28 @@ def commit_interactive_red(
         ref_sha = red_ref.stdout.strip()
         if red_ref.returncode == 0 and ref_sha == head:
             _clean(dependencies, worktree)
-            return InteractiveCommitReport(applied=apply, new_commit=head)
+            if not apply:
+                return InteractiveCommitReport(applied=False, new_commit=None)
+            details = _red_preflight(
+                dependencies,
+                worktree,
+                _committed_test_paths(dependencies, worktree, head),
+                request.judge_tree,
+                committed=True,
+            )
+            _require_equal(
+                _git(dependencies, worktree, ("rev-parse", "HEAD")),
+                head,
+                "HEAD after preflight",
+            )
+            _require_equal(
+                _git(dependencies, worktree, ("rev-parse", request.red_ref)),
+                head,
+                "Red ref after preflight",
+            )
+            return InteractiveCommitReport(
+                applied=True, new_commit=head, residual_details=details
+            )
         if red_ref.returncode == 1 and not ref_sha:
             expected_ref = ""
         elif (
@@ -656,6 +734,18 @@ def commit_interactive_red(
         _clean(dependencies, worktree)
         if not apply:
             return InteractiveCommitReport(applied=False, new_commit=None)
+        details = _red_preflight(
+            dependencies,
+            worktree,
+            _committed_test_paths(dependencies, worktree, head),
+            request.judge_tree,
+            committed=True,
+        )
+        _require_equal(
+            _git(dependencies, worktree, ("rev-parse", "HEAD")),
+            head,
+            "HEAD after preflight",
+        )
         _git(
             dependencies,
             worktree,
@@ -667,7 +757,9 @@ def commit_interactive_red(
             "Red ref",
         )
         _clean(dependencies, worktree)
-        return InteractiveCommitReport(applied=True, new_commit=head)
+        return InteractiveCommitReport(
+            applied=True, new_commit=head, residual_details=details
+        )
     if prior_red != request.base_sha:
         _require_equal(
             _git(dependencies, worktree, ("rev-parse", request.red_ref)),
@@ -684,13 +776,16 @@ def commit_interactive_red(
         if red_ref.returncode not in {0, 1} or red_ref.stdout.strip():
             raise InteractiveCommitError("Red ref already exists")
     _staged_only(dependencies, worktree, "Red candidate")
-    _staged_tests_only(dependencies, worktree)
+    test_paths = _staged_tests_only(dependencies, worktree)
     if not apply:
         return InteractiveCommitReport(applied=False, new_commit=None)
     if request.message_file is None:
         raise InteractiveCommitError("Red commit message file is required")
     if dependencies.commit_worktree is None:
         raise InteractiveCommitError("worktree commit boundary is unavailable")
+    details = _red_preflight(
+        dependencies, worktree, test_paths, request.judge_tree, committed=False
+    )
     result = dependencies.commit_worktree(
         worktree, ("commit", "--no-verify", "-F", str(request.message_file))
     )
@@ -723,4 +818,6 @@ def commit_interactive_red(
         ),
     )
     _clean(dependencies, worktree)
-    return InteractiveCommitReport(applied=True, new_commit=red_sha)
+    return InteractiveCommitReport(
+        applied=True, new_commit=red_sha, residual_details=details
+    )

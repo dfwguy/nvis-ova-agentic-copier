@@ -50,6 +50,8 @@ from .ports import CommandResult as CommandResultProtocol
 from .ports import CommandRunner
 from .red_checkpoint import RedCheckpointError, RedCheckpointEvidence, checkpoint_ref
 from .red_commit import RedCommitDependencies
+from .red_preflight import production_module_exists
+from .red_preflight import run_red_preflight as check_red_preflight
 from .test_timing import is_safe_timing_case_id, parse_full_junit_inventory
 from .validation import (
     MAX_TIMING_CASE_LIST_BYTES,
@@ -1015,6 +1017,21 @@ class GitRepository:
             environment=self._environment,
             current_directory=worktree,
             timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+        )
+
+    def run_red_preflight(
+        self, worktree: Path, test_paths: tuple[str, ...], candidate_tree: str
+    ) -> CommandResult:
+        """Run read-only Red checks in the controller's checked worktree."""
+        return check_red_preflight(
+            worktree,
+            test_paths,
+            candidate_tree,
+            run_command=self._bounded_command,
+            environment=self._environment,
+            is_production_module=lambda module: production_module_exists(
+                module, worktree
+            ),
         )
 
     def checkpoint_tree(self, ref: str) -> str | None:
