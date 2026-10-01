@@ -23,7 +23,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
-from . import test_executor
+from . import approved_scope, models, test_executor
 from .classification import ClassificationError, classify_work
 from .domain import (
     ACTIVE_STATES,
@@ -63,6 +63,7 @@ from .human_recovery import (
 )
 from .ledger import (
     JsonLedger,
+    LedgerError,
     XdgIssueLock,
     XdgProjectLock,
     observe_issue_lock,
@@ -2563,6 +2564,22 @@ def _operational_preview(
     )
 
 
+ScopeCriterion = models.ScopeCriterion
+ScopeRevision = models.ScopeRevision
+ScopeApprovalRequest = models.ScopeApprovalRequest
+ScopeApprovalEvent = models.ScopeApprovalEvent
+ScopeSourceNote = models.ScopeSourceNote
+ScopeSourceAuthor = models.ScopeSourceAuthor
+ScopeSourceObservation = models.ScopeSourceObservation
+ScopeApprovalBinding = models.ScopeApprovalBinding
+HostScopeDecision = approved_scope.HostScopeDecision
+ScopeError = approved_scope.ScopeError
+canonical_scope_digest = approved_scope.canonical_scope_digest
+capture_scope = approved_scope.capture_scope
+verify_scope = approved_scope.verify_scope
+bind_scope_record = approved_scope.bind_scope_record
+
+
 @dataclass(frozen=True)
 class RuntimeDependencies:
     """Injected stateful boundaries for command dispatch."""
@@ -2579,6 +2596,13 @@ class RuntimeDependencies:
     logger: logging.Logger
     read_plan: Callable[[Path], bytes]
     process_probe: Callable[[], str]
+    scope_read_source: (
+        Callable[[ScopeApprovalRequest], ScopeSourceObservation] | None
+    ) = None
+    scope_verify_event: (
+        Callable[[ScopeApprovalRequest, ScopeSourceObservation], HostScopeDecision]
+        | None
+    ) = None
     issue_owner_probe: Callable[[int], str] = lambda _issue_iid: "unknown"
     lifecycle_label_drift: Callable[[], tuple[str, ...]] = lambda: ()
     ensure_lifecycle_labels: Callable[[], None] = lambda: None
@@ -3066,6 +3090,10 @@ def build_runtime_dependencies(
     *,
     debug: bool,
     composition: RuntimeCompositionDependencies | None = None,
+    scope_verify_event: Callable[
+        [ScopeApprovalRequest, ScopeSourceObservation], HostScopeDecision
+    ]
+    | None = None,
     test_execution_policy: TestExecutionPolicy | None = None,
 ) -> RuntimeDependencies:
     """Wire real process and filesystem boundaries at the composition root."""
@@ -3278,6 +3306,10 @@ def build_runtime_dependencies(
         sleep=time.sleep,
         logger=logger,
         read_plan=lambda path: path.read_bytes(),
+        scope_read_source=gitlab.fetch_scope_source
+        if isinstance(gitlab, GitLabGateway)
+        else None,
+        scope_verify_event=scope_verify_event,
         process_probe=probe_project_lock,
         issue_owner_probe=probe_issue_owner,
         lifecycle_label_drift=gitlab.lifecycle_label_drift,
@@ -3879,6 +3911,123 @@ def _is_reviewed_dirty_handoff_replay(
     )
 
 
+def _dispatch_scope(
+    request: CommandRequest, *, apply: bool, dependencies: RuntimeDependencies
+) -> CommandReport:
+    """Store informational evidence only in an existing matching workflow."""
+    wired = dependencies
+    binding: ScopeApprovalBinding | None = None
+
+    def _report(reason: models.ScopeReason, *, applied: bool = False) -> CommandReport:
+        wired.logger.info(
+            "command=%s issue_iid=%s scope_reason=%s",
+            request.command,
+            request.issue_iid,
+            reason,
+        )
+        return CommandReport(
+            command=request.command,
+            applied=applied,
+            outcome=binding.state if binding is not None else "unknown",
+            stop_reason=reason,
+            scope_binding=binding,
+            summary=f"Scope verification: {reason}",
+        )
+
+    def _read_source(bound: ScopeApprovalRequest) -> ScopeSourceObservation:
+        if wired.scope_read_source is None:
+            raise ScopeError("source_unavailable")
+        return wired.scope_read_source(bound)
+
+    def _identity_matches(record: LedgerRecord) -> bool:
+        if (record.project_id, record.issue_iid) != (
+            wired.config.project_id,
+            request.issue_iid,
+        ):
+            return False
+        retained = record.scope_binding
+        return retained is None or (
+            retained.request.scope.host,
+            retained.request.scope.project_id,
+            retained.request.scope.issue_iid,
+        ) == (wired.config.host, wired.config.project_id, request.issue_iid)
+
+    try:
+        if request.issue_iid is None:
+            return _report("invalid_record")
+        record = wired.ledger.load_read_only(request.issue_iid)
+        if record is None:
+            return _report("invalid_record")
+        if not _identity_matches(record):
+            return _report("identity_mismatch")
+        if request.command == "scope.capture":
+            if request.plan_file is None:
+                return _report("invalid_input")
+            try:
+                raw = wired.read_plan(request.plan_file)
+                if len(raw) > models.SCOPE_EVIDENCE_MAX_BYTES:
+                    return _report("invalid_input")
+                bound = ScopeApprovalRequest.model_validate_json(raw)
+            except (OSError, RuntimeError, ValueError):
+                return _report("invalid_input")
+            if (bound.scope.host, bound.scope.project_id, bound.scope.issue_iid) != (
+                wired.config.host,
+                record.project_id,
+                record.issue_iid,
+            ):
+                binding = ScopeApprovalBinding(
+                    request=bound,
+                    reason="identity_mismatch",
+                    scope_sha256=canonical_scope_digest(bound.scope),
+                )
+                return _report("identity_mismatch")
+            with wired.lock() if apply else nullcontext():
+                if apply:
+                    current = wired.ledger.load_read_only(request.issue_iid)
+                    if current is None:
+                        return _report("invalid_record")
+                    if not _identity_matches(current):
+                        return _report("identity_mismatch")
+                    if current != record:
+                        return _report("invalid_record")
+                binding = capture_scope(
+                    bound,
+                    read_source=_read_source,
+                    verify_event=wired.scope_verify_event,
+                )
+                if binding.state == "approved":
+                    updated = bind_scope_record(record, binding)
+                    if apply:
+                        wired.ledger.persist(updated)
+                        return _report(binding.reason, applied=True)
+        else:
+            if record.scope_binding is None:
+                return _report("invalid_record")
+            binding = verify_scope(
+                record.scope_binding,
+                read_source=_read_source,
+                verify_event=wired.scope_verify_event,
+            )
+        return _report(binding.reason)
+    except ScopeError as error:
+        if binding is not None:
+            binding = ScopeApprovalBinding(
+                request=binding.request,
+                event=binding.event,
+                state="revoked"
+                if error.reason == "revoked"
+                else "stale"
+                if error.reason in {"stale_binding", "scope_changed"}
+                else "unknown",
+                reason=error.reason,
+                scope_sha256=canonical_scope_digest(binding.request.scope),
+            )
+        return _report(error.reason)
+    except (LedgerError, OSError, ValueError):
+        binding = None
+        return _report("invalid_record")
+
+
 def dispatch(
     request: CommandRequest,
     *,
@@ -3887,6 +4036,8 @@ def dispatch(
 ) -> CommandReport:
     """Dispatch one command through the single composition boundary."""
     wired = dependencies or build_runtime_dependencies(debug=request.debug)
+    if request.command in {"scope.capture", "scope.inspect"}:
+        return _dispatch_scope(request, apply=apply, dependencies=wired)
     config = wired.config
     ledger = wired.ledger
     gitlab = wired.gitlab

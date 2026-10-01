@@ -41,6 +41,8 @@ related:
 ## Commands
 
 ```text
+agent-work scope capture --issue IID --scope-file PATH [--apply] [--json] [--debug]
+agent-work scope inspect --issue IID [--apply] [--json] [--debug]
 agent-work cli-contract inspect --surface {exec,sandbox} [--executable PATH]
                                 [--json] [--debug] [--apply]
 agent-work loop run [--apply] [--max-segments COUNT]
@@ -135,6 +137,8 @@ agent-work slow-root reconcile --manifest-file PATH [--json] [--apply] [--debug]
 
 | Command | Required input | Optional control or result |
 | --- | --- | --- |
+| `scope capture` | `--issue IID` and `--scope-file PATH` | Previews a scope binding; `--apply` may persist it only in an existing matching issue record. |
+| `scope inspect` | `--issue IID` | Verifies the saved binding without writing it; `--apply` is accepted and changes nothing. |
 | `cli-contract inspect` | `--surface exec` or `--surface sandbox` | Read-only advisory report for the exact configured Codex executable; `--executable PATH` selects an absolute binary path; `--apply` changes nothing. |
 | `loop run` | None | `--apply` performs one activation; segment and activation-time limits bound it. |
 | `loop status` | Optional exact `--issue-iid` | Read-only status; `--apply` is accepted for consistency. |
@@ -171,6 +175,44 @@ agent-work slow-root reconcile --manifest-file PATH [--json] [--apply] [--debug]
 | `migration apply` | Reviewed `--plan-file PATH` and `--apply` | Applies only unchanged, preflighted actions. |
 | `upstream-finding preview` | Manifest, upstream host, project ID, and credential file | `--apply` is the only mutation switch. |
 | `slow-root reconcile` | JSON manifest at `--manifest-file PATH` | Previews 1–100 roots by default; `--apply` creates at most one unmatched confirmed root per invocation. `--debug` shows a traceback on failure. |
+
+### Human scope bindings
+
+`scope capture` reads a bounded JSON scope request from `--scope-file`.
+The request names the task and source issue. It includes the scope revision,
+source description digest, criteria, requested revision and time, and selected
+approval reply. Criterion order and stable IDs are part of the canonical scope
+digest. The selected reply must match the exact reviewed request and source
+revision. A changed description, scope, reply, or identity cannot reuse old
+approval.
+
+The configured GitLab adapter reads the source issue, replies, and numeric
+author facts. It uses authenticated requests. Those facts alone do not prove
+human approval. A trusted host must inject a verifier. It must confirm the
+person, reply meaning, and reviewed revision. No command flag, environment
+value, worker JSON, or cached verdict can supply that proof. Without the host
+verifier, the result is `unknown`. Source evidence cannot prove approval if it
+is ambiguous, edited, missing, incomplete, or unavailable.
+
+Capture previews by default. With `--apply`, it may bind the result only to an
+existing matching issue ledger record. It uses that record's existing lock.
+It creates no workflow record or separate approval store. `scope inspect`
+reads the saved binding. It checks the authenticated source and host proof
+without writing. Inspect accepts `--apply`, which changes nothing.
+Valid nonterminal bindings compare source evidence before and after the host
+check. Terminal `stale` or `revoked` bindings and invalid digests refuse
+locally. They read no source and call no host verifier. A saved `approved`
+binding is evidence to recheck. It never grants execution authority.
+States are `pending`, `approved`, `unknown`, `stale`, and `revoked`.
+Stale or revoked bindings need a fresh reviewed revision, a fresh request,
+and a distinct approval event.
+
+JSON reports use stdout. Unknown or failed human summaries use stderr and
+exit with a nonzero status. Debug logging uses the existing local log.
+It records safe IDs or reasons. It includes no raw reply, private data, or
+token. The commands change no factory phase, label, merge request, or
+activation state. Scope capture adds no design MR or approval channel.
+Gates and shared-role delivery in issues 361, 362, and 385 remain separate work.
 
 ### CLI contract inspection
 

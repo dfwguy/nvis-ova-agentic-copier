@@ -23,6 +23,7 @@ from typing import Literal, cast
 
 from pydantic import (
     AliasChoices,
+    AwareDatetime,
     BaseModel,
     ConfigDict,
     Field,
@@ -53,6 +54,181 @@ class BoundaryModel(BaseModel):
     """Strict immutable base for data crossing a system boundary."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+SCOPE_EVIDENCE_MAX_BYTES = 262_144
+ScopeReason = Literal[
+    "approved",
+    "human_verifier_unavailable",
+    "human_unverified",
+    "non_human_author",
+    "ambiguous_reply",
+    "missing_requested_revision",
+    "identity_mismatch",
+    "source_changed",
+    "scope_changed",
+    "event_changed",
+    "event_missing",
+    "incomplete_source",
+    "source_unavailable",
+    "revoked",
+    "stale_binding",
+    "invalid_record",
+    "invalid_input",
+]
+
+
+class _ScopeModel(BoundaryModel):
+    @field_validator("*", mode="after")
+    @classmethod
+    def _valid_text(cls, value: object) -> object:
+        for item in value if isinstance(value, tuple) else (value,):
+            if isinstance(item, str):
+                try:
+                    size = len(item.encode("utf-8"))
+                except UnicodeError as error:
+                    raise ValueError("invalid scope text") from error
+                if size > SCOPE_EVIDENCE_MAX_BYTES:
+                    raise ValueError("scope text exceeds evidence limit")
+        return value
+
+
+class ScopeCriterion(_ScopeModel):
+    """One observable requirement with its authoritative source and evidence."""
+
+    id: StrictStr = Field(
+        min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    )
+    behavior: StrictStr = Field(min_length=1, max_length=2048)
+    source_ref: StrictStr = Field(min_length=1, max_length=2048)
+    constraints: tuple[StrictStr, ...] = ()
+    required_evidence: tuple[StrictStr, ...] = ()
+
+
+class ScopeRevision(_ScopeModel):
+    """Exact source description and ordered task projection under review."""
+
+    schema_version: StrictInt = Field(default=1, ge=1, le=1)
+    host: StrictStr = Field(
+        min_length=1, max_length=255, pattern=r"^[A-Za-z0-9][A-Za-z0-9.-]*$"
+    )
+    project_id: StrictInt = Field(gt=0)
+    issue_iid: StrictInt = Field(gt=0)
+    source_issue_iid: StrictInt = Field(gt=0)
+    scope_revision: StrictInt = Field(gt=0)
+    source_description_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    criteria: tuple[ScopeCriterion, ...] = Field(min_length=1)
+    baseline_sha: StrictStr | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+
+    @model_validator(mode="after")
+    def _unique_criteria(self) -> ScopeRevision:
+        if len({item.id for item in self.criteria}) != len(self.criteria):
+            raise ValueError("duplicate scope criterion")
+        if len(self.model_dump_json().encode("utf-8")) > SCOPE_EVIDENCE_MAX_BYTES:
+            raise ValueError("scope exceeds evidence limit")
+        return self
+
+    def canonical_digest(self) -> str:
+        """Hash deterministic UTF-8 JSON while preserving criterion order."""
+        return hashlib.sha256(
+            json.dumps(
+                self.model_dump(mode="json"),
+                sort_keys=True,
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+
+class ScopeApprovalRequest(_ScopeModel):
+    """Retained review request that predates the selected approval event."""
+
+    scope: ScopeRevision
+    requested_revision: StrictInt = Field(gt=0)
+    requested_description_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    requested_at: AwareDatetime
+    approval_note_id: StrictInt = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _request_matches(self) -> ScopeApprovalRequest:
+        if (
+            self.requested_revision != self.scope.scope_revision
+            or self.requested_description_sha256 != self.scope.source_description_sha256
+        ):
+            raise ValueError("request does not bind scope revision")
+        return self
+
+
+class ScopeApprovalEvent(_ScopeModel):
+    """Exact authenticated event identity, digest and edit metadata."""
+
+    project_id: StrictInt = Field(gt=0)
+    issue_iid: StrictInt = Field(gt=0)
+    note_id: StrictInt = Field(gt=0)
+    author_id: StrictInt = Field(gt=0)
+    body_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    created_at: AwareDatetime
+    updated_at: AwareDatetime
+
+
+class ScopeSourceNote(_ScopeModel):
+    """Authenticated source note facts without approval interpretation."""
+
+    project_id: StrictInt = Field(gt=0)
+    issue_iid: StrictInt = Field(gt=0)
+    id: StrictInt = Field(gt=0)
+    body: StrictStr
+    author_id: StrictInt = Field(gt=0)
+    created_at: AwareDatetime
+    updated_at: AwareDatetime
+    system: StrictBool
+
+
+class ScopeSourceAuthor(_ScopeModel):
+    """Numeric account facts that cannot establish personhood alone."""
+
+    id: StrictInt = Field(gt=0)
+    username: StrictStr = Field(min_length=1, max_length=255)
+    bot: StrictBool | None = None
+    state: StrictStr | None = None
+    account_type: StrictStr | None = None
+
+
+class ScopeSourceObservation(_ScopeModel):
+    """Complete authenticated source projection for fresh verification."""
+
+    host: StrictStr
+    project_id: StrictInt = Field(gt=0)
+    issue_iid: StrictInt = Field(gt=0)
+    description: StrictStr
+    notes: tuple[ScopeSourceNote, ...]
+    authors: tuple[ScopeSourceAuthor, ...]
+    service_actor_id: StrictInt = Field(gt=0)
+    complete: StrictBool = True
+    updated_at: AwareDatetime | None = None
+
+
+class ScopeApprovalBinding(_ScopeModel):
+    """Informational evidence retained with its original review request."""
+
+    request: ScopeApprovalRequest
+    event: ScopeApprovalEvent | None = None
+    state: Literal["pending", "approved", "unknown", "stale", "revoked"] = "unknown"
+    reason: ScopeReason
+    scope_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def _digest_matches(self) -> ScopeApprovalBinding:
+        if self.scope_sha256 != self.request.scope.canonical_digest():
+            raise ValueError("scope binding digest changed")
+        if self.event is not None and (
+            self.event.project_id != self.request.scope.project_id
+            or self.event.issue_iid != self.request.scope.source_issue_iid
+        ):
+            raise ValueError("scope event identity changed")
+        if self.state == "approved" and self.event is None:
+            raise ValueError("approved evidence requires an event")
+        return self
 
 
 class InterruptedClaimReceipt(BoundaryModel):
@@ -943,6 +1119,7 @@ class LedgerRecord(BoundaryModel):
 
     schema_version: Literal[1, 2] = 1
     revision: int = Field(default=0, ge=0)
+    scope_binding: ScopeApprovalBinding | None = None
     project_id: int = Field(gt=0)
     issue_iid: int = Field(gt=0)
     state: RunnerState
@@ -1029,6 +1206,11 @@ class LedgerRecord(BoundaryModel):
     @model_validator(mode="after")
     def validate_lifecycle(self) -> LedgerRecord:
         """Keep durable lifecycle evidence coherent."""
+        if self.scope_binding is not None and (
+            self.scope_binding.request.scope.project_id != self.project_id
+            or self.scope_binding.request.scope.issue_iid != self.issue_iid
+        ):
+            raise ValueError("scope binding record identity changed")
         if self.outcome_projection is not None and (
             self.outcome_projection.target_state is not self.state
             or self.outcome_projection.target_phase is not self.phase
@@ -1235,6 +1417,7 @@ class CommandReport(BoundaryModel):
 
     schema_version: Literal[1, 2] = 1
     command: str = Field(min_length=1)
+    scope_binding: ScopeApprovalBinding | None = None
     applied: bool
     outcome: str = Field(min_length=1)
     project: dict[str, str | int] | None = None

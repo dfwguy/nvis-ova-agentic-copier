@@ -735,6 +735,26 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the nested resource/action command surface."""
     parser = _AgentWorkParser(prog="agent-work")
     resources = parser.add_subparsers(dest="resource", required=True)
+    scope = resources.add_parser(
+        "scope", help="capture or inspect informational human scope evidence"
+    )
+    scope_actions = scope.add_subparsers(dest="action", required=True)
+    for action in ("capture", "inspect"):
+        command = scope_actions.add_parser(action)
+        command.add_argument(
+            "--issue", dest="issue_iid", type=_positive_integer, required=True
+        )
+        if action == "capture":
+            command.add_argument(
+                "--scope-file", dest="plan_file", type=Path, required=True
+            )
+        _common(
+            command,
+            apply_help="bind verified evidence to an existing workflow; default is read-only preview"
+            if action == "capture"
+            else "accepted for compatibility; inspection is always read-only",
+            debug_help="write bounded safe scope IDs and reasons to the existing local log",
+        )
     cli_contract = resources.add_parser(
         "cli-contract", help="inspect advisory installed Codex CLI grammar"
     )
@@ -3428,6 +3448,10 @@ def main(
         write_stderr(str(error))
         return 75
     except (RuntimeError, ValueError, OSError) as error:
+        if parsed.resource == "scope":
+            logging.getLogger("agent-work").error("scope_reason=invalid_input")
+            write_stderr("Scope verification failed: invalid_input")
+            return 1
         logging.getLogger("agent-work").error("failure=%s", error)
         if parsed.debug:
             raise
@@ -3436,6 +3460,15 @@ def main(
     logging.getLogger("agent-work").info(
         "outcome=%s command=%s", report.outcome, report.command
     )
+    if parsed.resource == "scope":
+        successful = (
+            report.scope_binding is not None
+            and report.scope_binding.state == "approved"
+        )
+        (write_stdout if parsed.json or successful else write_stderr)(
+            _render(report, as_json=parsed.json)
+        )
+        return 0 if successful else 1
     write_stdout(_render(report, as_json=parsed.json))
     return 0
 

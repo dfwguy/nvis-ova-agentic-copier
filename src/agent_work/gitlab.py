@@ -22,6 +22,7 @@ from urllib.parse import quote
 
 from pydantic import TypeAdapter, ValidationError
 
+from .approved_scope import ScopeError
 from .domain import (
     AGENT_OUTCOME_NOTE_MARKER,
     CANARY_LABEL_SPECS,
@@ -45,6 +46,7 @@ from .gitlab_safeguards import (
     verify_default_branch,
 )
 from .models import (
+    SCOPE_EVIDENCE_MAX_BYTES,
     AgentWorkConfig,
     GitLabIssue,
     GitLabIssueNote,
@@ -53,6 +55,10 @@ from .models import (
     MergeRequestEvidence,
     MergeRequestFeedback,
     PipelineEvidence,
+    ScopeApprovalRequest,
+    ScopeSourceAuthor,
+    ScopeSourceNote,
+    ScopeSourceObservation,
     render_decision_review_notice,
 )
 from .ports import CommandRunner
@@ -1045,6 +1051,129 @@ class GitLabGateway:
         if not isinstance(payload, list):
             raise GitLabError(f"GitLab returned invalid {name}")
         return tuple(cls._mapping(item, name) for item in payload)
+
+    def _scope_call(self, endpoint: str, *, fields: tuple[str, ...] = ()) -> object:
+        """Read bounded source facts without retaining raw external diagnostics."""
+
+        def unique_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+            result: dict[str, object] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate scope response key")
+                result[key] = value
+            return result
+
+        try:
+            result = self._run_command(
+                (
+                    str(self._config.glab_path),
+                    "api",
+                    "--hostname",
+                    self._config.host,
+                    "-X",
+                    "GET",
+                    endpoint,
+                    *(part for field in fields for part in ("-f", field)),
+                ),
+                timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+            )
+            if result.returncode != 0 or any(
+                len(text.encode("utf-8")) > SCOPE_EVIDENCE_MAX_BYTES
+                for text in (result.stdout, result.stderr)
+            ):
+                raise ScopeError("source_unavailable")
+            return json.loads(result.stdout, object_pairs_hook=unique_pairs)
+        except (OSError, RuntimeError, ValueError) as error:
+            raise ScopeError("source_unavailable") from error
+
+    def fetch_scope_source(
+        self, request: ScopeApprovalRequest
+    ) -> ScopeSourceObservation:
+        """Fetch authenticated numeric source/account facts, never approval authority."""
+        scope = request.scope
+        if (
+            scope.host != self._config.host
+            or scope.project_id != self._config.project_id
+        ):
+            raise ScopeError("identity_mismatch")
+        prefix = f"projects/{self._config.project_id}/issues/{scope.source_issue_iid}"
+        try:
+            issue = self._mapping(self._scope_call(prefix), "scope source")
+            service = ScopeSourceAuthor.model_validate(
+                _selected(
+                    self._mapping(self._scope_call("user"), "scope identity"),
+                    ("id", "username", "bot", "state", "account_type"),
+                )
+            )
+            if service.username != self._config.factory_username:
+                raise ScopeError("identity_mismatch")
+            notes: list[ScopeSourceNote] = []
+            seen: set[int] = set()
+            for page in range(1, _MAX_NOTE_PAGES + 1):
+                items = self._items(
+                    self._scope_call(
+                        prefix + "/notes",
+                        fields=(
+                            "order_by=created_at",
+                            "sort=asc",
+                            "per_page=100",
+                            f"page={page}",
+                        ),
+                    ),
+                    "scope notes",
+                )
+                for item in items:
+                    author = self._mapping(item.get("author"), "scope author")
+                    note = ScopeSourceNote.model_validate(
+                        _selected(
+                            item, ("id", "body", "system", "created_at", "updated_at")
+                        )
+                        | {
+                            "project_id": self._config.project_id,
+                            "issue_iid": scope.source_issue_iid,
+                            "author_id": author.get("id"),
+                        }
+                    )
+                    if note.id in seen:
+                        raise ScopeError("incomplete_source")
+                    seen.add(note.id)
+                    notes.append(note)
+                if len(items) < 100:
+                    break
+            else:
+                raise ScopeError("incomplete_source")
+            authors = tuple(
+                ScopeSourceAuthor.model_validate(
+                    _selected(
+                        self._mapping(
+                            self._scope_call(f"users/{author_id}"), "scope account"
+                        ),
+                        ("id", "username", "bot", "state", "account_type"),
+                    )
+                )
+                for author_id in sorted({note.author_id for note in notes})
+            )
+            if tuple(author.id for author in authors) != tuple(
+                sorted({note.author_id for note in notes})
+            ):
+                raise ScopeError("identity_mismatch")
+            return ScopeSourceObservation.model_validate(
+                {
+                    "host": self._config.host,
+                    "project_id": issue.get("project_id"),
+                    "issue_iid": issue.get("iid"),
+                    "description": issue.get("description"),
+                    "updated_at": issue.get("updated_at"),
+                    "notes": notes,
+                    "authors": authors,
+                    "service_actor_id": service.id,
+                    "complete": True,
+                }
+            )
+        except ScopeError:
+            raise
+        except (GitLabError, ValueError, UnicodeError) as error:
+            raise ScopeError("source_unavailable") from error
 
     def verify_project(self) -> GitLabProject:
         """Verify the configured numeric project identity."""
