@@ -46,6 +46,7 @@ from .template_update import (
     TemplateUpdateState,
     TemplateUpdateWorktree,
 )
+from .test_timing import MAX_JUNIT_BYTES
 from .timing_admission import (
     TimingAdmissionBusy,
     TimingAdmissionLease,
@@ -683,8 +684,8 @@ class _DefaultDependencies:
             ):
                 raise RuntimeError("template update JUnit path is unbound")
             with artifact.path.open("rb") as stream:
-                raw = stream.read(1_048_577)
-            if len(raw) > 1_048_576 or sha256(raw).hexdigest() != artifact.sha256:
+                raw = stream.read(MAX_JUNIT_BYTES + 1)
+            if len(raw) > MAX_JUNIT_BYTES or sha256(raw).hexdigest() != artifact.sha256:
                 raise RuntimeError("template update JUnit snapshot changed")
         if self._git(path, "write-tree") != tree:
             raise RuntimeError("template update tree changed after validation")
@@ -696,7 +697,7 @@ class _DefaultDependencies:
     @staticmethod
     def _read_junit(path: Path) -> bytes | None:
         with path.open("rb") as stream:
-            return stream.read(1_048_577)
+            return stream.read(MAX_JUNIT_BYTES + 1)
 
     def commit(self, path: Path, branch: str, tree: str) -> str:
         """Commit the exact staged tree with normal local hooks."""

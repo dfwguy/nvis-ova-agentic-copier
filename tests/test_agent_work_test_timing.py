@@ -15,6 +15,8 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 BASE_TREE = "a" * 40
 CANDIDATE_TREE = "b" * 40
@@ -1023,3 +1025,93 @@ def test_full_junit_inventory_rejects_incomplete_or_ambiguous_xml(
 
     with pytest.raises(ValueError):
         parse_full_junit_inventory(artifact)
+
+
+@pytest.mark.parametrize("size", [1_048_577, 4_194_304, 4_194_305])
+def test_full_junit_public_parsers_apply_inclusive_xml_cap(size: int) -> None:
+    from agent_work.test_timing import (
+        parse_full_junit_inventory,
+        parse_full_junit_records,
+    )
+
+    artifact = b"<testsuite tests='1'><testcase classname='tests.test_speed' name='test_existing' time='0.08'/></testsuite>"
+    artifact += b" " * (size - len(artifact))
+    if size > 4_194_304:
+        for parser in (parse_full_junit_inventory, parse_full_junit_records):
+            with pytest.raises(ValueError):
+                parser(artifact)
+    else:
+        assert parse_full_junit_inventory(artifact) == {CASE: 0.08}
+        assert parse_full_junit_records(artifact) == ({CASE: 0.08}, {CASE: CASE})
+
+
+def test_full_junit_cap_has_one_public_xml_owner() -> None:
+    from agent_work.test_timing import MAX_JUNIT_BYTES
+
+    assert MAX_JUNIT_BYTES == 4_194_304
+
+
+@settings(max_examples=20)
+@given(
+    milliseconds=st.lists(
+        st.integers(min_value=0, max_value=999), min_size=1, max_size=10
+    ),
+    padding=st.integers(min_value=0, max_value=80),
+    reverse=st.booleans(),
+)
+def test_generated_full_inventory_preserves_identity_times_order_and_padding(
+    milliseconds: list[int], padding: int, *, reverse: bool
+) -> None:
+    from agent_work.test_timing import parse_full_junit_records
+
+    cases = [
+        f"<testcase classname='tests.test_speed' name='test_case_{index}' time='{value / 1000:.3f}'/>".encode()
+        for index, value in enumerate(milliseconds)
+    ]
+    expected = {
+        f"tests/test_speed.py::test_case_{index}": value / 1000
+        for index, value in enumerate(milliseconds)
+    }
+    prefix = f"<testsuite tests='{len(cases)}'>".encode()
+    artifact = (
+        prefix
+        + b"".join(reversed(cases) if reverse else cases)
+        + b"</testsuite>"
+        + b" " * padding
+    )
+    assert parse_full_junit_records(artifact) == (
+        expected,
+        dict(zip(expected, expected, strict=True)),
+    )
+    for invalid in (
+        prefix + b"".join(cases) + cases[0] + b"</testsuite>",
+        f"<testsuite tests='{len(cases) + 1}'>".encode()
+        + b"".join(cases)
+        + b"</testsuite>",
+        artifact.replace(b"time='", b"time='-", 1).replace(
+            b"time='-0.000'", b"time='NaN'", 1
+        ),
+    ):
+        with pytest.raises(ValueError):
+            parse_full_junit_records(invalid)
+
+
+@pytest.mark.parametrize("count", [8_192, 8_193])
+def test_full_junit_inventory_keeps_existing_case_count_boundary(count: int) -> None:
+    from agent_work.test_timing import parse_full_junit_inventory
+
+    artifact = (
+        f"<testsuite tests='{count}'>".encode()
+        + b"".join(
+            f"<testcase classname='tests.test_speed' name='test_case_{index}' time='0.01'/>".encode()
+            for index in range(count)
+        )
+        + b"</testsuite>"
+    )
+    if count > 8_192:
+        with pytest.raises(ValueError):
+            parse_full_junit_inventory(artifact)
+    else:
+        assert parse_full_junit_inventory(artifact) == {
+            f"tests/test_speed.py::test_case_{index}": 0.01 for index in range(count)
+        }

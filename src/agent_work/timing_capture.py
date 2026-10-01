@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .ports import CommandRunner
 from .test_timing import (
+    MAX_JUNIT_BYTES,
     FindingBudgetExhausted,
     FocusedTimingBudgetExhausted,
     parse_full_junit_records,
@@ -193,6 +194,7 @@ class TimingCaptureDependencies:
         tempfile.mkdtemp(prefix=".timing-", dir=root)
     )
     remove_owned_tree: Callable[[Path], None] = shutil.rmtree
+    read_bounded_bytes: Callable[[Path, int], bytes] | None = None
 
 
 def _run(
@@ -258,13 +260,26 @@ def candidate_source_matches(
         return False
 
 
+def _read_bounded_bytes(path: Path, limit: int) -> bytes:
+    with path.open("rb") as stream:
+        return stream.read(limit + 1)
+
+
 def _artifact(
     path: Path, dependencies: TimingCaptureDependencies, *, max_bytes: int = _MAX_BYTES
 ) -> bytes:
     try:
         if dependencies.size(path) > max_bytes:
             raise TimingCaptureError("full JUnit artifact exceeds bound")
-        return dependencies.read_bytes(path)
+        if dependencies.read_bounded_bytes is not None:
+            artifact = dependencies.read_bounded_bytes(path, max_bytes)
+        elif dependencies.read_bytes is Path.read_bytes:
+            artifact = _read_bounded_bytes(path, max_bytes)
+        else:
+            artifact = dependencies.read_bytes(path)
+        if not isinstance(artifact, bytes) or len(artifact) > max_bytes:
+            raise TimingCaptureError("full JUnit artifact exceeds bound")
+        return artifact
     except OSError as error:
         raise TimingCaptureError("full JUnit artifact is unavailable") from error
 
@@ -659,7 +674,11 @@ def capture_serial_timing_review(
         }
         for env in _ENVIRONMENTS:
             try:
-                baseline_xml = _artifact(base / f"test-results-{env}.xml", dependencies)
+                baseline_xml = _artifact(
+                    base / f"test-results-{env}.xml",
+                    dependencies,
+                    max_bytes=MAX_JUNIT_BYTES,
+                )
             except TimingCaptureError as error:
                 if isinstance(error.__cause__, FileNotFoundError):
                     raise BaselineJUnitUnavailableError() from error

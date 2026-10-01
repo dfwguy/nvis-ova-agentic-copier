@@ -1947,7 +1947,7 @@ def test_saved_validation_snapshot_reader_is_nofollow_nonblocking_and_bounded(
     elif kind == "fifo":
         os.mkfifo(path)
     else:
-        path.write_bytes(b"x" * 1_048_578)
+        path.write_bytes(b"x" * 4_194_306)
 
     outcomes: list[bytes | None | BaseException] = []
     reader_name = "_read_saved_validation_snapshot"
@@ -1967,7 +1967,7 @@ def test_saved_validation_snapshot_reader_is_nofollow_nonblocking_and_bounded(
         assert outcomes == [b"<testsuite tests='1'/>"]
     elif kind == "oversized":
         assert isinstance(outcomes[0], bytes)
-        assert len(outcomes[0]) == 1_048_577
+        assert len(outcomes[0]) == 4_194_305
     else:
         assert isinstance(outcomes[0], OSError)
 
@@ -3462,3 +3462,35 @@ def test_upstream_finding_preview_maps_sanitized_reader_failure_to_one_and_hides
     )
     assert "outcome=would-create" in output[0]
     assert "matching_iid" not in output[0]
+
+
+@pytest.mark.parametrize("size", [1_048_577, 4_194_304, 4_194_305, 4_194_306])
+def test_xml_live_and_saved_readers_preserve_inclusive_cap_and_overflow_sentinel(
+    tmp_path: Path, size: int
+) -> None:
+    from agent_work.cli import (
+        _read_saved_validation_snapshot,
+        _read_validation_artifact,
+    )
+
+    directory = tmp_path / "state" / ("a" * 40)
+    directory.mkdir(parents=True)
+    path = directory / "test-results-py311.xml"
+    raw = b"<testsuite tests='1' failures='0' errors='0'/>"
+    raw += b" " * (size - len(raw))
+    path.write_bytes(raw)
+    expected = raw[:4_194_305]
+    import hashlib
+
+    for reader in (_read_validation_artifact, _read_saved_validation_snapshot):
+        actual = reader(path)
+        assert actual is not None and len(actual) == len(expected)
+        assert (
+            hashlib.sha256(actual).hexdigest() == hashlib.sha256(expected).hexdigest()
+        )
+    generic = cli.read_bounded_regular(path)
+    assert generic is not None and len(generic) == 1_048_577
+    assert (
+        hashlib.sha256(generic).hexdigest()
+        == hashlib.sha256(raw[:1_048_577]).hexdigest()
+    )

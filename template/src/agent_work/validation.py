@@ -29,7 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .ports import CommandResult, CommandRunner
 from .test_executor import TestExecutionPolicy
-from .test_timing import is_safe_timing_case_id, safe_timing_case_id
+from .test_timing import MAX_JUNIT_BYTES, is_safe_timing_case_id, safe_timing_case_id
 from .timing_admission import TimingAdmissionLease
 from .timing_capture import (
     BaselineJUnitUnavailableError,
@@ -51,7 +51,6 @@ _JUNIT_ARTIFACTS = (
     ("py311", Path("test-results-py311.xml")),
     ("py314", Path("test-results-py314.xml")),
 )
-_MAX_ARTIFACT_BYTES = 1_048_576
 MAX_TIMING_CASES = 1_024
 MAX_TIMING_CASE_NAME_BYTES = 256
 MAX_TIMING_CASE_LIST_BYTES = 262_144
@@ -810,7 +809,7 @@ def _suite_counts(element: ElementTree.Element) -> tuple[int, int] | None:
 
 def _junit_failure_counts(artifact: bytes | None) -> tuple[int, int] | None:
     """Return bounded aggregate failure counts from one fixed JUnit artifact."""
-    if artifact is None or len(artifact) > _MAX_ARTIFACT_BYTES:
+    if artifact is None or len(artifact) > MAX_JUNIT_BYTES:
         return None
     try:
         root = ElementTree.fromstring(artifact)
@@ -866,7 +865,7 @@ def _declared_junit_count(root: ElementTree.Element) -> int | None:
 
 def _junit_test_count(artifact: bytes | None) -> int | None:
     """Return a bounded test count from one well-formed successful JUnit artifact."""
-    if artifact is None or len(artifact) > _MAX_ARTIFACT_BYTES:
+    if artifact is None or len(artifact) > MAX_JUNIT_BYTES:
         return None
     try:
         root = ElementTree.fromstring(artifact)
@@ -878,7 +877,7 @@ def _junit_test_count(artifact: bytes | None) -> int | None:
 def _unusable_artifact_reason(artifact: bytes | None) -> str:
     if artifact is None:
         return "missing"
-    if len(artifact) > _MAX_ARTIFACT_BYTES:
+    if len(artifact) > MAX_JUNIT_BYTES:
         return "oversized"
     try:
         root = ElementTree.fromstring(artifact)
@@ -1005,7 +1004,7 @@ def _failed_junit_evidence(
     digests: list[str] = []
     for label, path in _JUNIT_ARTIFACTS:
         artifact = read_artifact(path)
-        if artifact is None or len(artifact) > _MAX_ARTIFACT_BYTES:
+        if artifact is None or len(artifact) > MAX_JUNIT_BYTES:
             continue
         counts = _junit_failure_counts(artifact)
         if counts is None:

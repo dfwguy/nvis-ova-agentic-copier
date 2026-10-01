@@ -45,7 +45,9 @@ ROLE_TOOLS = {
     "finalizer": READ_TOOLS,
     "supervisor-inspect": ("candidate_status",),
 }
-SOCKETS = st.text(st.characters(exclude_characters="\x00"), min_size=1)
+SOCKETS = st.text(
+    st.characters(exclude_categories=("Cs",), exclude_characters="\x00"), min_size=1
+)
 NONCES = st.text(alphabet="0123456789abcdef", min_size=32, max_size=32)
 UNKNOWN = st.text().filter(lambda value: value not in {"candidate", "worker-read"})
 BAD_FIELDS = [
@@ -629,3 +631,30 @@ def test_public_main_invalid_setup_rejects_before_io_and_redacts_private_fields(
         if value.startswith("private") or "\x00" in value:
             assert value not in str(failure.value)
             assert value not in captured.err
+
+
+@pytest.mark.parametrize(
+    ("codepoint", "embedded"),
+    [(0xD800, False), (0xDFFF, False), (0xD800, True), (0xDFFF, True)],
+    ids=["high", "low", "embedded-high", "embedded-low"],
+)
+def test_surrogate_socket_rejects_model_parser_and_main_before_server(
+    codepoint: int, *, embedded: bool, capsys: pytest.CaptureFixture[str]
+) -> None:
+    socket_path = f"private/{chr(codepoint)}/socket" if embedded else chr(codepoint)
+    with pytest.raises(ValidationError):
+        _model().model_validate({"socket_path": socket_path, "nonce": NONCE})
+    with pytest.raises(ValueError) as parsed:
+        _parse(_environment(socket_path))
+    assert str(parsed.value) == "MCP setup failed"
+    assert parsed.value.__cause__ is None
+    assert parsed.value.__suppress_context__
+    invoked: list[MCPServer] = []
+    with pytest.raises(RuntimeError) as launched:
+        _main(_environment(socket_path), invoked.append)
+    assert invoked == []
+    assert str(launched.value) == "MCP setup failed"
+    assert launched.value.__cause__ is None
+    assert launched.value.__suppress_context__
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
