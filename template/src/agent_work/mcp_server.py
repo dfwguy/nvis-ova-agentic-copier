@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Literal, cast
 
@@ -42,7 +42,7 @@ from .worker import (
     is_safe_worker_result_diagnostic,
     request_candidate_validation,
 )
-from .worker_read import _public_git_value, _validation_selector
+from .worker_read import _public_git_value, _validation_selector, request_worker_read
 
 CandidateGateway = Callable[
     [CandidateOperation, str, dict[str, object] | None], dict[str, object]
@@ -597,16 +597,74 @@ def create_worker_handoff_mcp_server(
     return server
 
 
-def main() -> None:
-    """Serve stdio MCP using private identity supplied by the controller."""
+class WorkerReadMCPLaunchConfiguration(BaseModel):
+    """Validate private worker-read launch fields without changing their values."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    socket_path: str = Field(min_length=1)
+    nonce: str = Field(min_length=32, max_length=32, pattern=r"^[0-9a-f]{32}$")
+
+    @field_validator("socket_path")
+    @classmethod
+    def _socket_without_nul(cls, value: str) -> str:
+        if "\x00" in value:
+            raise ValueError("socket path contains NUL")
+        return value
+
+
+def parse_mcp_launch_configuration(
+    environment: Mapping[str, str],
+) -> WorkerReadMCPLaunchConfiguration | None:
+    """Select candidate mode or validate explicit private worker-read settings."""
+    mode = environment.get("AGENT_WORK_MCP_MODE", "candidate")
+    if mode == "candidate":
+        return None
+    if mode != "worker-read":
+        raise ValueError("MCP setup failed") from None
     try:
-        socket_path = Path(os.environ["AGENT_WORK_CANDIDATE_SOCKET"])
-        request = WorkerResultBrokerClientRequest(
-            nonce=os.environ["AGENT_WORK_CANDIDATE_NONCE"],
-            issue_iid=int(os.environ["AGENT_WORK_CANDIDATE_ISSUE_IID"]),
+        return WorkerReadMCPLaunchConfiguration(
+            socket_path=environment["AGENT_WORK_WORKER_READ_SOCKET"],
+            nonce=environment["AGENT_WORK_WORKER_READ_NONCE"],
         )
-        tree = os.environ["AGENT_WORK_CANDIDATE_TREE"]
-        role = os.environ["AGENT_WORK_CANDIDATE_ROLE"]
+    except (KeyError, ValidationError):
+        raise ValueError("MCP setup failed") from None
+
+
+def main(
+    *,
+    environment: Mapping[str, str] | None = None,
+    run_server: Callable[[MCPServer], None] | None = None,
+) -> None:
+    """Serve stdio MCP using private identity supplied by the controller."""
+    environment = os.environ if environment is None else environment
+    try:
+        configuration = parse_mcp_launch_configuration(environment)
+    except ValueError:
+        raise RuntimeError("MCP setup failed") from None
+
+    if configuration is not None:
+
+        def worker_gateway(action: str) -> dict[str, object]:
+            return request_worker_read(
+                Path(configuration.socket_path), configuration.nonce, action
+            )
+
+        server = create_worker_read_mcp_server(worker_gateway)
+        if run_server is None:
+            server.run(transport="stdio")
+        else:
+            run_server(server)
+        return
+
+    try:
+        socket_path = Path(environment["AGENT_WORK_CANDIDATE_SOCKET"])
+        request = WorkerResultBrokerClientRequest(
+            nonce=environment["AGENT_WORK_CANDIDATE_NONCE"],
+            issue_iid=int(environment["AGENT_WORK_CANDIDATE_ISSUE_IID"]),
+        )
+        tree = environment["AGENT_WORK_CANDIDATE_TREE"]
+        role = environment["AGENT_WORK_CANDIDATE_ROLE"]
         candidate_tools_for_role(role)
     except (KeyError, ValueError):
         raise RuntimeError("candidate MCP setup failed") from None
@@ -624,7 +682,11 @@ def main() -> None:
             selector=selector,
         )
 
-    create_candidate_mcp_server(gateway, tree, role=role).run(transport="stdio")
+    server = create_candidate_mcp_server(gateway, tree, role=role)
+    if run_server is None:
+        server.run(transport="stdio")
+    else:
+        run_server(server)
 
 
 if __name__ == "__main__":
