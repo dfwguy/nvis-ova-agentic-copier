@@ -80,7 +80,7 @@ self-certify. Give `$judge-test` the accepted Red
 identity and ordinary Red-to-Green Git diff. Get Architect's applicability
 record for conditional `$consistency-judge` and `$temporality-judge`, or its
 exact N/A with reason. An expected candidate read must pass and stay current.
-`src/agent_work/candidate_boundary.py` owns full read checks.
+`src/agent_work/serial.py` and `src/agent_work/repository.py` own full read checks.
 Restaging voids prior reads and reviews. `state_machine.WORKFLOW_RECEIPTS`
 owns the top-level receipt tuple. Keep extra reviews in the Finalizer
 receipt and durable audit.

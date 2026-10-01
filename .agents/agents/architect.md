@@ -134,7 +134,7 @@ while editing disjoint paths. Wait for both to stop editing. Require the
 writer's documentation receipt and changed Markdown readability result or
 N/A. In interactive work, Main stages the exact combined candidate and
 returns its tree OID. In serial work, Green asks the controller-owned
-`candidate_boundary.py` staging/read boundary while live. Model path lists
+`serial.py` staging/read boundary through `repository.py` while live. Model path lists
 cannot authorize staging. Restage after every correction.
 
 In normal interactive Green work, Green runs only the repair checks listed in
@@ -174,7 +174,7 @@ owning source and affected consumers, including rendered-project output when
 template changes can affect it. Use the Judge when unsure. Use
 `$temporality-judge` only when changed docs or policy add,
 change, or remove time-bound guidance, run claims, or historical proof. Record
-exact N/A with reason otherwise. `candidate_boundary.py` owns full candidate reads. If an expected read is
+exact N/A with reason otherwise. `serial.py` and `repository.py` own full candidate reads. If an expected read is
 missing, stale, rejected, or failed, stop finalization. `state_machine.WORKFLOW_RECEIPTS` owns the fixed
 top-level receipt tuple; keep conditional review evidence inside the existing
 Finalizer receipt and durable audit.
