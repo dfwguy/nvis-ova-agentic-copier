@@ -20,7 +20,7 @@ from datetime import datetime
 from typing import Protocol, cast
 from urllib.parse import quote
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from .domain import (
     AGENT_OUTCOME_NOTE_MARKER,
@@ -128,9 +128,16 @@ def _selected(payload: dict[str, object], fields: tuple[str, ...]) -> dict[str, 
     return {field: payload[field] for field in fields if field in payload}
 
 
-def _desired_description(draft: MergeRequestDraft, issue_iid: int) -> str:
-    """Build one canonical description with exactly one closing reference."""
-    _reject_escaped_linebreaks(draft.description)
+def canonical_merge_request_description(
+    draft: MergeRequestDraft, *, issue_iid: int
+) -> str:
+    """Validate a draft and its canonical publication text before transport."""
+    if isinstance(draft.description, str):
+        _reject_escaped_linebreaks(draft.description)
+    try:
+        draft = MergeRequestDraft.model_validate(draft.model_dump())
+    except ValidationError as error:
+        raise GitLabError("merge request draft is invalid") from error
     body = (
         render_decision_review_notice(draft.decision_review, draft.description)
         if draft.decision_review is not None
@@ -156,7 +163,13 @@ def _desired_description(draft: MergeRequestDraft, issue_iid: int) -> str:
         for line in retained.splitlines()
         if "agent-work-feedback-notice:v1" not in line
     )
-    return f"{retained.rstrip()}\n\n{notice}\n\n{closing}"
+    description = f"{retained.rstrip()}\n\n{notice}\n\n{closing}"
+    try:
+        return TypeAdapter[str](
+            MergeRequestDraft.model_fields["description"].rebuild_annotation()
+        ).validate_python(description)
+    except ValidationError as error:
+        raise GitLabError("merge request canonical description is invalid") from error
 
 
 def reject_unsafe_issue_text(value: str) -> None:
@@ -1646,7 +1659,7 @@ class GitLabGateway:
         draft: MergeRequestDraft,
     ) -> MergeRequestEvidence:
         """Create one same-project human-review merge request."""
-        description = _desired_description(draft, issue_iid)
+        description = canonical_merge_request_description(draft, issue_iid=issue_iid)
         try:
             payload = self._mapping(
                 self._call(
@@ -1676,7 +1689,9 @@ class GitLabGateway:
         self, mr: MergeRequestEvidence, *, issue_iid: int, draft: MergeRequestDraft
     ) -> MergeRequestEvidence:
         """Converge one existing MR on durable metadata without clearing Draft."""
-        desired_description = _desired_description(draft, issue_iid)
+        desired_description = canonical_merge_request_description(
+            draft, issue_iid=issue_iid
+        )
         desired_draft = mr.is_draft or draft.title.startswith("Draft:")
         desired_title = (
             mr.title

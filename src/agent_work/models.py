@@ -26,7 +26,12 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SerializerFunctionWrapHandler,
+    StrictBool,
+    StrictInt,
+    StrictStr,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -778,6 +783,58 @@ class ConditionEvidence(BoundaryModel):
     detail: str = Field(min_length=1, max_length=2_048)
 
 
+StageTimingReason = Literal[
+    "missing_identity",
+    "identity_mismatch",
+    "missing_provenance",
+    "unknown_history",
+    "truncated_history",
+    "invalid_history",
+    "clock_unavailable",
+    "unsupported_wait",
+    "internal_roles_unavailable",
+]
+
+
+class StageTimingIdentity(BoundaryModel):
+    """Exact controller source context for one coarse observation."""
+
+    project_id: StrictInt = Field(gt=0)
+    issue_iid: StrictInt = Field(gt=0)
+    source_sha: StrictStr = Field(pattern=r"^[0-9a-f]{40}$")
+    candidate_tree: StrictStr = Field(pattern=r"^[0-9a-f]{40}$")
+
+
+class StageTimingProvenance(BoundaryModel):
+    """Controller boundary revision and immutable source identity."""
+
+    identity: StageTimingIdentity
+    boundary_revision: StrictInt = Field(ge=0)
+
+
+class StageTimingStage(BoundaryModel):
+    """Aggregate of individually verified coarse observations."""
+
+    phase_or_role: StrictStr = Field(min_length=1, max_length=128)
+    classification: Literal["execution", "wait"]
+    observations: StrictInt = Field(gt=0)
+    elapsed_seconds: float = Field(ge=0, allow_inf_nan=False)
+
+
+class StageTimingReport(BoundaryModel):
+    """Partial controller execution evidence with explicit missing coverage."""
+
+    identity: StageTimingIdentity | None
+    coverage: Literal["partial", "unavailable"]
+    history_complete: StrictBool
+    stages: tuple[StageTimingStage, ...] = Field(default=(), max_length=64)
+    execution_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    wait_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    unavailable_reasons: tuple[StageTimingReason, ...] = Field(default=(), max_length=9)
+    internal_roles: Literal["unavailable"] = "unavailable"
+    external_human_wait: Literal["unavailable"] = "unavailable"
+
+
 class PhaseTiming(BoundaryModel):
     """One bounded controller-authored workflow timing observation."""
 
@@ -788,6 +845,16 @@ class PhaseTiming(BoundaryModel):
     elapsed_seconds: float = Field(ge=0, allow_inf_nan=False)
     outcome: str = Field(min_length=1, max_length=4_096)
     classification: Literal["execution", "wait"]
+    provenance: StageTimingProvenance | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_legacy_timing(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, object]:
+        data = cast("dict[str, object]", handler(self))
+        if self.provenance is None:
+            data.pop("provenance", None)
+        return data
 
     @model_validator(mode="after")
     def validate_chronology(self) -> PhaseTiming:
@@ -920,6 +987,10 @@ class LedgerRecord(BoundaryModel):
     interrupted_claim_receipt: InterruptedClaimReceipt | None = None
     condition_history: tuple[ConditionEvidence, ...] = Field(default=(), max_length=64)
     phase_timings: tuple[PhaseTiming, ...] = Field(default=(), max_length=64)
+    phase_timing_count: StrictInt | None = Field(default=None, ge=0)
+    phase_timing_unavailable_reasons: tuple[StageTimingReason, ...] = Field(
+        default=(), max_length=9
+    )
     summary: str = ""
     next_action: str = ""
 
@@ -1122,6 +1193,7 @@ class CommandItemReport(BoundaryModel):
     current_condition: ConditionEvidence | None = None
     condition_history: tuple[ConditionEvidence, ...] = ()
     phase_timings: tuple[PhaseTiming, ...] = Field(default=(), max_length=64)
+    stage_timing_report: StageTimingReport | None = None
     audit_evidence: AuditReceiptSummary | Literal["unknown"] | None = None
     activation_started_at: datetime | None = None
     latest_meaningful_update_at: datetime | None = None
