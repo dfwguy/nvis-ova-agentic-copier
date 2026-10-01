@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
@@ -23,7 +24,7 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 from pydantic import ValidationError
 
@@ -733,6 +734,7 @@ class _Process:
 
 
 @settings(max_examples=15)
+@example(injection="1")
 @given(injection=st.text(alphabet="abc012 -/=", min_size=1, max_size=60))
 def test_generated_fixed_recipe_and_environment_cannot_be_overridden(
     injection: str,
@@ -746,7 +748,17 @@ def test_generated_fixed_recipe_and_environment_cannot_be_overridden(
         inspected.append(args)
         command = args[0]
         assert isinstance(command, (tuple, list))
-        assert command[0] == sys.executable and command[1] == "-I"
+        assert len(command) == 11
+        assert command[:4] == (sys.executable, "-I", "-B", "-c")
+        assert command[5:9] == (
+            str(root),
+            str(root / "artifact" / "result.json"),
+            "1",
+            "123",
+        )
+        assert isinstance(command[9], str) and isinstance(command[10], str)
+        assert json.loads(command[9]) == [MODULE]
+        assert json.loads(command[10]) == [[MODULE, "test_known"]]
         assert "uv" not in command and any(
             "--capture=no" in str(part) for part in command
         )
@@ -764,7 +776,7 @@ def test_generated_fixed_recipe_and_environment_cannot_be_overridden(
             name not in environment
             for name in ("PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTHONPATH", "PYTHONHOME")
         )
-        assert injection not in command
+        assert environment == {"PATH": "/usr/bin:/bin"}
         return process
 
     @contextmanager
@@ -780,26 +792,37 @@ def test_generated_fixed_recipe_and_environment_cannot_be_overridden(
     def stop(observed: owner.FocusedProcessPort) -> None:
         assert observed is process
 
-    with pytest.raises(owner.FocusedDiagnosticError) as caught:
-        owner.run_focused_pytest(
-            root,
-            (MODULE,),
-            known_cases=((MODULE, "test_known"),),
-            interpreter=Path(sys.executable),
-            environment={
-                "PATH": "/usr/bin:/bin",
-                "PYTEST_ADDOPTS": injection,
-                "PYTEST_PLUGINS": injection,
-                "PYTHONPATH": injection,
-                "PYTHONHOME": injection,
-            },
-            temporary_directory=temporary,
-            create_result=create,
-            read_result=read,
-            open_process=spawn,
-            stop_process=stop,
+    for polluted in (False, True):
+        with pytest.raises(owner.FocusedDiagnosticError) as caught:
+            owner.run_focused_pytest(
+                root,
+                (MODULE,),
+                known_cases=((MODULE, "test_known"),),
+                interpreter=Path(sys.executable),
+                environment={
+                    "PATH": "/usr/bin:/bin",
+                    **(
+                        {
+                            "PYTEST_ADDOPTS": injection,
+                            "PYTEST_PLUGINS": injection,
+                            "PYTHONPATH": injection,
+                            "PYTHONHOME": injection,
+                        }
+                        if polluted
+                        else {}
+                    ),
+                },
+                temporary_directory=temporary,
+                create_result=create,
+                read_result=read,
+                open_process=spawn,
+                stop_process=stop,
+            )
+        assert (
+            caught.value.reason == "invalid_result"
+            and len(inspected) == int(polluted) + 1
         )
-    assert caught.value.reason == "invalid_result" and len(inspected) == 1
+    assert inspected[0] == inspected[1]
 
 
 def test_selected_real_executor_policy_refuses_before_host_runner(

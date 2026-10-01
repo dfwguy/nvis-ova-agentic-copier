@@ -1187,7 +1187,7 @@ staged and source trees, requested baseline SHA and tree, original record,
 and both snapshots, including their trusted state-root paths, digests, and
 counts. Missing, changed, or conflicting evidence fails closed before timing
 capture. The saved reader uses `O_NOFOLLOW` and `O_NONBLOCK`, accepts regular
-files only, and reads at most 1 MiB plus one byte. An existing transcript must
+files only, and reads at most 4 MiB plus one byte. An existing transcript must
 match the exact baseline commit and tree, candidate tree, and JUnit pair. The
 retry adds one attempt bound to the original record's SHA-256 digest. It saves
 `running` before capture, then saves the terminal result in that retry record.

@@ -583,12 +583,17 @@ def test_template_update_mr_inventory_includes_closed_source_branches() -> None:
     assert any("state=all" in call for call in calls)
 
 
+@pytest.mark.parametrize("xml_size", [0, 1_048_577, 4_194_304, 4_194_305])
 def test_template_update_default_validator_persists_exact_junit_snapshots(
     tmp_path: Path,
+    xml_size: int,
 ) -> None:
     """Injected Git/hook process and durable Judge evidence bind the same tree."""
     worktree = tmp_path / _UPDATE_ID
     worktree.mkdir()
+    artifact = b'<testsuite tests="1" failures="0" errors="0" skipped="0"/>'
+    if xml_size:
+        artifact += b" " * (xml_size - len(artifact))
     calls: list[tuple[str, ...]] = []
     gated: list[tuple[Path, str, dict[str, str]]] = []
 
@@ -619,9 +624,7 @@ def test_template_update_default_validator_persists_exact_junit_snapshots(
             )
         if command[-3:] == ("hook", "run", "pre-commit"):
             for environment in ("py311", "py314"):
-                (worktree / f"test-results-{environment}.xml").write_text(
-                    '<testsuite tests="1" failures="0" errors="0" skipped="0"/>'
-                )
+                (worktree / f"test-results-{environment}.xml").write_bytes(artifact)
             return subprocess.CompletedProcess(command, 0, b"", b"")
         if command[-2:] == ("diff", "--quiet"):
             return subprocess.CompletedProcess(command, 0, b"", b"")
@@ -665,6 +668,10 @@ def test_template_update_default_validator_persists_exact_junit_snapshots(
         ),
     )
 
+    if xml_size > 4_194_304:
+        with pytest.raises(RuntimeError):
+            dependencies.validate_tree(worktree, _TREE)
+        return
     evidence = dependencies.validate_tree(worktree, _TREE)
     assert evidence.success
     assert gated == [(worktree, _TREE, {"PATH": "/usr/bin"})]
@@ -686,6 +693,7 @@ def test_template_update_default_validator_persists_exact_junit_snapshots(
         / _TREE
         / "test-results-py311.xml"
     )
+    assert snapshot.read_bytes() == artifact
     snapshot.chmod(0o644)
     snapshot.write_text("tampered")
     with pytest.raises(RuntimeError, match="snapshot changed"):

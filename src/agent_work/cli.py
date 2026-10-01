@@ -131,6 +131,7 @@ from .template_comparison import (
 from .template_comparison import (
     compare_template_revisions as default_compare_template_revisions,
 )
+from .test_timing import MAX_JUNIT_BYTES
 from .timing import summarize_phase_timings
 from .timing_admission import (
     TimingAdmissionBusy,
@@ -1242,7 +1243,7 @@ def _stderr(message: str) -> None:
 def _read_validation_artifact(path: Path) -> bytes:
     """Read at most one bounded fixed validation artifact."""
     with path.open("rb") as handle:
-        return handle.read(1_048_577)
+        return handle.read(MAX_JUNIT_BYTES + 1)
 
 
 def _read_saved_validation_snapshot(path: Path) -> bytes | None:
@@ -1273,7 +1274,7 @@ def _read_saved_validation_snapshot(path: Path) -> bytes | None:
                 if not stat.S_ISREG(os.fstat(snapshot).st_mode):
                     raise OSError("saved JUnit snapshot is not regular")
                 with os.fdopen(snapshot, "rb", closefd=False) as handle:
-                    return handle.read(1_048_577)
+                    return handle.read(MAX_JUNIT_BYTES + 1)
             finally:
                 os.close(snapshot)
         finally:

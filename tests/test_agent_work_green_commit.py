@@ -702,3 +702,86 @@ def test_green_commit_over_100ms_case_is_advisory(tmp_path: Path) -> None:
 
     assert proof.junit_timings == fake.junit_timings
     assert fake.head == GREEN
+
+
+@pytest.mark.parametrize("size", [1_048_577, 4_194_304, 4_194_305])
+def test_repository_green_commit_reads_complete_xml_through_inclusive_cap(
+    tmp_path: Path,
+    size: int,
+) -> None:
+    from hashlib import sha256
+
+    from agent_work.models import AgentWorkConfig
+    from agent_work.repository import CommandResult, GitRepository, RepositoryError
+
+    artifact = b"<testsuite tests='1'><testcase classname='tests.test_speed' name='test_case' time='0.12'/></testsuite>"
+    artifact += b" " * (size - len(artifact))
+    worker = tmp_path / "worker"
+    isolated = tmp_path / "isolated"
+    _install_hook(worker)
+    config = AgentWorkConfig(
+        host="gitlab.example.com",
+        project_id=310967,
+        checkout=worker,
+        state_root=tmp_path / "state",
+        git_path=tmp_path / "bin" / "git",
+        glab_path=tmp_path / "bin" / "glab",
+        base_branch="agent/work-base",
+    )
+    committed: list[bool] = []
+
+    def run(command: tuple[str, ...], **_kwargs: Any) -> CommandResult:
+        args = command[3:]
+        if args == ("rev-parse", "--git-common-dir"):
+            return CommandResult(0, f"{worker / '.git'}\n", "")
+        if args == ("config", "--get", "core.hooksPath"):
+            return CommandResult(1, "", "")
+        if args[:3] == ("worktree", "add", "--detach"):
+            isolated.mkdir()
+        elif args == ("write-tree",):
+            return CommandResult(0, f"{GREEN_TREE}\n", "")
+        elif args[:1] == ("commit",):
+            committed.append(True)
+            for environment in ("py311", "py314"):
+                (isolated / f"test-results-{environment}.xml").write_bytes(artifact)
+        elif args == ("rev-parse", "HEAD"):
+            return CommandResult(0, f"{GREEN}\n", "")
+        elif args[:3] == ("worktree", "remove", "--force"):
+            for environment in ("py311", "py314"):
+                (isolated / f"test-results-{environment}.xml").unlink()
+            isolated.rmdir()
+        return CommandResult(0, "", "")
+
+    repository = GitRepository(config, run)
+    if size > 4_194_304:
+        with pytest.raises(RepositoryError, match="oversized"):
+            repository.create_isolated_green_commit(
+                worktree=worker,
+                isolated_worktree=isolated,
+                red_sha=RED,
+                candidate_tree=GREEN_TREE,
+                message=MESSAGE,
+            )
+    else:
+        result = repository.create_isolated_green_commit(
+            worktree=worker,
+            isolated_worktree=isolated,
+            red_sha=RED,
+            candidate_tree=GREEN_TREE,
+            message=MESSAGE,
+        )
+        assert result.timing_status == "complete"
+        assert result.junit_timings == tuple(
+            {
+                "environment": environment,
+                "sha256": sha256(artifact).hexdigest(),
+                "test_count": 1,
+                "timing_complete": True,
+                "over_100ms_cases": [
+                    {"name": "tests/test_speed.py::test_case", "seconds": 0.12}
+                ],
+            }
+            for environment in ("py311", "py314")
+        )
+    assert committed == [True]
+    assert not isolated.exists()

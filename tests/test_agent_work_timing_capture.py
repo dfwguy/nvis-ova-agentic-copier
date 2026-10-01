@@ -14,12 +14,15 @@ from __future__ import annotations
 import hashlib
 import json
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import cast
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from jinja2 import StrictUndefined, Template
 
 from agent_work.ports import CommandRunner
@@ -199,14 +202,18 @@ def test_prepared_fingerprint_compares_installed_versions_without_source_path(
     assert first == second
 
 
+@pytest.mark.parametrize("xml_size", [0, 1_048_577, 4_194_304, 4_194_305])
 def test_clear_capture_binds_both_full_versions_and_replays_private_transcript(
     tmp_path: Path,
+    xml_size: int,
 ) -> None:
     artifact = (
         b"<testsuite tests='1' failures='0' errors='0'>"
         b"<testcase classname='tests.test_speed' name='test_existing' time='0.08'/>"
         b"</testsuite>"
     )
+    if xml_size:
+        artifact += b" " * (xml_size - len(artifact))
     observed_commands: list[tuple[str, ...]] = []
 
     def run(command: tuple[str, ...], **kwargs: object) -> CommandResult:
@@ -265,6 +272,17 @@ def test_clear_capture_binds_both_full_versions_and_replays_private_transcript(
         raise AssertionError(f"unexpected timing capture command: {command}")
 
     dependencies = _dependencies(tmp_path, run)
+    if xml_size > 4_194_304:
+        with pytest.raises(TimingCaptureError):
+            capture_serial_timing_review(
+                baseline_sha=BASE_SHA,
+                candidate_tree=CANDIDATE_TREE,
+                candidate_artifacts=(("py311", artifact, 1), ("py314", artifact, 1)),
+                changed_paths=("tests/test_speed.py",),
+                dependencies=dependencies,
+            )
+        assert not (dependencies.state_root / f"{CANDIDATE_TREE}.timing.json").exists()
+        return
     captured = capture_serial_timing_review(
         baseline_sha=BASE_SHA,
         candidate_tree=CANDIDATE_TREE,
@@ -883,3 +901,243 @@ def test_fixture_collection_maps_only_consumers_and_rejects_unknown_lists(
             selectors,
             {},
         ) == (first, second)
+
+
+@pytest.mark.parametrize(
+    "reader_case",
+    [
+        "positive",
+        "lying_stat",
+        "overflow",
+        "nonbytes",
+        "stat_refusal",
+        "phase_overflow",
+        "stdout_overflow",
+        "legacy_positive",
+        "legacy_overflow",
+        "legacy_nonbytes",
+        "legacy_oserror",
+    ],
+)
+@settings(max_examples=5)
+@given(
+    stat_hint=st.integers(min_value=0, max_value=128),
+    padding=st.integers(min_value=0, max_value=32),
+)
+def test_capture_bounded_reader_checks_stat_then_actual_bytes_before_parsing(
+    reader_case: str,
+    stat_hint: int,
+    padding: int,
+) -> None:
+    with TemporaryDirectory(prefix="junit-cap-") as directory:
+        tmp_path = Path(directory)
+        artifact = (
+            b"<testsuite tests='1' failures='0' errors='0'>"
+            b"<testcase classname='tests.test_speed' name='test_existing' time='0.08'/>"
+            b"</testsuite>"
+        )
+        artifact += b" " * padding
+        candidate_artifact = (
+            artifact.replace(b"time='0.08'", b"time='1.28'")
+            if reader_case == "phase_overflow"
+            else artifact
+        )
+        observed_commands: list[tuple[str, ...]] = []
+
+        def run(command: tuple[str, ...], **kwargs: object) -> CommandResult:
+            observed_commands.append(command)
+            cwd = cast(Path, kwargs.get("current_directory"))
+            if len(command) == 6 and command[:4] == (
+                "git",
+                "worktree",
+                "add",
+                "--detach",
+            ):
+                baseline = Path(command[4])
+                baseline.mkdir()
+                return CommandResult(0, "", "")
+            if command == ("git", "hook", "run", "pre-commit"):
+                assert cwd.name == "baseline"
+                seeded = cast(Mapping[str, str], kwargs["environment"])
+                assert seeded["PYTEST_ADDOPTS"] == (
+                    f"--randomly-seed={int(CANDIDATE_TREE[:8], 16)}"
+                )
+                for environment in ("py311", "py314"):
+                    (cwd / f"test-results-{environment}.xml").write_bytes(artifact)
+                return CommandResult(0, "", "")
+            if command == ("git", "write-tree"):
+                return CommandResult(
+                    0, BASE_TREE if cwd.name == "baseline" else CANDIDATE_TREE, ""
+                )
+            if command == ("git", "rev-parse", f"{BASE_SHA}^{{tree}}"):
+                return CommandResult(0, BASE_TREE, "")
+            if command == ("git", "rev-parse", "HEAD"):
+                return CommandResult(0, BASE_SHA, "")
+            if command == ("git", "rev-parse", "HEAD^{tree}"):
+                return CommandResult(0, BASE_TREE, "")
+            if command[:3] == ("git", "diff", "--name-only"):
+                return CommandResult(0, "tests/test_speed.py\n", "")
+            if command == ("git", "diff", "--quiet"):
+                return CommandResult(0, "", "")
+            if command == ("git", "ls-files", "--others", "--exclude-standard"):
+                return CommandResult(0, "", "")
+            if command == ("git", "status", "--porcelain"):
+                return CommandResult(0, "", "")
+            if command[:3] == ("git", "worktree", "remove"):
+                return CommandResult(0, "", "")
+            if command[0].endswith("/pytest"):
+                environment = cast(Mapping[str, str], kwargs["environment"])
+                output = Path(environment["AGENT_TIMING_OUTPUT"])
+                raw = json.dumps(
+                    {
+                        "tests/test_speed.py::test_existing": {
+                            "setup": 0.0,
+                            "call": 0.08,
+                            "teardown": 0.0,
+                        }
+                    }
+                ).encode()
+                output.write_bytes(raw + b" " * (1_048_577 - len(raw)))
+                return CommandResult(0, "", "")
+            if len(command) >= 3 and command[1] == "-c":
+                if reader_case == "stdout_overflow":
+                    return CommandResult(0, " " * 1_048_577, "")
+                return CommandResult(
+                    0,
+                    json.dumps(
+                        {
+                            "interpreter": ["3.11", "cpython-311", "linux-x86_64"],
+                            "distributions": [["pytest", "9.0"]],
+                        },
+                        sort_keys=True,
+                    ),
+                    "",
+                )
+            raise AssertionError(f"unexpected timing capture command: {command}")
+
+        reads: list[tuple[Path, int]] = []
+        stats: list[Path] = []
+
+        def size(path: Path) -> int:
+            stats.append(path)
+            if reader_case == "phase_overflow" and path.suffix == ".json":
+                return stat_hint
+            return (
+                4_194_305
+                if reader_case == "stat_refusal"
+                else (stat_hint if reader_case == "lying_stat" else path.stat().st_size)
+            )
+
+        def read(path: Path, limit: int) -> bytes:
+            assert path in stats
+            assert limit == (1_048_576 if path.suffix == ".json" else 4_194_304)
+            reads.append((path, limit))
+            if reader_case == "overflow":
+                path.write_bytes(artifact + b" " * (limit + 1 - len(artifact)))
+            with path.open("rb") as stream:
+                raw = stream.read(limit + 1)
+            if reader_case == "nonbytes":
+                return cast(bytes, "private-invalid-type")
+            return raw
+
+        legacy_reads: list[Path] = []
+
+        def read_legacy(path: Path) -> bytes:
+            if path.suffix != ".xml":
+                return path.read_bytes()
+            assert reader_case.startswith("legacy_")
+            legacy_reads.append(path)
+            if reader_case == "legacy_oserror":
+                raise OSError("PRIVATE_TOKEN=legacy-reader")
+            if reader_case == "legacy_nonbytes":
+                return cast(bytes, "PRIVATE_TOKEN=invalid-type")
+            if reader_case == "legacy_overflow":
+                return artifact + b" " * (4_194_305 - len(artifact))
+            return path.read_bytes()
+
+        dependencies = cast(
+            Callable[..., TimingCaptureDependencies], TimingCaptureDependencies
+        )(
+            run_command=run,
+            monotonic_clock=lambda: 0.0,
+            candidate_worktree=tmp_path / "candidate",
+            state_root=tmp_path / "state",
+            environment={},
+            atomic_write=_write_bytes,
+            size=size,
+            read_bytes=read_legacy,
+            read_bounded_bytes=None if reader_case.startswith("legacy_") else read,
+        )
+
+        if reader_case in {
+            "overflow",
+            "nonbytes",
+            "stat_refusal",
+            "phase_overflow",
+            "stdout_overflow",
+            "legacy_overflow",
+            "legacy_nonbytes",
+            "legacy_oserror",
+        }:
+            with pytest.raises(TimingCaptureError):
+                capture_serial_timing_review(
+                    baseline_sha=BASE_SHA,
+                    candidate_tree=CANDIDATE_TREE,
+                    candidate_artifacts=(
+                        ("py311", candidate_artifact, 1),
+                        ("py314", candidate_artifact, 1),
+                    ),
+                    changed_paths=("tests/test_speed.py",),
+                    dependencies=dependencies,
+                )
+            assert (
+                len(reads)
+                == {
+                    "stat_refusal": 0,
+                    "overflow": 1,
+                    "nonbytes": 1,
+                    "phase_overflow": 3,
+                    "stdout_overflow": 1,
+                    "legacy_overflow": 0,
+                    "legacy_nonbytes": 0,
+                    "legacy_oserror": 0,
+                }[reader_case]
+            )
+            assert len(legacy_reads) == (1 if reader_case.startswith("legacy_") else 0)
+            assert not (
+                dependencies.state_root / f"{CANDIDATE_TREE}.timing.json"
+            ).exists()
+            return
+        captured = capture_serial_timing_review(
+            baseline_sha=BASE_SHA,
+            candidate_tree=CANDIDATE_TREE,
+            candidate_artifacts=(
+                ("py311", candidate_artifact, 1),
+                ("py314", candidate_artifact, 1),
+            ),
+            changed_paths=("tests/test_speed.py",),
+            dependencies=dependencies,
+        )
+        replayed = read_serial_timing_transcript(
+            candidate_tree=CANDIDATE_TREE, dependencies=dependencies
+        )
+
+        assert len(reads) == (0 if reader_case == "legacy_positive" else 2)
+        assert len(legacy_reads) == (2 if reader_case == "legacy_positive" else 0)
+        assert captured["outcome"] == "clear"
+        assert replayed is not None and replayed["runs"] == captured["runs"]
+        assert replayed["omitted_findings"] == 0
+        legacy = dict(captured)
+        del legacy["omitted_findings"]
+        (dependencies.state_root / f"{CANDIDATE_TREE}.timing.json").write_text(
+            json.dumps(legacy, sort_keys=True, separators=(",", ":"))
+        )
+        legacy_replay = read_serial_timing_transcript(
+            candidate_tree=CANDIDATE_TREE, dependencies=dependencies
+        )
+        assert legacy_replay == json.loads(json.dumps(legacy))
+        assert observed_commands.count(("git", "hook", "run", "pre-commit")) == 1
+        assert any(
+            command[:3] == ("git", "worktree", "remove")
+            for command in observed_commands
+        )

@@ -685,8 +685,10 @@ def test_content_completion_can_be_ready_without_junit_but_coding_requires_it(
     assert _apply(coding).state is template_update.TemplateUpdateState.NEEDS_RECOVERY
 
 
+@pytest.mark.parametrize("xml_size", [0, 1_048_577, 4_194_304, 4_194_305])
 def test_coding_completion_with_current_two_version_junit_evidence_is_ready(
     tmp_path: Path,
+    xml_size: int,
 ) -> None:
     """Coding handoff needs exact candidate-tree JUnit proof for both versions."""
 
@@ -698,6 +700,8 @@ def test_coding_completion_with_current_two_version_junit_evidence_is_ready(
             b'<?xml version="1.0"?><testsuite tests="2" failures="0" '
             b'errors="0" skipped="0"></testsuite>'
         )
+        if xml_size:
+            contents += b" " * (xml_size - len(contents))
         harness.artifacts[path] = contents
         junit_artifacts.append(
             {
@@ -718,6 +722,10 @@ def test_coding_completion_with_current_two_version_junit_evidence_is_ready(
 
     report = _apply(harness)
 
+    if xml_size > 4_194_304:
+        assert report.state is template_update.TemplateUpdateState.NEEDS_RECOVERY
+        assert report.completion is None
+        return
     assert report.state is template_update.TemplateUpdateState.READY
     assert report.completion is not None
     assert report.completion.candidate_tree == harness.worktree.candidate_tree
@@ -883,3 +891,28 @@ def test_root_and_template_template_update_modules_remain_byte_identical() -> No
     assert (root / "src/agent_work/template_update.py").read_bytes() == (
         root / "template/src/agent_work/template_update.py"
     ).read_bytes()
+
+
+@pytest.mark.parametrize("size", [1_048_577, 4_194_304, 4_194_305, 4_194_306])
+def test_default_completion_artifact_reader_preserves_cap_and_stops_at_sentinel(
+    tmp_path: Path, size: int
+) -> None:
+    path = tmp_path / "junit.xml"
+    raw = b"<testsuite tests='1' failures='0' errors='0'/>"
+    raw += b" " * (size - len(raw))
+    path.write_bytes(raw)
+    dependencies = template_update.default_dependencies(
+        project=template_update.TemplateUpdateProject(
+            project_id=37,
+            checkout=tmp_path,
+            default_branch="main",
+            state_root=tmp_path / "state",
+        ),
+        run_process=lambda *_args, **_kwargs: pytest.fail(
+            "reader must not launch process"
+        ),
+    )
+    actual = dependencies.read_artifact(path)
+    assert actual is not None and len(actual) == min(size, 4_194_305)
+    assert sha256(actual).hexdigest() == sha256(raw[:4_194_305]).hexdigest()
+    assert dependencies.read_artifact(tmp_path / "missing.xml") is None

@@ -36,11 +36,19 @@ from .repository import CommandResult as TextCommandResult
 from .repository import parse_porcelain_paths
 from .state_machine import WORKFLOW_RECEIPTS
 from .template_comparison import CommandResult
+from .test_timing import MAX_JUNIT_BYTES
 from .worker import AgentInvoker, WorkerProtocolError
 
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _MAX_COMPLETION_BYTES = 65_536
 _COPIER_TIMEOUT_SECONDS = 300.0
+
+
+def _read_junit_artifact(path: Path) -> bytes | None:
+    if not path.exists():
+        return None
+    with path.open("rb") as stream:
+        return stream.read(MAX_JUNIT_BYTES + 1)
 
 
 class TemplateUpdateState(str, Enum):
@@ -296,7 +304,7 @@ def _completion_is_valid(
         contents = read_artifact(artifact.path)
         if (
             contents is None
-            or len(contents) > 1_048_576
+            or len(contents) > MAX_JUNIT_BYTES
             or sha256(contents).hexdigest() != artifact.sha256
         ):
             return False
@@ -755,6 +763,6 @@ def default_dependencies(
         copier,
         observe,
         worker,
-        lambda path: path.read_bytes() if path.exists() else None,
+        _read_junit_artifact,
         root,
     )

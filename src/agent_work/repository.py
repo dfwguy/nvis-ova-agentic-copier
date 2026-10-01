@@ -58,7 +58,11 @@ from .red_commit import RedCommitDependencies
 from .red_preflight import production_module_exists
 from .red_preflight import run_red_preflight as check_red_preflight
 from .test_executor import TestExecutionError, TestExecutionPolicy
-from .test_timing import is_safe_timing_case_id, parse_full_junit_inventory
+from .test_timing import (
+    MAX_JUNIT_BYTES,
+    is_safe_timing_case_id,
+    parse_full_junit_inventory,
+)
 from .validation import (
     MAX_TIMING_CASE_LIST_BYTES,
     MAX_TIMING_CASE_NAME_BYTES,
@@ -1337,8 +1341,8 @@ class GitRepository:
                 path = isolated_worktree / f"test-results-{environment}.xml"
                 try:
                     with path.open("rb") as artifact:
-                        junit_bytes = artifact.read(1_048_577)
-                        if len(junit_bytes) > 1_048_576:
+                        junit_bytes = artifact.read(MAX_JUNIT_BYTES + 1)
+                        if len(junit_bytes) > MAX_JUNIT_BYTES:
                             raise RepositoryError("present JUnit proof is oversized")
                         cases = parse_full_junit_inventory(junit_bytes)
                 except OSError:

@@ -23,7 +23,7 @@ _ENVIRONMENTS = ("py311", "py314")
 _TREE = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _PHASES = ("setup", "call", "teardown")
-_MAX_JUNIT_BYTES = 1_048_576
+MAX_JUNIT_BYTES: int = 4_194_304
 _MAX_CASES = 8_192
 _MAX_FINDINGS = 128
 _MAX_FOCUSED_RUNS = 32
@@ -81,7 +81,7 @@ def parse_full_junit_records(
     artifact: bytes,
 ) -> tuple[dict[str, float], dict[str, str]]:
     """Read safe case IDs and their private exact pytest selectors."""
-    if not artifact or len(artifact) > _MAX_JUNIT_BYTES:
+    if not artifact or len(artifact) > MAX_JUNIT_BYTES:
         raise ValueError("full JUnit artifact is missing or oversized")
     if b"<!DOCTYPE" in artifact.upper() or b"<!ENTITY" in artifact.upper():
         raise ValueError("full JUnit artifact contains XML declarations")
