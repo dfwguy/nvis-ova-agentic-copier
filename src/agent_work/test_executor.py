@@ -19,13 +19,14 @@ import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Literal, get_args
 
 from pydantic import StrictBool, StrictInt, StrictStr
 
 from .models import BoundaryModel
 from .ports import CommandResult
+from .red_checkpoint import validate_pytest_targets, validate_test_manifest
 
 _REASON = Literal[
     "invalid_identity",
@@ -126,16 +127,7 @@ class TestExecutionIdentity:
             or tuple(sorted(set(self.test_paths))) != self.test_paths
         ):
             raise ValueError("execution identity is invalid")
-        for value in self.test_paths:
-            path = PurePosixPath(value)
-            if (
-                not value.startswith("tests/")
-                or not value.endswith(".py")
-                or path.as_posix() != value
-                or ".." in path.parts
-                or len(value.encode("utf-8")) > 512
-            ):
-                raise ValueError("execution test manifest is invalid")
+        validate_test_manifest(self.test_paths)
 
 
 @dataclass(frozen=True)
@@ -147,31 +139,9 @@ class TestExecutionRequest:
     argv: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        targets = self.argv[3:]
-        if (
-            not _absolute(self.worktree)
-            or self.argv[:3] != ("uv", "run", "pytest")
-            or not 4 <= len(self.argv) <= 128
-            or any(
-                not value or "\x00" in value or len(value.encode()) > 4096
-                for value in self.argv
-            )
-            or any(
-                not any(
-                    target == path or target.startswith(path + "::")
-                    for path in self.identity.test_paths
-                )
-                for target in targets
-            )
-            or any(
-                not any(
-                    target == path or target.startswith(path + "::")
-                    for target in targets
-                )
-                for path in self.identity.test_paths
-            )
-        ):
+        if not _absolute(self.worktree):
             raise ValueError("execution request is invalid")
+        validate_pytest_targets(self.argv, self.identity.test_paths)
 
 
 @dataclass(frozen=True)

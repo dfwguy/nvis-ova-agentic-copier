@@ -376,3 +376,197 @@ def test_handoff_masks_noncanonical_gateway_error() -> None:
     assert result.is_error is True
     assert secret not in str(result)
     assert "builder_input.change_summary" not in str(result)
+
+
+def _red_handoff_session(
+    tmp_path: Path, *, symlink_leaf: bool = False
+) -> tuple[
+    Any,
+    Callable[[WorkerResultBuildInput], dict[str, object]],
+    Any,
+    list[tuple[str, ...]],
+    list[int],
+    WorkerResultBrokerRequest,
+]:
+    from agent_work import runtime, serial
+    from agent_work.repository import CommandResult, GitRepository
+    from tests.test_agent_work_test_executor_runtime import (
+        SnapshotRepository,
+        composition,
+        config,
+        retained_record,
+    )
+
+    settings = config(tmp_path)
+    settings.checkout.mkdir()
+    record = retained_record(settings)
+    path = "tests/test_example.py"
+    target = settings.checkout / path
+    target.parent.mkdir()
+    if symlink_leaf:
+        external = tmp_path / "external.py"
+        external.write_text("private fixture\n")
+        target.symlink_to(external)
+    else:
+        target.write_text("assert False\n")
+    commands: list[tuple[str, ...]] = []
+    applied: list[int] = []
+
+    def run(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        return CommandResult(1, "FAILED example", "")
+
+    class AssetRepository(SnapshotRepository):
+        """Fake public Git observations while keeping real checkpoint decisions."""
+
+        def red_candidate_tree(
+            self, worktree: Path, base_sha: str, paths: tuple[str, ...]
+        ) -> str:
+            assert worktree == record.worktree
+            assert base_sha == record.source_sha
+            assert paths == self.observed_paths
+            return self.observed_tree
+
+        def verify_test_assets(self, worktree: Path, paths: tuple[str, ...]) -> None:
+            verifier: Any = GitRepository
+            verifier.verify_test_assets(self, worktree, paths)
+
+        def read_red_checkpoint_ref(
+            self, worktree: Path, project_id: int, issue_iid: int, base_sha: str
+        ) -> Any:
+            assert worktree == record.worktree
+            assert project_id == record.project_id
+            assert issue_iid == record.issue_iid
+            assert base_sha == record.source_sha
+            return self.retained[-1] if self.retained else None
+
+    repository = AssetRepository(settings, run)
+    wired = runtime.build_runtime_dependencies(
+        debug=False, composition=composition(settings, repository, run)
+    )
+    assert wired.apply_red_checkpoint is not None
+
+    def apply_checkpoint(issue_iid: int, request: Any, tree: str) -> Any:
+        applied.append(issue_iid)
+        assert wired.apply_red_checkpoint is not None
+        return wired.apply_red_checkpoint(issue_iid, request, tree)
+
+    assert record.source_sha is not None
+    request = WorkerResultBrokerRequest(
+        nonce=PRIVATE_NONCE,
+        project_id=record.project_id,
+        issue_iid=record.issue_iid,
+        ledger_revision=record.revision,
+        expected_state=record.state,
+        expected_phase=record.phase,
+        source_branch=record.source_branch,
+        source_sha=record.source_sha,
+    )
+    session = create_worker_result_broker(
+        request,
+        build_artifact=serial._broker_artifact_builder(
+            record,
+            request,
+            repository=repository,
+            red_checkpoint=None,
+            apply_red_checkpoint=apply_checkpoint,
+            load_red_checkpoint=wired.load_red_checkpoint,
+        ),
+        timeout_seconds=10,
+        temporary_directory=tmp_path,
+    )
+    client_request = WorkerResultBrokerClientRequest(
+        nonce=PRIVATE_NONCE, issue_iid=record.issue_iid
+    )
+
+    def gateway(intent: WorkerResultBuildInput) -> dict[str, object]:
+        return submit_worker_result_to_broker(
+            session.socket_path,
+            client_request,
+            intent.model_dump_json(exclude_none=True).encode(),
+            timeout_seconds=10,
+        )
+
+    return session, gateway, repository, commands, applied, request
+
+
+def _red_handoff_intent(*, undeclared_target: bool = False) -> dict[str, object]:
+    path = "tests/test_example.py"
+    argv = ["uv", "run", "pytest", path]
+    if undeclared_target:
+        argv.append("tests/test_undeclared.py")
+    return {
+        **INTENT,
+        "result_kind": "red_checkpoint_ready",
+        "red_checkpoint_request": {
+            "argv": argv,
+            "expected_failure": "FAILED example",
+            "test_paths": [path],
+        },
+    }
+
+
+@pytest.mark.parametrize("defect", ("undeclared_target", "symlink_leaf"))
+def test_typed_red_handoff_live_builder_rejects_scope_and_assets_before_execution_or_ref(
+    tmp_path: Path, defect: str
+) -> None:
+    session, gateway, repository, commands, applied, request = _red_handoff_session(
+        tmp_path, symlink_leaf=defect == "symlink_leaf"
+    )
+    result = asyncio.run(
+        _server(gateway, issue_iid=request.issue_iid).call_tool(
+            "worker_submit_result",
+            {
+                "intent": _red_handoff_intent(
+                    undeclared_target=defect == "undeclared_target"
+                )
+            },
+        )
+    )
+    with pytest.raises(
+        WorkerProtocolError, match="correction absent|request was not accepted"
+    ):
+        session.close_and_capture()
+    assert applied == [request.issue_iid]
+    assert result.is_error is True
+    assert PRIVATE_NONCE not in str(result)
+    assert "private fixture" not in str(result)
+    assert commands == []
+    assert repository.retained == []
+
+
+def test_typed_valid_red_handoff_live_builder_captures_actual_checkpoint_and_artifact(
+    tmp_path: Path,
+) -> None:
+    from agent_work.worker import parse_worker_result_accepted_artifact
+
+    session, gateway, repository, commands, applied, request = _red_handoff_session(
+        tmp_path
+    )
+    result = asyncio.run(
+        _server(gateway, issue_iid=request.issue_iid).call_tool(
+            "worker_submit_result", {"intent": _red_handoff_intent()}
+        )
+    )
+    captured = session.close_and_capture()
+    artifact = parse_worker_result_accepted_artifact(
+        captured, request=request, changed_paths=repository.observed_paths
+    )
+
+    assert result.is_error is not True
+    assert result.structured_content == {"accepted": True}
+    assert PRIVATE_NONCE not in str(result)
+    assert "private fixture" not in str(result)
+    assert applied == [request.issue_iid]
+    assert commands == [("uv", "run", "pytest", "tests/test_example.py")]
+    assert len(repository.retained) == 1
+    evidence = repository.retained[0]
+    assert artifact.red_checkpoint == evidence
+    assert artifact.envelope.result_kind == "red_checkpoint_ready"
+    assert artifact.envelope.red_checkpoint_request is not None
+    assert artifact.envelope.red_checkpoint_request.argv == evidence.argv
+    assert evidence.exit_code == 1
+    assert evidence.expected_failure == "FAILED example"
+    assert evidence.argv == commands[0]
+    assert evidence.test_paths == repository.observed_paths
+    assert evidence.tree_oid == repository.observed_tree

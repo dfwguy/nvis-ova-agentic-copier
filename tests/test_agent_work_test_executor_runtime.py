@@ -148,6 +148,10 @@ class SnapshotRepository(GitRepository):
     ) -> str:
         return self.observed_tree
 
+    def verify_test_assets(self, worktree: Path, paths: tuple[str, ...]) -> None:
+        """Affirm controlled fixture assets independently of fake Git snapshots."""
+        del worktree, paths
+
     def checkpoint_tree(self, ref: str) -> str | None:
         return None
 
@@ -728,3 +732,45 @@ def test_actual_serial_publication_routes_refuse_selected_hooks_and_preserve_def
     assert selected_gitlab.created_merge_requests == 0
     assert native_calls == []
     assert host.events == []
+
+
+@pytest.mark.parametrize("selected_policy", (False, True))
+def test_actual_runtime_wires_asset_refusal_before_selected_or_native_red_execution(
+    tmp_path: Path, *, selected_policy: bool
+) -> None:
+    settings = config(tmp_path)
+    settings.checkout.mkdir()
+    retained_record(settings)
+    host = FixtureHost(settings.checkout)
+    policy = (
+        runtime.create_test_execution_policy(
+            host.ports(), protected_paths=protected_paths(host.root)
+        )
+        if selected_policy
+        else None
+    )
+    commands: list[tuple[str, ...]] = []
+    verified: list[tuple[Path, tuple[str, ...]]] = []
+
+    def run_command(command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        commands.append(command)
+        return CommandResult(1, "FAILED example", "")
+
+    class RefusingRepository(SnapshotRepository):
+        def verify_test_assets(self, worktree: Path, paths: tuple[str, ...]) -> None:
+            verified.append((worktree, paths))
+            raise RepositoryError("private fixture asset topology refusal")
+
+    repository = RefusingRepository(settings, run_command)
+    wired = cast(_RuntimeBuilder, runtime.build_runtime_dependencies)(
+        debug=False,
+        composition=composition(settings, repository, run_command),
+        test_execution_policy=policy,
+    )
+    assert wired.apply_red_checkpoint is not None
+    with pytest.raises(RedCheckpointError):
+        wired.apply_red_checkpoint(387, checkpoint_request(), TREE)
+    assert verified == [(settings.checkout, PATHS)]
+    assert commands == []
+    assert host.prepared_requests == []
+    assert repository.retained == []

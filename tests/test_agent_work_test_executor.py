@@ -874,3 +874,25 @@ def test_generated_nonboolean_category_evidence_cannot_grant_execution(
         )
         is False
     )
+
+
+@given(st.sampled_from(("\\", "\x00", "\x01", "\t", "\n", "\r", "\x7f")))
+def test_execution_identity_rejects_generated_noncanonical_test_assets(
+    control: str,
+) -> None:
+    with pytest.raises(ValueError):
+        replace(identity(), test_paths=(f"tests/test_bad{control}asset.py",))
+
+
+@pytest.mark.parametrize(
+    "suffix", ("::", "::::test_red", "::test_red\n", "::test_red\\escape")
+)
+def test_execution_request_rejects_malformed_declared_node_targets(
+    tmp_path: Path, suffix: str
+) -> None:
+    with pytest.raises(ValueError):
+        runtime.TestExecutionRequest(
+            identity=identity(),
+            worktree=tmp_path,
+            argv=("uv", "run", "pytest", PATHS[0] + suffix),
+        )

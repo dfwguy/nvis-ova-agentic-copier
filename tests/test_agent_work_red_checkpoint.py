@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import os
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -154,6 +155,9 @@ class FakeDependencies:
         self.calls.append(("write", evidence))
         self.retained = evidence
 
+    def verify_test_assets(self, worktree: Path, paths: tuple[str, ...]) -> None:
+        self.calls.append(("assets", (worktree, paths)))
+
     def value(self, *, with_preflight: bool = False) -> Any:
         checkpoint = _checkpoint_module()
         return checkpoint.RedCheckpointDependencies(
@@ -163,6 +167,7 @@ class FakeDependencies:
             run_red_command=self.run_red_command,
             snapshot_test_tree=self.snapshot_test_tree,
             expected_tree_oid=self.snapshot_result,
+            verify_test_assets=self.verify_test_assets,
             read_evidence=self.read_evidence,
             write_evidence=self.write_evidence,
             **({"run_red_preflight": self.run_red_preflight} if with_preflight else {}),
@@ -598,12 +603,17 @@ def test_repository_snapshots_declared_tests_with_a_temporary_index(
 
     def run(command: tuple[str, ...], **kwargs: Any) -> CommandResult:
         commands.append((command, kwargs))
+        if "ls-files" in command:
+            return CommandResult(0, f"100644 {TREE_OID} 0\t{TEST_PATH}\0", "")
         if "write-tree" in command:
             return CommandResult(0, f"{TREE_OID}\n", "")
         if "rev-parse" in command and CHECKPOINT_REF in " ".join(command):
             return CommandResult(1, "", "")
         return CommandResult(0, "", "")
 
+    asset = tmp_path / "worktree" / TEST_PATH
+    asset.parent.mkdir(parents=True)
+    asset.write_text("assert False\n")
     tree = GitRepository(_config(tmp_path), run).snapshot_test_tree(
         tmp_path / "worktree", BASE_SHA, (TEST_PATH,)
     )
@@ -774,6 +784,8 @@ def test_checkpoint_ref_never_changes_one_commit_final_publication_history(
             arguments = arguments[8:]
             assert arguments[:1] == ("push",)
         commands.append(arguments)
+        if "ls-files" in arguments:
+            return CommandResult(0, f"100644 {TREE_OID} 0\t{TEST_PATH}\0", "")
         if arguments == ("write-tree",):
             return CommandResult(0, f"{TREE_OID}\n", "")
         if CHECKPOINT_REF in " ".join(arguments) and arguments[:1] in {
@@ -810,6 +822,9 @@ def test_checkpoint_ref_never_changes_one_commit_final_publication_history(
         service_environment={"GITLAB_TOKEN": "dedicated-token"},
     )
     worktree = tmp_path / "worktree"
+    asset = worktree / TEST_PATH
+    asset.parent.mkdir(parents=True)
+    asset.write_text("assert False\n")
     repository.snapshot_test_tree(worktree, BASE_SHA, (TEST_PATH,))
     prepared = repository.prepare_commit(
         worktree,
@@ -881,3 +896,364 @@ def test_retained_red_provenance_contract_preserves_complete_identity() -> None:
         "output_sha256": hashlib.sha256(b"assert 1 == 2\n").hexdigest(),
         "residual_details": [],
     }
+
+
+@pytest.mark.parametrize(
+    "extra",
+    (
+        "tests/test_undeclared.py",
+        "src/agent_work/runtime.py",
+        "template/tests/test_x.py",
+        "../sibling/tests/test_x.py",
+        "--collect-only",
+        "-k",
+        "--",
+        "@targets",
+        f"{TEST_PATH}::",
+        f"{TEST_PATH}::::test_red",
+        f"{TEST_PATH}::test_red\n",
+        f"{TEST_PATH}::test_red\\escape",
+    ),
+)
+def test_checkpoint_target_authority_rejects_every_extra_unbound_argument(
+    extra: str,
+) -> None:
+    checkpoint = _checkpoint_module()
+    with pytest.raises(RedCheckpointError):
+        checkpoint.validate_red_checkpoint_request(
+            _request(argv=("uv", "run", "pytest", TEST_PATH, extra))
+        )
+
+
+@given(st.sampled_from(("\\", "\x00", "\x01", "\t", "\n", "\r", "\x7f")))
+def test_checkpoint_manifest_rejects_generated_controls_and_alternate_separators(
+    control: str,
+) -> None:
+    checkpoint = _checkpoint_module()
+    path = f"tests/test_bad{control}asset.py"
+    with pytest.raises(RedCheckpointError):
+        checkpoint.validate_red_checkpoint_request(
+            _request(argv=("uv", "run", "pytest", path), test_paths=(path,))
+        )
+
+
+@given(st.text(alphabet="abcdefghijklmnopqrstuvwxyz_", min_size=1, max_size=20))
+def test_checkpoint_generated_undeclared_target_never_expands_authority(
+    stem: str,
+) -> None:
+    checkpoint = _checkpoint_module()
+    with pytest.raises(RedCheckpointError):
+        checkpoint.validate_red_checkpoint_request(
+            _request(argv=("uv", "run", "pytest", TEST_PATH, f"tests/other_{stem}.py"))
+        )
+
+
+@given(
+    st.permutations((TEST_PATH, f"{TEST_PATH}::TestWidget::test_red[param]", TEST_PATH))
+)
+def test_checkpoint_target_permutations_and_duplicates_preserve_manifest(
+    targets: list[str],
+) -> None:
+    checkpoint = _checkpoint_module()
+    result = checkpoint.validate_red_checkpoint_request(
+        _request(argv=("uv", "run", "pytest", *targets))
+    )
+    assert {target.split("::", 1)[0] for target in result.argv[3:]} == set(
+        result.test_paths
+    )
+
+
+@pytest.mark.parametrize(
+    "stage",
+    ("missing", "initial", "after_run", "after_snapshot", "after_preflight", "replay"),
+)
+def test_checkpoint_refuses_unverified_assets_without_retained_evidence(
+    tmp_path: Path, stage: str
+) -> None:
+    checkpoint = _checkpoint_module()
+    fake = FakeDependencies(tmp_path)
+    bad_asset = stage in {"initial", "replay"}
+    if stage == "replay":
+        fake.retained = _evidence()
+
+    def invalidate() -> None:
+        nonlocal bad_asset
+        bad_asset = True
+
+    def verify(_worktree: Path, _paths: tuple[str, ...]) -> None:
+        if bad_asset:
+            raise RepositoryError("test asset topology is invalid")
+
+    fake.after_run = invalidate if stage == "after_run" else None
+    fake.after_preflight = invalidate if stage == "after_preflight" else None
+
+    def snapshot(base: str, paths: tuple[str, ...]) -> str:
+        tree = fake.snapshot_test_tree(base, paths)
+        if stage == "after_snapshot":
+            invalidate()
+        return tree
+
+    dependencies = replace(
+        fake.value(with_preflight=True),
+        verify_test_assets=None if stage == "missing" else verify,
+        snapshot_test_tree=snapshot,
+    )
+    with pytest.raises(RedCheckpointError):
+        checkpoint.create_red_checkpoint(
+            issue_iid=81, request=_request(), dependencies=dependencies
+        )
+    names = [name for name, _ in fake.calls]
+    assert "write" not in names
+    if stage in {"missing", "initial", "replay"}:
+        assert "run" not in names
+    if stage == "after_run":
+        assert "snapshot" not in names
+    if stage == "after_snapshot":
+        assert "preflight" not in names
+    if stage == "after_preflight":
+        assert "preflight" in names
+
+
+@pytest.mark.parametrize("stream", ("stdout", "stderr"))
+def test_checkpoint_asset_checks_preserve_exact_failure_stream(
+    tmp_path: Path, stream: str
+) -> None:
+    fake = FakeDependencies(tmp_path)
+    fake.command_result = CommandResult(
+        1,
+        "assert 1 == 2\n" if stream == "stdout" else "",
+        "assert 1 == 2\n" if stream == "stderr" else "",
+    )
+    evidence = _checkpoint_module().create_red_checkpoint(
+        issue_iid=81, request=_request(), dependencies=fake.value(with_preflight=True)
+    )
+    assert evidence.output_sha256 == hashlib.sha256(b"assert 1 == 2\n").hexdigest()
+    assert evidence.residual_details == ()
+    assert sum(name == "assets" for name, _ in fake.calls) >= 4
+
+
+@pytest.mark.parametrize(
+    "defect", ("leaf_link", "ancestor_link", "directory", "fifo", "missing_parent")
+)
+def test_repository_asset_verifier_rejects_untrusted_topology(
+    tmp_path: Path, defect: str
+) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    target = worktree / TEST_PATH
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / target.name).write_text("assert False\n")
+    if defect == "ancestor_link":
+        (worktree / "tests").symlink_to(external, target_is_directory=True)
+    elif defect != "missing_parent":
+        target.parent.mkdir()
+        if defect == "leaf_link":
+            target.symlink_to(external / target.name)
+        elif defect == "directory":
+            target.mkdir()
+        else:
+            os.mkfifo(target)
+    repository: Any = GitRepository(
+        _config(tmp_path),
+        lambda *_args, **_kwargs: pytest.fail(
+            "asset verification must not execute Git"
+        ),
+    )
+    with pytest.raises(RepositoryError):
+        repository.verify_test_assets(worktree, (TEST_PATH,))
+
+
+@pytest.mark.parametrize("deleted", (False, True))
+def test_repository_asset_verifier_accepts_regular_or_deleted_leaf_below_real_directories(
+    tmp_path: Path, *, deleted: bool
+) -> None:
+    target = tmp_path / "worktree" / TEST_PATH
+    target.parent.mkdir(parents=True)
+    if not deleted:
+        target.write_text("assert False\n")
+    repository: Any = GitRepository(
+        _config(tmp_path),
+        lambda *_args, **_kwargs: pytest.fail(
+            "asset verification must not execute Git"
+        ),
+    )
+    assert repository.verify_test_assets(tmp_path / "worktree", (TEST_PATH,)) is None
+
+
+@pytest.mark.parametrize("mode", ("100644", "100755", "120000", "160000"))
+def test_repository_snapshot_requires_regular_staged_test_modes(
+    tmp_path: Path, mode: str
+) -> None:
+    target = tmp_path / "worktree" / TEST_PATH
+    target.parent.mkdir(parents=True)
+    target.write_text("assert False\n")
+    commands: list[tuple[str, ...]] = []
+
+    def run(command: tuple[str, ...], **_kwargs: Any) -> CommandResult:
+        commands.append(command)
+        if "ls-files" in command:
+            return CommandResult(0, f"{mode} {TREE_OID} 0\t{TEST_PATH}\0", "")
+        if "write-tree" in command:
+            return CommandResult(0, TREE_OID, "")
+        return CommandResult(0, "", "")
+
+    repository = GitRepository(_config(tmp_path), run)
+    if mode in {"120000", "160000"}:
+        with pytest.raises(RepositoryError):
+            repository.snapshot_test_tree(tmp_path / "worktree", BASE_SHA, (TEST_PATH,))
+    else:
+        assert (
+            repository.snapshot_test_tree(tmp_path / "worktree", BASE_SHA, (TEST_PATH,))
+            == TREE_OID
+        )
+        assert any("ls-files" in command for command in commands)
+
+
+@pytest.mark.parametrize("swap_at", ("add", "write-tree"))
+def test_repository_snapshot_rechecks_topology_after_actual_git_boundary(
+    tmp_path: Path, swap_at: str
+) -> None:
+    target = tmp_path / "worktree" / TEST_PATH
+    target.parent.mkdir(parents=True)
+    target.write_text("assert False\n")
+    external = tmp_path / "external.py"
+    external.write_text("private fixture\n")
+
+    def run(command: tuple[str, ...], **_kwargs: Any) -> CommandResult:
+        if swap_at in command:
+            target.unlink()
+            target.symlink_to(external)
+        if "ls-files" in command:
+            return CommandResult(0, f"100644 {TREE_OID} 0\t{TEST_PATH}\0", "")
+        return CommandResult(0, TREE_OID if "write-tree" in command else "", "")
+
+    with pytest.raises(RepositoryError):
+        GitRepository(_config(tmp_path), run).snapshot_test_tree(
+            tmp_path / "worktree", BASE_SHA, (TEST_PATH,)
+        )
+
+
+def test_repository_generic_candidate_capture_preserves_content_paths(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "worktree" / "docs" / "reference.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("Reference\n")
+
+    def run(command: tuple[str, ...], **_kwargs: Any) -> CommandResult:
+        if "ls-files" in command:
+            return CommandResult(0, f"100644 {TREE_OID} 0\tdocs/reference.md\0", "")
+        return CommandResult(0, TREE_OID if "write-tree" in command else "", "")
+
+    assert (
+        GitRepository(_config(tmp_path), run).red_candidate_tree(
+            tmp_path / "worktree", BASE_SHA, ("docs/reference.md",)
+        )
+        == TREE_OID
+    )
+
+
+def test_repository_snapshot_rejects_staged_mode_swap_during_tree_write(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "worktree" / TEST_PATH
+    target.parent.mkdir(parents=True)
+    target.write_text("assert False\n")
+    mode = "100644"
+
+    def run(command: tuple[str, ...], **_kwargs: Any) -> CommandResult:
+        nonlocal mode
+        if "ls-files" in command:
+            return CommandResult(0, f"{mode} {TREE_OID} 0\t{TEST_PATH}\0", "")
+        if "write-tree" in command:
+            mode = "120000"
+            return CommandResult(0, TREE_OID, "")
+        return CommandResult(0, "", "")
+
+    with pytest.raises(RepositoryError):
+        GitRepository(_config(tmp_path), run).snapshot_test_tree(
+            tmp_path / "worktree", BASE_SHA, (TEST_PATH,)
+        )
+
+
+def test_repository_snapshot_preserves_declared_test_deletion(tmp_path: Path) -> None:
+    worktree = tmp_path / "worktree"
+    (worktree / "tests").mkdir(parents=True)
+
+    def run(command: tuple[str, ...], **_kwargs: Any) -> CommandResult:
+        return CommandResult(0, TREE_OID if "write-tree" in command else "", "")
+
+    assert (
+        GitRepository(_config(tmp_path), run).snapshot_test_tree(
+            worktree, BASE_SHA, (TEST_PATH,)
+        )
+        == TREE_OID
+    )
+
+
+def test_repository_snapshot_refuses_surviving_test_missing_from_staged_manifest(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "worktree" / TEST_PATH
+    target.parent.mkdir(parents=True)
+    target.write_text("assert False\n")
+
+    def run(command: tuple[str, ...], **_kwargs: Any) -> CommandResult:
+        return CommandResult(0, TREE_OID if "write-tree" in command else "", "")
+
+    with pytest.raises(RepositoryError):
+        GitRepository(_config(tmp_path), run).snapshot_test_tree(
+            tmp_path / "worktree", BASE_SHA, (TEST_PATH,)
+        )
+
+
+@pytest.mark.parametrize(
+    "entry",
+    (
+        "",
+        "not a stage record\0",
+        f"100644 {TREE_OID} 1\t{TEST_PATH}\0",
+        f"100644 {TREE_OID} 0\t{TEST_PATH}\0" * 2,
+        f"100644 not-an-oid 0\t{TEST_PATH}\0",
+    ),
+)
+def test_repository_snapshot_rejects_missing_or_ambiguous_surviving_asset_stage_records(
+    tmp_path: Path, entry: str
+) -> None:
+    target = tmp_path / "worktree" / TEST_PATH
+    target.parent.mkdir(parents=True)
+    target.write_text("assert False\n")
+
+    def run(command: tuple[str, ...], **_kwargs: Any) -> CommandResult:
+        if "ls-files" in command:
+            return CommandResult(0, entry, "")
+        return CommandResult(0, TREE_OID if "write-tree" in command else "", "")
+
+    with pytest.raises(RepositoryError):
+        GitRepository(_config(tmp_path), run).snapshot_test_tree(
+            tmp_path / "worktree", BASE_SHA, (TEST_PATH,)
+        )
+
+
+def test_repository_asset_verifier_uses_injected_nonfollowing_filesystem_observation(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "worktree" / TEST_PATH
+    target.parent.mkdir(parents=True)
+    target.write_text("assert False\n")
+    observations: list[Path] = []
+
+    def observe(path: Path) -> os.stat_result:
+        observations.append(path)
+        return path.lstat()
+
+    constructor: Any = GitRepository
+    repository = constructor(
+        _config(tmp_path),
+        lambda *_args, **_kwargs: pytest.fail("asset checks cannot execute Git"),
+        asset_lstat=observe,
+    )
+    repository.verify_test_assets(tmp_path / "worktree", (TEST_PATH,))
+    assert target in observations
+    assert target.parent in observations

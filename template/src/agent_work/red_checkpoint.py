@@ -44,6 +44,48 @@ class _CheckpointModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+def validate_test_manifest(paths: tuple[str, ...]) -> None:
+    """Require a bounded canonical manifest of unique root Python tests."""
+    if not 1 <= len(paths) <= 64:
+        raise ValueError("test paths must contain between 1 and 64 entries")
+    if tuple(sorted(set(paths))) != paths:
+        raise ValueError("test paths must be unique and normalized")
+    for item in paths:
+        path = PurePosixPath(item)
+        if (
+            not item.startswith("tests/")
+            or not item.endswith(".py")
+            or path.as_posix() != item
+            or ".." in path.parts
+            or len(item.encode()) > 512
+            or "\\" in item
+            or ":" in item
+            or any(ord(char) < 32 or ord(char) == 127 for char in item)
+        ):
+            raise ValueError("test paths must be normalized tests/*.py paths")
+
+
+def validate_pytest_targets(argv: tuple[str, ...], paths: tuple[str, ...]) -> None:
+    """Bind every shell-free pytest target to exactly the declared manifest."""
+    if argv[:3] != ("uv", "run", "pytest") or not 4 <= len(argv) <= 128:
+        raise ValueError("argv must begin with exact uv run pytest and targets")
+    represented: set[str] = set()
+    for target in argv[3:]:
+        parts = target.split("::")
+        if (
+            len(target.encode()) > 4096
+            or parts[0] not in paths
+            or any(not part for part in parts)
+            or "\\" in target
+            or any(ord(char) < 32 or ord(char) == 127 for char in target)
+            or any(":" in part for part in parts)
+        ):
+            raise ValueError("argv must contain only declared valid test path targets")
+        represented.add(parts[0])
+    if represented != set(paths):
+        raise ValueError("argv must represent every declared test path")
+
+
 class RedCheckpointRequest(_CheckpointModel):
     """Bounded worker-supplied evidence used to verify one Red run."""
 
@@ -85,34 +127,13 @@ class _ValidatedRedCheckpointRequest(_CheckpointModel):
     @classmethod
     def validate_test_paths(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         """Require unique normalized repository-relative Python tests."""
-        if not 1 <= len(value) <= 64:
-            raise ValueError("test paths must contain between 1 and 64 entries")
-        if len(set(value)) != len(value) or tuple(sorted(value)) != value:
-            raise ValueError("test paths must be unique and normalized")
-        for item in value:
-            path = PurePosixPath(item)
-            if (
-                not item.startswith("tests/")
-                or not item.endswith(".py")
-                or path.is_absolute()
-                or path.as_posix() != item
-                or ".." in path.parts
-                or len(item.encode()) > 512
-            ):
-                raise ValueError("test paths must be normalized tests/*.py paths")
+        validate_test_manifest(value)
         return value
 
     @model_validator(mode="after")
     def validate_argv_paths(self) -> _ValidatedRedCheckpointRequest:
         """Require every declared test to be represented by a pytest target."""
-        targets = self.argv[3:]
-        if any(
-            not any(
-                target == path or target.startswith(f"{path}::") for target in targets
-            )
-            for path in self.test_paths
-        ):
-            raise ValueError("argv must represent every declared test path")
+        validate_pytest_targets(self.argv, self.test_paths)
         return self
 
 
@@ -168,6 +189,7 @@ class RedCheckpointDependencies:
     expected_tree_oid: str
     read_evidence: Callable[[int, int, str], RedCheckpointEvidence | None]
     write_evidence: Callable[[RedCheckpointEvidence], None]
+    verify_test_assets: Callable[[Path, tuple[str, ...]], None] | None = None
     run_red_preflight: Callable[[Path, tuple[str, ...], str], CommandResult] | None = (
         None
     )
@@ -236,6 +258,18 @@ def create_red_checkpoint(
     """Verify and retain one idempotent Red checkpoint transaction."""
     request = validate_red_checkpoint_request(request)
     record = _validate_record(dependencies.load_record(issue_iid), issue_iid)
+
+    def verify_assets() -> None:
+        if dependencies.verify_test_assets is None:
+            raise RedCheckpointError("red checkpoint asset boundary is unavailable")
+        try:
+            dependencies.verify_test_assets(record.worktree, request.test_paths)
+        except (OSError, RuntimeError, ValueError) as error:
+            raise RedCheckpointError(
+                "red checkpoint test assets are invalid"
+            ) from error
+
+    verify_assets()
     assert record.source_sha is not None
     if dependencies.current_head(record.worktree) != record.source_sha:
         raise RedCheckpointError("worktree head does not match the recorded base")
@@ -253,12 +287,14 @@ def create_red_checkpoint(
         tree_oid = dependencies.snapshot_test_tree(
             record.source_sha, request.test_paths
         )
+        verify_assets()
         if tree_oid != dependencies.expected_tree_oid:
             raise RedCheckpointError("red checkpoint candidate tree changed")
         if tree_oid != retained.tree_oid:
             raise RedCheckpointError("retained red checkpoint conflicts with local ref")
         return retained
     result = dependencies.run_red_command(record.worktree, request.argv)
+    verify_assets()
     if dependencies.current_head(record.worktree) != record.source_sha:
         raise RedCheckpointError("worktree head changed during red checkpoint")
     fresh_paths = tuple(sorted(dependencies.changed_paths(record.worktree)))
@@ -291,6 +327,7 @@ def create_red_checkpoint(
             ) from error
         raise RedCheckpointError("red checkpoint evidence is invalid") from error
     tree_oid = dependencies.snapshot_test_tree(record.source_sha, request.test_paths)
+    verify_assets()
     if tree_oid != dependencies.expected_tree_oid:
         raise RedCheckpointError("red checkpoint candidate tree changed")
     if dependencies.run_red_preflight is None:
@@ -298,6 +335,7 @@ def create_red_checkpoint(
     preflight = dependencies.run_red_preflight(
         record.worktree, request.test_paths, tree_oid
     )
+    verify_assets()
     details = (
         parse_red_preflight_success(preflight.stdout)
         if preflight.returncode == 0 and not preflight.stderr
@@ -313,6 +351,7 @@ def create_red_checkpoint(
         != tree_oid
     ):
         raise RedCheckpointError("red checkpoint candidate changed during preflight")
+    verify_assets()
     try:
         evidence = RedCheckpointEvidence.model_validate(
             evidence.model_dump() | {"tree_oid": tree_oid, "residual_details": details}
