@@ -26,6 +26,7 @@ from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from .file_patch import DocumentationPatchRequest, DocumentationPatchResult
 from .worker import _clear_private_directory
 
 WorkerReadAction = Literal["context", "issue", "ledger"]
@@ -582,3 +583,120 @@ def request_worker_validation(
     ):
         return cast(dict[str, object], response["value"])
     raise ValueError("worker_validation: request failed")
+
+
+class _DocumentationPatchFrame(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    nonce: str
+    request: DocumentationPatchRequest
+
+
+class _DocumentationPatchReply(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    accepted: bool
+    value: DocumentationPatchResult | None = None
+
+
+class WorkerDocumentationPatchBrokerSession(WorkerReadBrokerSession):
+    """Authenticate one closed documentation service without Git authority."""
+
+    def __init__(
+        self,
+        identity: WorkerReadSessionIdentity,
+        *,
+        identity_check: Callable[[WorkerReadSessionIdentity], bool],
+        patch_action: Callable[[DocumentationPatchRequest], DocumentationPatchResult],
+        timeout_seconds: float,
+        temporary_directory: Path | None = None,
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
+        if temporary_directory is not None and not _socket_path_fits(
+            temporary_directory
+        ):
+            raise ValueError("documentation_patch: socket path unavailable")
+        self._patch_action = patch_action
+        self._patch_terminal = False
+        super().__init__(
+            identity,
+            identity_check=identity_check,
+            read_action=lambda _action: {},
+            timeout_seconds=timeout_seconds,
+            temporary_directory=temporary_directory,
+            clock=clock,
+        )
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                connection, _ = self._socket.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            with connection:
+                connection.settimeout(0.5)
+                try:
+                    frame = _DocumentationPatchFrame.model_validate_json(
+                        _read_frame(connection)
+                    )
+                    if frame.nonce != self._identity.nonce:
+                        raise ValueError("documentation_patch: invalid session")
+                    if self._patch_terminal:
+                        result = DocumentationPatchResult(
+                            outcome="refused", reason="patch_refused"
+                        )
+                    elif self._clock() >= self._deadline or not self._identity_check(
+                        self._identity
+                    ):
+                        result = DocumentationPatchResult(
+                            outcome="refused", reason="identity_changed"
+                        )
+                    else:
+                        result = DocumentationPatchResult.model_validate_json(
+                            self._patch_action(frame.request).model_dump_json()
+                        )
+                        if (
+                            result.outcome in {"applied", "failed_partial"}
+                            or result.quarantined
+                        ):
+                            self._patch_terminal = True
+                    _write_frame(
+                        connection,
+                        {"accepted": True, "value": result.model_dump(mode="json")},
+                    )
+                except (OSError, ValueError, TypeError, RuntimeError):
+                    try:
+                        _write_frame(connection, {"accepted": False})
+                    except (OSError, ValueError):
+                        pass
+
+
+def request_worker_documentation_patch(
+    socket_path: Path,
+    nonce: str,
+    request: DocumentationPatchRequest,
+    *,
+    timeout_seconds: float = 10,
+) -> DocumentationPatchResult:
+    """Submit a bounded authenticated patch frame to the private host service."""
+    try:
+        validated = DocumentationPatchRequest.model_validate_json(
+            request.model_dump_json()
+        )
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(timeout_seconds)
+            connection.connect(str(socket_path))
+            _write_frame(
+                connection,
+                {"nonce": nonce, "request": validated.model_dump(mode="json")},
+            )
+            reply = _DocumentationPatchReply.model_validate_json(
+                _read_frame(connection)
+            )
+        if reply.accepted and reply.value is not None:
+            return reply.value
+    except (OSError, ValueError, TypeError):
+        raise ValueError("documentation_patch: submission failed") from None
+    raise ValueError("documentation_patch: request failed")

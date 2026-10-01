@@ -614,6 +614,26 @@ the session makes further reads fail. Provider errors return a bounded failure
 without private detail. This interface supplies context only;
 it grants no file, Git, GitLab, publication, approval, or merge operation.
 
+#### Exact documentation patch MCP primitive
+
+A trusted host can compose `create_live_worker_documentation_patch_session`
+with an exact reviewed grant. The record must be executing in the content lane.
+That public session owns the MCP server and private broker.
+It checks live identity and supplies the default descriptor filesystem.
+The tool applies approved replacements. It grants no general directory authoring.
+
+| Area | Contract |
+| --- | --- |
+| Tool input | `worker_documentation_patch` accepts `patches` and optional `apply`, default `false`. Each patch has `path`, `base_sha256`, and `replacement_text`. The request cannot choose a role, grant, identity, root, mode, command, create, delete, or rename operation. |
+| Host grant | Trusted composition binds project, issue, checkout, branch, source, phase, ledger revision, complete disjoint path groups, measured old/new byte sizes, expected base hashes, and approved replacement hashes. Model text, issue content, environment values, or serialized approval cannot create the grant. |
+| Eligible files | Only existing `README.md` and eligible non-executable Markdown under `docs/` or `template/docs/`. Policy files, Jinja templates, executable files, and unrelated paths are refused. Code checks preserve old and new fenced blocks and every indented line exactly; malformed or uncertain regions refuse. An approved hash cannot authorize an executable-region change. |
+| Groups and identity | Every required group member, base/replacement hash, measured size, and declared mirror equality must match before effects. The private broker binds a fresh nonce and deadline to live ledger and repository identity, then rechecks the grant and identity around operations. |
+| Preview and apply | Preview changes no candidate content, inode, mode, ledger, or Git state. An accepted apply changes only the exact approved files and preserves their modes. Successful apply consumes the session. |
+| Safe results | `outcome` is `preview`, `applied`, `refused`, or `failed_partial`. `changed` contains allowed member paths and hashes; `reason` is a fixed refusal code, and `quarantined` marks an unusable session. Results include no private contents, outside paths, nonce, exception text, or traces. They grant no staging, validation, commit, or publication authority. |
+| Partial failure | Group replacement is not atomic. A later failure reports the exact already changed approved members and quarantines the session. There is no rollback and no claim of successful mirror parity. Cleanup removes only owned temporary files; failed cleanup or post-write drift cannot count as success. A new trusted grant is required. |
+| Filesystem limits | Descriptor-relative no-follow checks reject observable parent, inode, hash, mode, or link drift. Ordinary replacement cannot atomically compare and swap the destination inode; the final check-to-rename window remains. These checks prove no OS confinement. |
+| Activation limits | Existing worker invocation and read-only profiles receive no write tool. This primitive enables no writer profile, transport rollout, timer, or loop. Writer transport and broader file ownership remain separate work; this does not complete issue 354. |
+
 #### Opt-in worker Git MCP primitive
 
 The controller can create a separate live worker Git session through

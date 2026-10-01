@@ -14,20 +14,23 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import secrets
 import tempfile
 from base64 import b64decode
 from binascii import Error as BinasciiError
-from collections.abc import Callable, Mapping
-from contextlib import AbstractContextManager, nullcontext
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
+from time import monotonic
 from types import MappingProxyType
-from typing import Literal, Protocol, cast
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 
+from . import file_patch as _file_patch
 from .candidate_boundary import (
     GIT_READ_MAX_CHUNK_BYTES,
     CandidateBoundaryError,
@@ -52,6 +55,13 @@ from .domain import (
     label_for_state,
     parse_split_marker,
     render_split_marker,
+)
+from .file_patch import (
+    DocumentationPatchFilesystem,
+    DocumentationPatchGrant,
+    DocumentationPatchRequest,
+    DocumentationPatchResult,
+    apply_documentation_patch,
 )
 from .gitlab import (
     GitLabError,
@@ -137,12 +147,23 @@ from .worker import (
     worker_exit_evidence,
 )
 from .worker_read import (
+    WorkerDocumentationPatchBrokerSession,
     WorkerGitBrokerSession,
     WorkerReadBrokerSession,
     WorkerReadSessionIdentity,
     WorkerValidationBrokerSession,
     create_worker_read_broker,
+    request_worker_documentation_patch,
 )
+
+if TYPE_CHECKING:
+    from .mcp_server import MCPServer
+
+
+# Host callers construct the same DTOs consumed by the live session facade.
+DocumentationPatch = _file_patch.DocumentationPatch
+DocumentationPatchFileGrant = _file_patch.DocumentationPatchFileGrant
+DocumentationPatchMember = _file_patch.DocumentationPatchMember
 
 
 class SegmentError(RuntimeError):
@@ -7365,3 +7386,145 @@ def run_segment(
             classification="execution",
         )
     raise SegmentError("record is not runnable")
+
+
+@contextmanager
+def create_live_worker_documentation_patch_session(
+    record: LedgerRecord,
+    issue: GitLabIssue,
+    host_grant: DocumentationPatchGrant,
+    *,
+    ledger: LedgerPort,
+    repository: RepositoryPort,
+    timeout_seconds: float,
+    temporary_directory: Path | None = None,
+    filesystem: DocumentationPatchFilesystem | None = None,
+    clock: Callable[[], float] = monotonic,
+) -> Iterator[MCPServer]:
+    """Compose the live host grant, private broker, and real descriptor writer."""
+    from .mcp_server import create_worker_documentation_patch_mcp_server
+
+    if (
+        record.state is not RunnerState.EXECUTING
+        or record.phase is not WorkflowPhase.WORKFLOW
+        or record.workflow_lane is not WorkflowLane.CONTENT
+        or record.source_sha is None
+        or issue.iid != record.issue_iid
+        or (
+            host_grant.project_id,
+            host_grant.issue_iid,
+            host_grant.checkout,
+            host_grant.source_branch,
+            host_grant.source_sha,
+            host_grant.phase,
+            host_grant.ledger_revision,
+        )
+        != (
+            record.project_id,
+            record.issue_iid,
+            record.worktree,
+            record.source_branch,
+            record.source_sha,
+            record.phase,
+            record.revision,
+        )
+    ):
+        raise SegmentError("documentation_patch: invalid host identity")
+    expected_head = record.source_sha
+    deadline = clock() + timeout_seconds
+    identity = WorkerReadSessionIdentity(
+        nonce=secrets.token_hex(16),
+        project_id=record.project_id,
+        issue_iid=record.issue_iid,
+        checkout=record.worktree,
+        phase=record.phase.value,
+        ledger_revision=record.revision,
+        source_sha=record.source_sha,
+    )
+
+    def identity_check(candidate: WorkerReadSessionIdentity) -> bool:
+        if candidate != identity or clock() >= deadline:
+            return False
+        try:
+            current = ledger.load_read_only(record.issue_iid)
+            if current is None or (
+                current.project_id,
+                current.issue_iid,
+                current.worktree,
+                current.source_branch,
+                current.source_sha,
+                current.phase,
+                current.revision,
+                current.state,
+                current.workflow_lane,
+            ) != (
+                record.project_id,
+                record.issue_iid,
+                record.worktree,
+                record.source_branch,
+                record.source_sha,
+                record.phase,
+                record.revision,
+                record.state,
+                record.workflow_lane,
+            ):
+                return False
+            repository.verify_worktree(
+                record.worktree, record.source_branch, expected_head
+            )
+            return repository.head(record.worktree) == expected_head
+        except (ValueError, RuntimeError, OSError):
+            return False
+
+    if not identity_check(identity):
+        raise SegmentError("documentation_patch: identity changed")
+    ports = (
+        filesystem
+        if filesystem is not None
+        else DocumentationPatchFilesystem(
+            open=os.open,
+            stat=os.stat,
+            fstat=os.fstat,
+            read=os.read,
+            write=os.write,
+            fchmod=os.fchmod,
+            replace=lambda source, destination, *, src_dir_fd, dst_dir_fd: os.replace(
+                source, destination, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd
+            ),
+            unlink=os.unlink,
+            close=os.close,
+        )
+    )
+
+    def patch_action(proposed: DocumentationPatchRequest) -> DocumentationPatchResult:
+        return apply_documentation_patch(
+            host_grant,
+            proposed,
+            identity_check=lambda: identity_check(identity),
+            filesystem=ports,
+        )
+
+    try:
+        broker = WorkerDocumentationPatchBrokerSession(
+            identity,
+            identity_check=identity_check,
+            patch_action=patch_action,
+            timeout_seconds=timeout_seconds,
+            temporary_directory=temporary_directory,
+            clock=clock,
+        )
+    except (OSError, ValueError):
+        raise SegmentError("documentation_patch: private socket unavailable") from None
+    try:
+
+        def gateway(proposed: DocumentationPatchRequest) -> DocumentationPatchResult:
+            return request_worker_documentation_patch(
+                broker.socket_path,
+                broker.nonce,
+                proposed,
+                timeout_seconds=timeout_seconds,
+            )
+
+        yield create_worker_documentation_patch_mcp_server(gateway)
+    finally:
+        broker.close()

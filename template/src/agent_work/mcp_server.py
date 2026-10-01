@@ -30,6 +30,11 @@ from pydantic import (
 
 from .candidate_boundary import GIT_READ_MAX_CHUNK_BYTES
 from .domain import ErrorCode, WorkflowLane, WorkflowPhase
+from .file_patch import (
+    DocumentationPatch,
+    DocumentationPatchRequest,
+    DocumentationPatchResult,
+)
 from .models import BoundaryModel, MergeRequestDraft, SplitPlan
 from .red_checkpoint import RedCheckpointRequest
 from .serial import _worker_validation_projection
@@ -691,3 +696,66 @@ def main(
 
 if __name__ == "__main__":
     main()
+
+
+class _DocumentationPatchMCPServer(MCPServer):
+    def __init__(self) -> None:
+        super().__init__("worker-documentation-patch")
+
+    async def list_tools(self) -> list[Tool]:
+        """Advertise the single closed documentation replacement tool."""
+        return [
+            tool.model_copy(
+                update={
+                    "input_schema": {**tool.input_schema, "additionalProperties": False}
+                }
+            )
+            for tool in await super().list_tools()
+        ]
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any], context: Any = None
+    ) -> CallToolResult:
+        try:
+            if name != "worker_documentation_patch":
+                raise ValueError("invalid tool")
+            DocumentationPatchRequest.model_validate_json(json.dumps(arguments))
+        except (ValueError, TypeError):
+            return CallToolResult(
+                content=[
+                    TextContent(text="documentation_patch: invalid tool or arguments")
+                ],
+                is_error=True,
+            )
+        return cast(CallToolResult, await super().call_tool(name, arguments, context))
+
+
+def create_worker_documentation_patch_mcp_server(
+    gateway: Callable[[DocumentationPatchRequest], DocumentationPatchResult],
+) -> MCPServer:
+    """Expose one host-composed private documentation patch service."""
+    server = _DocumentationPatchMCPServer()
+
+    @server.tool()
+    def worker_documentation_patch(
+        patches: list[DocumentationPatch], *, apply: bool = False
+    ) -> CallToolResult:
+        """Preview or apply all members of the host-reviewed documentation grant."""
+        try:
+            request = DocumentationPatchRequest(patches=tuple(patches), apply=apply)
+            result = DocumentationPatchResult.model_validate_json(
+                gateway(request).model_dump_json()
+            )
+        except (OSError, ValueError, TypeError, WorkerProtocolError):
+            return CallToolResult(
+                content=[TextContent(text="documentation_patch: submission failed")],
+                is_error=True,
+            )
+        public = result.model_dump(mode="json")
+        return CallToolResult(
+            content=[TextContent(text=json.dumps(public))],
+            structured_content=public,
+            is_error=False,
+        )
+
+    return server
