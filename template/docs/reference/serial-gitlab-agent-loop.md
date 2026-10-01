@@ -384,6 +384,41 @@ writable Red process before launch or prove OS denial of private-file access.
 They enable no host route, timer, or factory activation. The selected execution
 policy and native-hook refusals above still apply.
 
+#### Optional Architect risk intent
+
+The live Architect may include `architect_risk_intent` in
+`red_checkpoint_request`. It records concrete state or protocol risks.
+Green can use them for later planning. The same typed value appears in the
+controller-owned `RedCheckpointEvidence` after acceptance. It is nested in the Red request,
+including through the opt-in `worker_submit_result` MCP tool.
+
+| Field | Contract |
+| --- | --- |
+| `architect_risk_intent.risks` | A nonempty list of risk cases. |
+| `kind` | Exactly `state` or `protocol`. |
+| `scenario` | A nonblank description of a concrete failure situation, without NUL. |
+| `invariant` | A nonblank statement of the property that must remain true, without NUL. |
+| Shape | Unknown fields are rejected in both the intent and each case. |
+| Storage limit | Intent must fit within the existing 32,768-byte UTF-8 budget. The complete serialized checkpoint evidence, plus its one-byte framing, must also fit that budget. |
+| Absent intent | Older evidence loads as `None`. Durable wire output omits absent optional fields. |
+
+The controller retains the intent with the checkpoint in one atomic capture.
+It checks the current project, issue, branch, base, and observed candidate
+tree before acceptance. It then requires an exact read-back. Request and
+evidence must contain equal intent. A matching retry reuses the retained
+checkpoint; adding, changing, or omitting retained intent rejects the retry.
+
+On resume, the controller checks the current checkpoint lookup identity.
+Source changes may require the existing historical recovery route. In that
+case, it checks the audit checkpoint identity. It reloads the full evidence
+at its original base. The reload must equal the audit checkpoint. Stale audit
+or reloaded evidence cannot supply risk context.
+
+Green receives only the separately supplied, verified retained intent as
+structured advisory data. Raw record fields, audit prose, issue text, and
+summaries cannot supply it. The declaration grants no validation, commit,
+publication, or specialist authority.
+
 ### `merge-request publish`
 
 `merge-request publish` creates Markdown text for review. It has the needed

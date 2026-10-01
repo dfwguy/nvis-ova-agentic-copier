@@ -44,6 +44,35 @@ class _CheckpointModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+class ArchitectRiskCase(_CheckpointModel):
+    """One advisory state or protocol failure and its required invariant."""
+
+    kind: Literal["state", "protocol"]
+    scenario: str
+    invariant: str
+
+    @field_validator("scenario", "invariant")
+    @classmethod
+    def validate_risk_text(cls, value: str) -> str:
+        """Require meaningful text without NUL bytes."""
+        if not value.strip() or "\x00" in value:
+            raise ValueError("risk text must be nonblank and contain no NUL")
+        return value
+
+
+class ArchitectRiskIntent(_CheckpointModel):
+    """Optional advisory risks bounded by the existing checkpoint budget."""
+
+    risks: tuple[ArchitectRiskCase, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_resource_bound(self) -> ArchitectRiskIntent:
+        """Keep the declaration within the durable evidence resource bound."""
+        if len(self.model_dump_json().encode()) > 32_768:
+            raise ValueError("risk intent exceeds the durable bound")
+        return self
+
+
 def validate_test_manifest(paths: tuple[str, ...]) -> None:
     """Require a bounded canonical manifest of unique root Python tests."""
     if not 1 <= len(paths) <= 64:
@@ -92,6 +121,7 @@ class RedCheckpointRequest(_CheckpointModel):
     argv: tuple[str, ...]
     expected_failure: str
     test_paths: tuple[str, ...]
+    architect_risk_intent: ArchitectRiskIntent | None = None
 
 
 class _ValidatedRedCheckpointRequest(_CheckpointModel):
@@ -100,6 +130,7 @@ class _ValidatedRedCheckpointRequest(_CheckpointModel):
     argv: tuple[str, ...]
     expected_failure: str
     test_paths: tuple[str, ...]
+    architect_risk_intent: ArchitectRiskIntent | None = None
 
     @field_validator("argv")
     @classmethod
@@ -153,6 +184,7 @@ class RedCheckpointEvidence(_CheckpointModel):
     expected_failure: str = Field(min_length=1, max_length=2_048)
     output_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     residual_details: tuple[str, ...] = Field(default=(), max_length=128)
+    architect_risk_intent: ArchitectRiskIntent | None = None
 
     @model_validator(mode="after")
     def validate_identity(self) -> RedCheckpointEvidence:
@@ -168,7 +200,7 @@ class RedCheckpointEvidence(_CheckpointModel):
             raise ValueError("checkpoint ref does not match issue and base")
         if self.exit_code == 0:
             raise ValueError("checkpoint exit code must be nonzero")
-        if len(self.model_dump_json().encode()) + 1 > 32_768:
+        if len(self.model_dump_json(exclude_none=True).encode()) + 1 > 32_768:
             raise ValueError("checkpoint evidence exceeds the durable bound")
         return self
 
@@ -246,6 +278,7 @@ def _matches(
         and evidence.test_paths == request.test_paths
         and evidence.argv == request.argv
         and evidence.expected_failure == request.expected_failure
+        and evidence.architect_risk_intent == request.architect_risk_intent
     )
 
 
@@ -319,6 +352,7 @@ def create_red_checkpoint(
             exit_code=result.returncode,
             expected_failure=request.expected_failure,
             output_sha256=hashlib.sha256(output.encode()).hexdigest(),
+            architect_risk_intent=request.architect_risk_intent,
         )
     except ValidationError as error:
         if "durable bound" in str(error):

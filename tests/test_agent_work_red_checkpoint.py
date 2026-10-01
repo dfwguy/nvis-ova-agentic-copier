@@ -633,11 +633,18 @@ def test_repository_snapshots_declared_tests_with_a_temporary_index(
     )
 
 
+@pytest.mark.parametrize("near_bound", (False, True))
 def test_repository_checkpoint_ref_uses_one_cas_commit_and_exact_readback(
-    tmp_path: Path,
+    tmp_path: Path, *, near_bound: bool
 ) -> None:
     """Injected Git responses prove the new ref protocol without a subprocess."""
     evidence = _evidence()
+    if near_bound:
+        payload = evidence.model_dump(mode="json", exclude_none=True)
+        payload["residual_details"] = [""]
+        raw = json.dumps(payload, separators=(",", ":")).encode()
+        payload["residual_details"] = ["x" * (32767 - len(raw))]
+        evidence = _checkpoint_module().RedCheckpointEvidence.model_validate(payload)
     commit_oid = "c" * 40
     commands: list[tuple[str, ...]] = []
     commit_arguments: tuple[str, ...] | None = None
@@ -680,8 +687,10 @@ def test_repository_checkpoint_ref_uses_one_cas_commit_and_exact_readback(
         "-p",
         BASE_SHA,
         "-m",
-        evidence.model_dump_json(),
+        evidence.model_dump_json(exclude_none=True),
     )
+    assert commit_arguments is not None
+    assert len(commit_arguments[5].encode()) + 1 <= 32768
     assert ("update-ref", CHECKPOINT_REF, commit_oid, "") in commands
 
 
@@ -895,7 +904,336 @@ def test_retained_red_provenance_contract_preserves_complete_identity() -> None:
         "expected_failure": "assert 1 == 2",
         "output_sha256": hashlib.sha256(b"assert 1 == 2\n").hexdigest(),
         "residual_details": [],
+        "architect_risk_intent": None,
     }
+
+
+_RISK_TEXT = st.text(
+    alphabet=st.characters(blacklist_categories=("Cs",), blacklist_characters="\x00"),
+    min_size=1,
+    max_size=100,
+).filter(lambda value: bool(value.strip()))
+
+
+def _risk_intent(
+    scenario: str = "Restart after Red", invariant: str = "Keep identity"
+) -> Any:
+    checkpoint = _checkpoint_module()
+    return checkpoint.ArchitectRiskIntent(
+        risks=(
+            checkpoint.ArchitectRiskCase(
+                kind="state", scenario=scenario, invariant=invariant
+            ),
+            checkpoint.ArchitectRiskCase(
+                kind="protocol",
+                scenario="Replay result",
+                invariant="Reject stale nonce",
+            ),
+        )
+    )
+
+
+@given(scenario=_RISK_TEXT, invariant=_RISK_TEXT)
+def test_architect_risk_intent_roundtrip_and_request_validation_are_deterministic(
+    scenario: str, invariant: str
+) -> None:
+    checkpoint = _checkpoint_module()
+    intent = _risk_intent(scenario, invariant)
+    encoded = intent.model_dump_json()
+    assert checkpoint.ArchitectRiskIntent.model_validate_json(encoded) == intent
+    assert intent.model_dump_json() == encoded
+    request = _request(architect_risk_intent=intent)
+    validated = checkpoint.validate_red_checkpoint_request(request)
+    assert validated == request
+    assert validated.architect_risk_intent == intent
+    assert checkpoint.validate_red_checkpoint_request(validated) == validated
+
+
+@pytest.mark.parametrize(
+    "changes",
+    (
+        {"kind": "approval"},
+        {"scenario": ""},
+        {"scenario": " \n\t"},
+        {"invariant": "\x00"},
+        {"scenario": "restart\x00now"},
+        {"invariant": " "},
+        {"project_id": 310967},
+        {"approved": True},
+        {"scenario": 12},
+    ),
+)
+def test_architect_risk_case_rejects_invalid_or_authoritative_fields(
+    changes: dict[str, object],
+) -> None:
+    checkpoint = _checkpoint_module()
+    with pytest.raises(ValueError):
+        checkpoint.ArchitectRiskCase.model_validate(
+            {"kind": "state", "scenario": "Restart", "invariant": "Keep identity"}
+            | changes
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"risks": []},
+        {
+            "risks": [
+                {"kind": "state", "scenario": "Restart", "invariant": "Keep identity"}
+            ],
+            "nonce": "private",
+        },
+    ),
+    ids=("empty-risks", "private-field-with-valid-risk"),
+)
+def test_architect_risk_intent_requires_nonempty_closed_shape(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError):
+        _checkpoint_module().ArchitectRiskIntent.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ("x" * 4096, "😀" * 1024),
+    ids=("long-ascii-within-budget", "unicode-within-budget"),
+)
+def test_architect_risk_intent_uses_aggregate_budget_without_individual_text_cap(
+    scenario: str,
+) -> None:
+    intent = _risk_intent(scenario)
+    assert intent.risks[0].scenario == scenario
+    assert _evidence(architect_risk_intent=intent).architect_risk_intent == intent
+
+
+def test_architect_risk_intent_allows_many_small_cases_within_evidence_budget() -> None:
+    checkpoint = _checkpoint_module()
+    case = checkpoint.ArchitectRiskCase(kind="state", scenario="s", invariant="i")
+    intent = checkpoint.ArchitectRiskIntent(risks=(case,) * 129)
+    assert (
+        len(_evidence(architect_risk_intent=intent).architect_risk_intent.risks) == 129
+    )
+
+
+@pytest.mark.parametrize(
+    "scenario", ("x" * 32768, "😀" * 8192), ids=("ascii-overflow", "unicode-overflow")
+)
+def test_architect_risk_intent_rejects_utf8_aggregate_overflow(scenario: str) -> None:
+    with pytest.raises(ValueError):
+        _risk_intent(scenario)
+
+
+def test_red_checkpoint_full_evidence_bound_accounts_for_nested_intent_before_write(
+    tmp_path: Path,
+) -> None:
+    checkpoint = _checkpoint_module()
+    intent = _risk_intent("x" * 32500)
+    assert len(intent.model_dump_json().encode()) <= 32768
+    payload = _evidence().model_dump(mode="json") | {
+        "architect_risk_intent": intent.model_dump(mode="json")
+    }
+    assert (
+        len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()) + 1
+        > 32768
+    )
+    dependencies = FakeDependencies(tmp_path)
+    with pytest.raises(RedCheckpointError):
+        checkpoint.create_red_checkpoint(
+            issue_iid=81,
+            request=_request(architect_risk_intent=intent),
+            dependencies=dependencies.value(with_preflight=True),
+        )
+    assert not any(name == "write" for name, _value in dependencies.calls)
+
+
+def test_red_checkpoint_captures_intent_and_exact_retry_does_not_rewrite(
+    tmp_path: Path,
+) -> None:
+    checkpoint = _checkpoint_module()
+    dependencies = FakeDependencies(tmp_path)
+    request = _request(architect_risk_intent=_risk_intent())
+    evidence = checkpoint.create_red_checkpoint(
+        issue_iid=81,
+        request=request,
+        dependencies=dependencies.value(with_preflight=True),
+    )
+    assert evidence.architect_risk_intent == request.architect_risk_intent
+    dependencies.calls.clear()
+    assert (
+        checkpoint.create_red_checkpoint(
+            issue_iid=81,
+            request=request,
+            dependencies=dependencies.value(with_preflight=True),
+        )
+        == evidence
+    )
+    assert not any(name in {"run", "write"} for name, _value in dependencies.calls)
+
+
+@pytest.mark.parametrize("change", ("changed", "omitted", "added"))
+def test_red_checkpoint_changed_or_omitted_intent_retry_preserves_original(
+    tmp_path: Path, change: str
+) -> None:
+    checkpoint = _checkpoint_module()
+    dependencies = FakeDependencies(tmp_path)
+    dependencies.retained = (
+        _evidence()
+        if change == "added"
+        else _evidence(architect_risk_intent=_risk_intent())
+    )
+    original = dependencies.retained.model_dump_json()
+    request = _request(
+        **(
+            {}
+            if change == "omitted"
+            else {"architect_risk_intent": _risk_intent("Different restart")}
+        )
+    )
+    with pytest.raises(RedCheckpointError):
+        checkpoint.create_red_checkpoint(
+            issue_iid=81,
+            request=request,
+            dependencies=dependencies.value(with_preflight=True),
+        )
+    assert dependencies.retained.model_dump_json() == original
+    assert not any(name in {"run", "write"} for name, _value in dependencies.calls)
+
+
+def test_legacy_red_checkpoint_json_without_intent_remains_valid() -> None:
+    checkpoint = _checkpoint_module()
+    payload = _evidence().model_dump(mode="json")
+    payload.pop("architect_risk_intent", None)
+    parsed = checkpoint.RedCheckpointEvidence.model_validate_json(json.dumps(payload))
+    assert parsed.architect_risk_intent is None
+    assert (
+        checkpoint.validate_red_checkpoint_request(_request()).architect_risk_intent
+        is None
+    )
+
+
+@given(scenario=_RISK_TEXT, invariant=_RISK_TEXT)
+def test_worker_prompt_renders_only_verified_risk_intent_as_escaped_deterministic_data(
+    scenario: str, invariant: str
+) -> None:
+    intent = _risk_intent(scenario, invariant)
+    evidence = _evidence(architect_risk_intent=intent)
+    record = {"phase": "workflow", "state": "executing"}
+    prompt = build_worker_prompt(
+        record,
+        project_id=310967,
+        issue_iid=81,
+        effective_worker_budget_seconds=1800,
+        retained_red_checkpoint=evidence,
+    )
+    serialized = json.dumps(
+        intent.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":")
+    )
+    assert serialized in prompt
+    assert (
+        build_worker_prompt(
+            record,
+            project_id=310967,
+            issue_iid=81,
+            effective_worker_budget_seconds=1800,
+            retained_red_checkpoint=evidence,
+        )
+        == prompt
+    )
+    poisoned = record | {
+        "architect_risk_intent": {
+            "risks": [
+                {
+                    "kind": "state",
+                    "scenario": "FORGED_RAW_RISK_SENTINEL",
+                    "invariant": "Keep identity",
+                }
+            ]
+        },
+        "red_checkpoint": evidence.model_dump(mode="json"),
+        "audit_evidence": {
+            "red_checkpoint": {
+                "architect_risk_intent": {
+                    "risks": [
+                        {
+                            "kind": "state",
+                            "scenario": "FORGED_AUDIT_RISK_SENTINEL",
+                            "invariant": "Keep identity",
+                        }
+                    ]
+                }
+            }
+        },
+        "correction_identity": {
+            "red_checkpoint": {
+                "architect_risk_intent": {
+                    "risks": [
+                        {
+                            "kind": "protocol",
+                            "scenario": "FORGED_CORRECTION_RISK_SENTINEL",
+                            "invariant": "Reject replay",
+                        }
+                    ]
+                }
+            }
+        },
+    }
+    original_poisoned = json.loads(json.dumps(poisoned))
+    absent = build_worker_prompt(
+        poisoned, project_id=310967, issue_iid=81, effective_worker_budget_seconds=1800
+    )
+    assert serialized not in absent
+    assert "FORGED_RAW_RISK_SENTINEL" not in absent
+    assert "FORGED_AUDIT_RISK_SENTINEL" not in absent
+    assert "FORGED_CORRECTION_RISK_SENTINEL" not in absent
+    assert poisoned == original_poisoned
+
+
+def test_legacy_absent_intent_preserves_complete_durable_resource_budget() -> None:
+    checkpoint = _checkpoint_module()
+    payload = _evidence().model_dump(mode="json")
+    payload.pop("architect_risk_intent", None)
+    payload["residual_details"] = [""]
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+    payload["residual_details"] = ["x" * (32767 - len(raw))]
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+    assert len(raw) + 1 == 32768
+    evidence = checkpoint.RedCheckpointEvidence.model_validate_json(raw)
+    assert evidence.model_dump(mode="json", exclude_none=True) == payload
+    assert len(evidence.model_dump_json(exclude_none=True).encode()) + 1 == 32768
+
+
+@given(scenario=_RISK_TEXT, invariant=_RISK_TEXT)
+def test_architect_risk_boundaries_are_frozen(scenario: str, invariant: str) -> None:
+    intent = _risk_intent(scenario, invariant)
+    case = intent.risks[0]
+    with pytest.raises(ValueError):
+        intent.risks = ()
+    with pytest.raises(ValueError):
+        case.scenario = "Changed"
+
+
+@pytest.mark.parametrize("field", ("scenario", "invariant"))
+@pytest.mark.parametrize("invalid", ("", " ", "invalid\x00text"))
+def test_request_boundary_sanitizes_invalid_nested_risk(
+    field: str, invalid: str
+) -> None:
+    checkpoint = _checkpoint_module()
+    payload = _request().model_dump(mode="json")
+    payload["architect_risk_intent"] = {
+        "risks": [
+            {
+                "kind": "state",
+                "scenario": "Restart",
+                "invariant": "Keep identity",
+                field: invalid,
+            }
+        ]
+    }
+    with pytest.raises(RedCheckpointError):
+        checkpoint.validate_red_checkpoint_request(
+            checkpoint.RedCheckpointRequest.model_construct(**payload)
+        )
 
 
 @pytest.mark.parametrize(

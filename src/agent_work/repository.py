@@ -1481,7 +1481,7 @@ class GitRepository:
         self, worktree: Path, evidence: RedCheckpointEvidence
     ) -> None:
         """Atomically bind one evidence-bearing commit to its empty checkpoint ref."""
-        message = evidence.model_dump_json()
+        message = evidence.model_dump_json(exclude_none=True)
         commit_environment = {
             **self._environment,
             "GIT_AUTHOR_NAME": "agent-work",
