@@ -5,7 +5,7 @@ summary: Look up loop commands, states, data, and limits.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-30
+last_reviewed: 2026-10-01
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to prepare capacity evidence before a worker launch.
@@ -347,11 +347,19 @@ before it accepts a result.
 | --- | --- |
 | Fresh coding work | The producer may establish coding authority only through this atomic boundary. There is no pre-checkpoint lane write, Red handoff result, or later controller checkpoint command. |
 | Atomic checkpoint transaction | The broker uses controller-observed candidate identity to reject drift, rerun the declared Red command, require its expected failure marker, and run the same read-only Ruff and Ty preflight on the exact changed test tree before binding evidence in one issue-namespaced checkpoint commit ref. An unavailable preflight, test-local errors, and tool or malformed-output failures block retention. It rechecks the candidate after preflight. Ty warnings may pass; trusted production ownership can allow missing module members, package exports, or new modules. It returns controller-owned checkpoint evidence to the still-live producer. |
+| Test command scope | Checkpoint commands start with exactly `uv run pytest`. Every remaining argument is a declared root `tests/` Python path or its node ID. Every declared path must have a target. Options, undeclared paths, traversal, controls, alternate separators, and malformed node IDs are rejected before execution. |
+| Test asset verification | Runtime supplies a trusted verifier. Missing verification blocks execution and retention. The controller verifies assets before and after execution, before snapshot and preflight, after preflight, and on retained replay. Each path component is checked without following symlinks. Surviving leaves must be regular files; a deleted leaf is allowed only below existing verified directories. |
+| Snapshot scope | Red snapshots accept only the declared test assets. Surviving assets must have Git regular-file mode `100644` or `100755`; symlink and gitlink modes are rejected. Topology and staged-mode checks around snapshot creation reject changed proof before accepting a tree. Generic candidate reads keep their production and content scope. |
 | Canonical correction | The broker returns at most one canonical rejection. It accepts one corrected request only when the controller freshly observes unchanged worktree evidence. A further request, changed paths, stale identity, missing marker, passing command, malformed input, or time-limit failure fails closed. |
 | Retained authority | A retained exact checkpoint binds the coding lane to its project, issue, branch, base, ref, tree, paths, test command, expected marker, nonzero exit, output digest, and `residual_details` for accepted missing APIs. The details have at most 128 entries within the 32 KiB evidence limit. This local recovery evidence is never pushed. |
 | Resume | The controller freshly reloads and verifies the checkpoint before a resumed coding workflow. Missing, stale, malformed, or mismatched identity stops the workflow. It does not recreate a checkpoint from model output. |
 | Failure and retention | The controller preserves the worktree and records only bounded sanitized diagnostics. It retains no raw worker content, rejected values, exception text, command output, unsafe paths, or obsolete Red-stage transport state. |
 | Content lane | Content work does not establish a Red checkpoint. |
+
+These checks detect and reject invalid Red capture. They do not confine the
+writable Red process before launch or prove OS denial of private-file access.
+They enable no host route, timer, or factory activation. The selected execution
+policy and native-hook refusals above still apply.
 
 ### `merge-request publish`
 

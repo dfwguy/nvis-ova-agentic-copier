@@ -3196,6 +3196,7 @@ def build_runtime_dependencies(
                 expected_tree_oid=expected_tree_oid,
                 read_evidence=load_red_checkpoint,
                 write_evidence=write_evidence,
+                verify_test_assets=getattr(repository, "verify_test_assets", None),
                 run_red_preflight=getattr(
                     repository,
                     "run_red_preflight",

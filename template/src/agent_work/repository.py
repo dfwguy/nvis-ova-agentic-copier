@@ -48,7 +48,12 @@ from .ledger import project_state_path
 from .models import AgentWorkConfig
 from .ports import CommandResult as CommandResultProtocol
 from .ports import CommandRunner
-from .red_checkpoint import RedCheckpointError, RedCheckpointEvidence, checkpoint_ref
+from .red_checkpoint import (
+    RedCheckpointError,
+    RedCheckpointEvidence,
+    checkpoint_ref,
+    validate_test_manifest,
+)
 from .red_commit import RedCommitDependencies
 from .red_preflight import production_module_exists
 from .red_preflight import run_red_preflight as check_red_preflight
@@ -534,6 +539,7 @@ class GitRepository:
         diagnostic_sink: Callable[[dict[str, object]], None] | None = None,
         read_git_blob: Callable[..., bytes] | None = None,
         test_execution_policy: TestExecutionPolicy | None = None,
+        asset_lstat: Callable[[Path], os.stat_result] = Path.lstat,
     ) -> None:
         self.config = config
         self._test_execution_policy = test_execution_policy
@@ -544,6 +550,7 @@ class GitRepository:
         )
         self._diagnostic_sink = diagnostic_sink or (lambda _diagnostic: None)
         self._read_git_blob = read_git_blob or run_subprocess_bytes
+        self._asset_lstat = asset_lstat
 
     def bind_test_execution_policy(self, policy: TestExecutionPolicy) -> bool:
         """Affirm the exact host policy used by the owning runtime composition."""
@@ -1633,6 +1640,70 @@ class GitRepository:
         self, worktree: Path, base_sha: str, paths: tuple[str, ...]
     ) -> str:
         """Snapshot only declared tests over a base tree without publishing a ref."""
+        return self._snapshot_tree(worktree, base_sha, paths, verify_tests=True)
+
+    def _test_asset_observations(
+        self, worktree: Path, paths: tuple[str, ...]
+    ) -> tuple[tuple[Path, tuple[int, ...] | None], ...]:
+        try:
+            validate_test_manifest(paths)
+            observations: dict[Path, tuple[int, ...] | None] = {}
+            for relative in paths:
+                target = worktree / relative
+                for component in (*reversed(target.parents), target):
+                    if component in observations:
+                        continue
+                    try:
+                        observed = self._asset_lstat(component)
+                    except FileNotFoundError:
+                        if component != target:
+                            raise RepositoryError(
+                                "test asset parent is missing"
+                            ) from None
+                        observations[component] = None
+                        continue
+                    if not (
+                        stat.S_ISREG(observed.st_mode)
+                        if component == target
+                        else stat.S_ISDIR(observed.st_mode)
+                    ):
+                        raise RepositoryError("test asset topology is invalid")
+                    observations[component] = (
+                        observed.st_dev,
+                        observed.st_ino,
+                        observed.st_mode,
+                    ) + (
+                        (observed.st_size, observed.st_mtime_ns, observed.st_ctime_ns)
+                        if component == target
+                        else ()
+                    )
+        except (OSError, ValueError) as error:
+            raise RepositoryError("test asset observation failed") from error
+        return tuple(observations.items())
+
+    def verify_test_assets(self, worktree: Path, paths: tuple[str, ...]) -> None:
+        """Reject following links or nonregular tests; allow verified leaf deletion."""
+        self._test_asset_observations(worktree, paths)
+
+    def _snapshot_tree(
+        self,
+        worktree: Path,
+        base_sha: str,
+        paths: tuple[str, ...],
+        *,
+        verify_tests: bool = False,
+    ) -> str:
+        observations = (
+            self._test_asset_observations(worktree, paths) if verify_tests else ()
+        )
+
+        def check_assets() -> None:
+            if (
+                verify_tests
+                and self._test_asset_observations(worktree, paths) != observations
+            ):
+                raise RepositoryError("test assets changed during snapshot")
+
         descriptor, index_name = tempfile.mkstemp(prefix="agent-work-red-index-")
         os.close(descriptor)
         index_path = Path(index_name)
@@ -1656,13 +1727,52 @@ class GitRepository:
 
         try:
             indexed("read-tree", base_sha)
+            check_assets()
             indexed("add", "--", *paths)
+            check_assets()
+            stage_before = (
+                self._test_stage_records(indexed, worktree, paths, observations)
+                if verify_tests
+                else None
+            )
             tree_oid = indexed("write-tree").stdout.strip()
+            check_assets()
+            if (
+                verify_tests
+                and self._test_stage_records(indexed, worktree, paths, observations)
+                != stage_before
+            ):
+                raise RepositoryError("staged test assets changed during snapshot")
+            check_assets()
             if not re.fullmatch(r"[0-9a-f]{40}", tree_oid):
                 raise RepositoryError("Red checkpoint tree identity is invalid")
             return tree_oid
         finally:
             index_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _test_stage_records(
+        indexed: Callable[..., CommandResultProtocol],
+        worktree: Path,
+        paths: tuple[str, ...],
+        observations: tuple[tuple[Path, tuple[int, ...] | None], ...],
+    ) -> tuple[str, ...]:
+        output = indexed("ls-files", "--stage", "-z", "--", *paths).stdout
+        records: dict[str, str] = {}
+        if output and not output.endswith("\0"):
+            raise RepositoryError("staged test manifest is invalid")
+        for entry in output.split("\0")[:-1]:
+            match = re.fullmatch(r"(100644|100755) ([0-9a-f]{40}) 0\t(.+)", entry)
+            if match is None or match[3] not in paths or match[3] in records:
+                raise RepositoryError("staged test manifest is invalid")
+            records[match[3]] = entry
+        observed = dict(observations)
+        surviving = {path for path in paths if observed[worktree / path] is not None}
+        if set(records) != surviving:
+            raise RepositoryError(
+                "staged test manifest does not match surviving assets"
+            )
+        return tuple(records[path] for path in sorted(records))
 
     def red_candidate_tree(
         self, worktree: Path, base_sha: str, paths: tuple[str, ...]
@@ -1670,7 +1780,7 @@ class GitRepository:
         """Observe exact current candidate content as an unpublished tree identity."""
         if not paths:
             return self._git("rev-parse", f"{base_sha}^{{tree}}", cwd=worktree)
-        return self.snapshot_test_tree(worktree, base_sha, paths)
+        return self._snapshot_tree(worktree, base_sha, paths)
 
     def stage_candidate(
         self, worktree: Path, base_sha: str, *, allow_base_ancestor: bool = False
