@@ -14,7 +14,6 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 
-from .candidate_boundary import CandidateSnapshot
 from .domain import WorkflowLane
 from .red_checkpoint import RedCheckpointEvidence
 from .state_machine import WORKFLOW_RECEIPTS
@@ -71,7 +70,7 @@ class WorkflowFacts:
     lane: WorkflowLane
     mode: str = "ordinary"
     red_checkpoint: RedCheckpointEvidence | None = None
-    candidate: CandidateSnapshot | None = None
+    candidate_tree: str | None = None
     validation: JudgeValidationReport | None = None
     receipts: tuple[object, ...] = ()
     applicability: tuple[RoleApplicability, ...] = ()
@@ -90,7 +89,7 @@ class WorkflowRoute:
 
 def route_workflow(facts: WorkflowFacts) -> WorkflowRoute:
     """Suggest roles from trusted inputs, without changing controller state."""
-    tree = facts.candidate.tree_oid if facts.candidate is not None else None
+    tree = facts.candidate_tree
     receipts = tuple(
         receipt
         for receipt in facts.receipts
@@ -190,7 +189,7 @@ def route_workflow(facts: WorkflowFacts) -> WorkflowRoute:
             return result(("$agent-policy-writer",))
         if "$agent-policy-writer" in unresolved:
             return result(("$architect",))
-        if facts.candidate is None:
+        if facts.candidate_tree is None:
             return result(("$tdd-green", "$diataxis-writer"))
         early = tuple(
             role for role in ("$tdd-green", "$diataxis-writer") if not has(role)
@@ -211,7 +210,7 @@ def route_workflow(facts: WorkflowFacts) -> WorkflowRoute:
         reviews = _CODING_REVIEWS
         finalizer = "$tdd-finalizer"
     else:
-        if facts.candidate is None:
+        if facts.candidate_tree is None:
             return result(("$documentation-writer",))
         if not has("$documentation-writer"):
             return result(("$documentation-writer",))
