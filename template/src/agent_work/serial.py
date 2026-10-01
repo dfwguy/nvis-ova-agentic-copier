@@ -1096,7 +1096,14 @@ def _broker_artifact_builder(
                 raise WorkerProtocolError(
                     "controller_invariant.red_checkpoint", "request was rejected"
                 ) from error
-            if accepted_checkpoint != reloaded:
+            if (
+                accepted_checkpoint != reloaded
+                or accepted_checkpoint.project_id != record.project_id
+                or accepted_checkpoint.issue_iid != record.issue_iid
+                or accepted_checkpoint.source_branch != record.source_branch
+                or accepted_checkpoint.base_sha != record.source_sha
+                or accepted_checkpoint.tree_oid != candidate_tree
+            ):
                 raise WorkerProtocolError(
                     "controller_invariant.red_checkpoint", "checkpoint did not reload"
                 )
@@ -1364,7 +1371,14 @@ def _retained_red_checkpoint(
             record.project_id, record.issue_iid, record.source_sha
         )
         if current is not None:
-            return current
+            return (
+                current
+                if current.project_id == record.project_id
+                and current.issue_iid == record.issue_iid
+                and current.source_branch == record.source_branch
+                and current.base_sha == record.source_sha
+                else None
+            )
     audit = record.audit_evidence
     checkpoint = None if audit in {None, "unknown"} else audit.red_checkpoint
     if checkpoint is None:

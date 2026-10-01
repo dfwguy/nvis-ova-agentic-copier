@@ -378,6 +378,49 @@ def test_handoff_masks_noncanonical_gateway_error() -> None:
     assert "builder_input.change_summary" not in str(result)
 
 
+@pytest.mark.parametrize(
+    "risk",
+    (
+        {"kind": "state", "scenario": "", "invariant": "Keep identity"},
+        {"kind": "unknown", "scenario": "Restart", "invariant": "Keep identity"},
+        {"kind": "protocol", "scenario": "Replay", "invariant": "\x00"},
+        {
+            "kind": "state",
+            "scenario": "Restart",
+            "invariant": "Keep identity",
+            "nonce": PRIVATE_NONCE,
+        },
+    ),
+)
+def test_handoff_rejects_invalid_nested_risk_before_capture_gateway(
+    risk: dict[str, object],
+) -> None:
+    calls: list[WorkerResultBuildInput] = []
+
+    def gateway(intent: WorkerResultBuildInput) -> dict[str, object]:
+        calls.append(intent)
+        return {"accepted": True}
+
+    intent = {
+        **INTENT,
+        "workflow_lane": "coding",
+        "result_kind": "red_checkpoint_ready",
+        "red_checkpoint_request": {
+            "argv": ["uv", "run", "pytest", "tests/test_widget.py::test_red"],
+            "expected_failure": "assert expected failure",
+            "test_paths": ["tests/test_widget.py"],
+            "architect_risk_intent": {"risks": [risk]},
+        },
+    }
+
+    async def submit(client: Any) -> Any:
+        return await client.call_tool("worker_submit_result", {"intent": intent})
+
+    result = _round_trip(_server(gateway), submit)
+    assert result.is_error is True
+    assert calls == []
+
+
 def _red_handoff_session(
     tmp_path: Path, *, symlink_leaf: bool = False
 ) -> tuple[

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import fcntl
 import hashlib
 import importlib
@@ -24,7 +25,7 @@ import sys
 import threading
 import time
 from base64 import b64encode
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace
@@ -35,6 +36,7 @@ from typing import Any, ClassVar, Literal, cast
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
+from mcp import Client
 
 from agent_work import (
     domain,
@@ -104,6 +106,7 @@ from agent_work.red_checkpoint import (
 from agent_work.red_commit import RedCommitDependencies
 from agent_work.repository import (
     CommandResult,
+    GitRepository,
     LegacyPublicationCandidate,
     PublicationError,
     RepositoryError,
@@ -2487,7 +2490,7 @@ class ProducerOwnedRedThenGreenInvoker:
                 artifact = json.loads(invocation.worker_result)
                 assert artifact[
                     "red_checkpoint"
-                ] == self.accepted_checkpoint.model_dump(mode="json")
+                ] == self.accepted_checkpoint.model_dump(mode="json", exclude_none=True)
                 return invocation
             finally:
                 self.producer_is_active = False
@@ -26822,17 +26825,39 @@ def _run_pending_coding_probe(
         [Callable[[str, str | None, dict[str, object] | None], dict[str, object]]],
         None,
     ],
+    *,
+    checkpoint_updates: dict[str, object] | None = None,
+    audit_updates: dict[str, object] | None = None,
+    reload_updates: dict[str, object] | None = None,
+    queries: list[tuple[int, int, str]] | None = None,
+    prompts: list[str] | None = None,
 ) -> LedgerRecord | None:
     config = _config(tmp_path)
     ledger = JsonLedger(config.state_root, clock=lambda: NOW)
     original = _record(
         tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
     )
+    checkpoint = RedCheckpointEvidence.model_validate(
+        _red_checkpoint_evidence_for_segment(
+            original, tree_oid=repository.red_tree
+        ).model_dump(mode="json")
+        | (checkpoint_updates or {})
+    )
+
+    def altered(updates: dict[str, object] | None) -> RedCheckpointEvidence:
+        payload = checkpoint.model_dump(mode="json") | (updates or {})
+        payload["ref"] = checkpoint_ref(payload["issue_iid"], payload["base_sha"])
+        return RedCheckpointEvidence.model_validate(payload)
+
+    audit = _completed_coding_audit().model_copy(
+        update={"red_checkpoint": altered(audit_updates)}
+    )
     ledger.persist(
         original.model_copy(
             update={
                 "source_sha": repository.green_sha,
                 "main_sha": repository.target_sha,
+                "audit_evidence": audit,
             }
         )
     )
@@ -26856,10 +26881,22 @@ def _run_pending_coding_probe(
             ]
             | None = None,
         ) -> WorkerInvocation:
-            del checkout, prompt, timeout, broker_request, build_artifact
+            del checkout, timeout, broker_request, build_artifact
+            if prompts is not None:
+                prompts.append(prompt)
             assert candidate_action is not None
             probe(candidate_action)
             return WorkerInvocation(1, "", "probe complete")
+
+    def load(
+        project_id: int, issue_iid: int, base_sha: str
+    ) -> RedCheckpointEvidence | None:
+        query = (project_id, issue_iid, base_sha)
+        if queries is not None:
+            queries.append(query)
+        if query != (original.project_id, original.issue_iid, checkpoint.base_sha):
+            return None
+        return altered(reload_updates)
 
     return run_segment(
         ledger=ledger,
@@ -26868,9 +26905,7 @@ def _run_pending_coding_probe(
         invoke=ProbeInvoker(),
         timeout_seconds=10,
         now=NOW,
-        load_red_checkpoint=lambda *_args: _red_checkpoint_evidence_for_segment(
-            original, tree_oid=repository.red_tree
-        ),
+        load_red_checkpoint=load,
     )
 
 
@@ -27811,3 +27846,564 @@ def test_committed_candidate_read_rejects_identity_drift_during_repository_read(
     assert drifting.reads == [
         ("inventory" if mode == "inventory" else "range", _COMMITTED_READ_SHA)
     ]
+
+
+_RISK_TRANSPORT = {
+    "risks": [
+        {
+            "kind": "state",
+            "scenario": "Restart after captured Red",
+            "invariant": "Preserve checkpoint identity",
+        },
+        {
+            "kind": "protocol",
+            "scenario": "Replay a worker result",
+            "invariant": "Reject stale identity",
+        },
+    ]
+}
+
+
+class _RiskCompositionGitLab(FakeGitLab):
+    def lifecycle_label_drift(self) -> tuple[str, ...]:
+        return ()
+
+    def ensure_lifecycle_labels(self) -> None:
+        pass
+
+
+class _RiskCheckpointRepository(FakeRepository):
+    """Inject repository observations and durable encoded checkpoint storage."""
+
+    def __init__(self, config: AgentWorkConfig) -> None:
+        super().__init__(config)
+        self.paths = ("tests/test_agent_work_serial_runtime.py",)
+        asset = config.state_root / "worktrees" / "12" / self.paths[0]
+        asset.parent.mkdir(parents=True, exist_ok=True)
+        asset.write_text("def test_red() -> None:\n    assert False\n")
+
+        def reject_command(
+            command: tuple[str, ...],
+            *,
+            stdin: str | None = None,
+            timeout_seconds: float | None = None,
+            environment: Mapping[str, str] | None = None,
+            current_directory: Path | None = None,
+        ) -> CommandResultProtocol:
+            del command, stdin, timeout_seconds, environment, current_directory
+            pytest.fail("test asset verification must not execute commands")
+
+        self.asset_repository = GitRepository(config, reject_command)
+        self.encoded: str | None = None
+        self.red_runs = 0
+        self.writes = 0
+        self.producer_active = False
+        self.reload_mutation: dict[str, object] = {}
+
+    def verify_test_assets(self, worktree: Path, paths: tuple[str, ...]) -> None:
+        """Delegate asset safety checks to the real repository owner."""
+        self.asset_repository.verify_test_assets(worktree, paths)
+
+    def checkpoint_tree(self, ref: str) -> str | None:
+        del ref
+        return self.candidate_tree if self.encoded is not None else None
+
+    def run_red_command(self, worktree: Path, argv: tuple[str, ...]) -> CommandResult:
+        del worktree
+        assert self.producer_active
+        assert argv == _red_checkpoint_request_for_segment().argv
+        self.red_runs += 1
+        return CommandResult(1, "assert expected failure\n", "")
+
+    def snapshot_test_tree(
+        self, worktree: Path, base_sha: str, paths: tuple[str, ...]
+    ) -> str:
+        del worktree
+        assert base_sha == self.current_head
+        assert paths == self.paths
+        return self.candidate_tree
+
+    def run_red_preflight(
+        self, worktree: Path, paths: tuple[str, ...], tree: str
+    ) -> CommandResult:
+        del worktree
+        assert paths == self.paths and tree == self.candidate_tree
+        return CommandResult(0, '{"residual_diagnostics":[],"residual_details":[]}', "")
+
+    def write_red_checkpoint_ref(
+        self, worktree: Path, evidence: RedCheckpointEvidence
+    ) -> None:
+        del worktree
+        assert self.producer_active
+        assert evidence.tree_oid == self.candidate_tree
+        assert self.encoded is None
+        self.writes += 1
+        self.encoded = evidence.model_dump_json()
+
+    def read_red_checkpoint_ref(
+        self, worktree: Path, project_id: int, issue_iid: int, base_sha: str
+    ) -> RedCheckpointEvidence | None:
+        del worktree, project_id, issue_iid, base_sha
+        if self.encoded is None:
+            return None
+        payload = json.loads(self.encoded) | self.reload_mutation
+        if "issue_iid" in self.reload_mutation or "base_sha" in self.reload_mutation:
+            payload["ref"] = checkpoint_ref(payload["issue_iid"], payload["base_sha"])
+        return RedCheckpointEvidence.model_validate(payload)
+
+
+class _RiskMcpInvoker:
+    """Submit Red through actual MCP and the controller's live broker."""
+
+    supports_worker_result_broker = True
+
+    def __init__(
+        self,
+        repository: _RiskCheckpointRepository,
+        scratch: Path,
+        *,
+        include_intent: bool = True,
+    ) -> None:
+        self.repository = repository
+        self.scratch = scratch
+        self.include_intent = include_intent
+        self.prompts: list[str] = []
+        self.artifact: bytes | None = None
+        self.responses: list[Any] = []
+
+    def preflight(self) -> None:
+        pass
+
+    def invoke(
+        self,
+        checkout: Path,
+        prompt: str,
+        timeout: int,
+        *,
+        broker_request: WorkerResultBrokerRequest | None = None,
+        build_artifact: Callable[[bytes], bytes] | None = None,
+        candidate_action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ]
+        | None = None,
+    ) -> WorkerInvocation:
+        del checkout, candidate_action
+        self.prompts.append(prompt)
+        if self.repository.encoded is not None and not self.repository.reload_mutation:
+            return WorkerInvocation(1, "", "Green reached verified retained context")
+        assert broker_request is not None and build_artifact is not None
+        worker = importlib.import_module("agent_work.worker")
+        server_module = importlib.import_module("agent_work.mcp_server")
+        session = worker.create_worker_result_broker(
+            broker_request,
+            build_artifact=build_artifact,
+            timeout_seconds=timeout,
+            temporary_directory=self.scratch,
+        )
+        client_request = worker.WorkerResultBrokerClientRequest(
+            nonce=broker_request.nonce, issue_iid=broker_request.issue_iid
+        )
+
+        def gateway(intent: Any) -> dict[str, object]:
+            return worker.submit_worker_result_to_broker(
+                session.socket_path,
+                client_request,
+                intent.model_dump_json(exclude_none=True).encode(),
+                timeout_seconds=timeout,
+            )
+
+        request = _red_checkpoint_request_for_segment().model_dump(mode="json")
+        if self.include_intent:
+            request["architect_risk_intent"] = _RISK_TRANSPORT
+        intent = {
+            "workflow_lane": "coding",
+            "result_kind": "red_checkpoint_ready",
+            "change_summary": "Capture verified Red",
+            "next_action": "Resume Green",
+            "red_checkpoint_request": request,
+        }
+        server = server_module.create_worker_handoff_mcp_server(
+            gateway, issue_iid=broker_request.issue_iid
+        )
+
+        async def submit() -> Any:
+            async with Client(server) as client:
+                return await client.call_tool(
+                    "worker_submit_result", {"intent": intent}
+                )
+
+        self.repository.producer_active = True
+        try:
+            response = asyncio.run(submit())
+            self.responses.append(response)
+            try:
+                self.artifact = session.close_and_capture()
+            except WorkerProtocolError as error:
+                return WorkerInvocation(0, protocol_error=error)
+            assert response.structured_content == {"accepted": True}
+            assert self.repository.encoded is not None
+            return WorkerInvocation(0, worker_result=self.artifact)
+        finally:
+            self.repository.producer_active = False
+
+
+def _risk_runtime(
+    config: AgentWorkConfig,
+    repository: _RiskCheckpointRepository,
+    invoke: _RiskMcpInvoker,
+) -> RuntimeDependencies:
+    return runtime.build_runtime_dependencies(
+        debug=False,
+        composition=runtime.RuntimeCompositionDependencies(
+            config=config,
+            logger=logging.getLogger("risk-transport-test"),
+            gitlab=_RiskCompositionGitLab(),
+            repository=repository,
+            invoke=invoke,
+            checkpoint_store=runtime.RedCheckpointStore(config.state_root),
+        ),
+    )
+
+
+def _run_risk_segment(
+    wired: RuntimeDependencies, *, yield_after_red: bool = False
+) -> LedgerRecord | None:
+    return run_segment(
+        ledger=wired.ledger,
+        gitlab=wired.gitlab,
+        repository=wired.repository,
+        invoke=wired.invoke,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=wired.load_red_checkpoint,
+        apply_red_checkpoint=wired.apply_red_checkpoint,
+        observe_interactive_validation=lambda: yield_after_red,
+    )
+
+
+@pytest.mark.parametrize("include_intent", (False, True))
+def test_actual_mcp_runtime_capture_retains_optional_risk_before_green(
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory, *, include_intent: bool
+) -> None:
+    config = _config(tmp_path)
+    repository = _RiskCheckpointRepository(config)
+    invoke = _RiskMcpInvoker(
+        repository, tmp_path_factory.mktemp("r"), include_intent=include_intent
+    )
+    wired = _risk_runtime(config, repository, invoke)
+    record = wired.ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"workflow_lane": WorkflowLane.UNKNOWN})
+    )
+    _run_risk_segment(wired)
+    assert repository.red_runs == repository.writes == 1
+    assert len(invoke.prompts) == 2
+    assert wired.load_red_checkpoint is not None
+    retained = wired.load_red_checkpoint(
+        record.project_id, record.issue_iid, record.source_sha or ""
+    )
+    assert retained is not None and invoke.artifact is not None
+    assert (
+        retained.project_id,
+        retained.issue_iid,
+        retained.source_branch,
+        retained.base_sha,
+        retained.tree_oid,
+    ) == (
+        record.project_id,
+        record.issue_iid,
+        record.source_branch,
+        record.source_sha,
+        repository.candidate_tree,
+    )
+    payload = json.loads(invoke.artifact)
+    assert payload["red_checkpoint"] == retained.model_dump(
+        mode="json", exclude_none=True
+    )
+    expected = _RISK_TRANSPORT if include_intent else None
+    assert (
+        json.loads(repository.encoded or "{}").get("architect_risk_intent") == expected
+    )
+    if include_intent:
+        assert retained.model_dump(mode="json")["architect_risk_intent"] == expected
+        assert (
+            json.dumps(expected, ensure_ascii=False, separators=(",", ":"))
+            in invoke.prompts[1]
+        )
+    else:
+        assert retained.model_dump(mode="json")["architect_risk_intent"] is None
+
+
+def test_fresh_controller_recovers_encoded_risk_without_recapture(
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    config = _config(tmp_path)
+    repository = _RiskCheckpointRepository(config)
+    first_invoke = _RiskMcpInvoker(repository, tmp_path_factory.mktemp("r"))
+    first = _risk_runtime(config, repository, first_invoke)
+    first.ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"workflow_lane": WorkflowLane.UNKNOWN})
+    )
+    captured = _run_risk_segment(first, yield_after_red=True)
+    assert captured is not None and captured.state is RunnerState.EXECUTING
+    assert len(first_invoke.prompts) == 1
+    encoded = repository.encoded
+    resumed_invoke = _RiskMcpInvoker(repository, tmp_path_factory.mktemp("r"))
+    resumed = _risk_runtime(config, repository, resumed_invoke)
+    _run_risk_segment(resumed)
+    assert repository.encoded == encoded
+    assert repository.red_runs == repository.writes == 1
+    assert len(resumed_invoke.prompts) == 1
+    assert (
+        json.dumps(_RISK_TRANSPORT, separators=(",", ":")) in resumed_invoke.prompts[0]
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        {"architect_risk_intent": None},
+        {
+            "architect_risk_intent": {
+                "risks": [
+                    {
+                        "kind": "state",
+                        "scenario": "Changed reload",
+                        "invariant": "Keep identity",
+                    }
+                ]
+            }
+        },
+        {"project_id": 99},
+        {"issue_iid": 99},
+        {"source_branch": "agent/foreign"},
+        {"base_sha": "f" * 40},
+        {"tree_oid": "f" * 40},
+    ),
+)
+def test_actual_mcp_capture_rejects_changed_reload_without_green_or_overwrite(
+    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    mutation: dict[str, object],
+) -> None:
+    config = _config(tmp_path)
+    repository = _RiskCheckpointRepository(config)
+    repository.reload_mutation = mutation
+    invoke = _RiskMcpInvoker(repository, tmp_path_factory.mktemp("r"))
+    wired = _risk_runtime(config, repository, invoke)
+    wired.ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"workflow_lane": WorkflowLane.UNKNOWN})
+    )
+    result = _run_risk_segment(wired)
+    assert result is not None and result.state is not RunnerState.PUBLISHING
+    assert invoke.artifact is None
+    assert len(invoke.prompts) == 1
+    assert repository.writes == 1
+    assert (
+        json.loads(repository.encoded or "{}")["architect_risk_intent"]
+        == _RISK_TRANSPORT
+    )
+    assert invoke.responses[0].is_error is True
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        {"project_id": 99},
+        {"issue_iid": 99},
+        {"source_branch": "agent/foreign"},
+        {"base_sha": "f" * 40},
+    ),
+)
+@pytest.mark.parametrize("include_intent", (False, True))
+def test_current_retained_lookup_rejects_foreign_checkpoint_before_green_context(
+    tmp_path: Path, mutation: dict[str, object], *, include_intent: bool
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"workflow_lane": WorkflowLane.UNKNOWN})
+    )
+    payload = (
+        _red_checkpoint_evidence_for_segment(record).model_dump(mode="json")
+        | ({"architect_risk_intent": _RISK_TRANSPORT} if include_intent else {})
+        | mutation
+    )
+    payload["ref"] = checkpoint_ref(payload["issue_iid"], payload["base_sha"])
+    foreign = RedCheckpointEvidence.model_validate(payload)
+    invoke = FakeInvoker(returncode=1)
+    run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=FakeRepository(config),
+        invoke=invoke,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda *_args: foreign,
+    )
+    assert all(foreign.ref not in prompt for prompt in invoke.prompts)
+
+
+def test_live_owner_rejects_coherent_checkpoint_for_different_candidate_tree(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = ledger.persist(
+        _record(
+            tmp_path, state=RunnerState.EXECUTING, phase=WorkflowPhase.WORKFLOW
+        ).model_copy(update={"workflow_lane": WorkflowLane.UNKNOWN})
+    )
+    repository = FakeRepository(config)
+    repository.paths = _red_checkpoint_request_for_segment().test_paths
+    foreign = RedCheckpointEvidence.model_validate(
+        _red_checkpoint_evidence_for_segment(record, tree_oid="f" * 40).model_dump(
+            mode="json"
+        )
+        | {"architect_risk_intent": _RISK_TRANSPORT}
+    )
+    retained: RedCheckpointEvidence | None = None
+
+    def apply_checkpoint(
+        _issue: int, _request: RedCheckpointRequest, tree: str
+    ) -> RedCheckpointEvidence:
+        nonlocal retained
+        assert tree == repository.candidate_tree and tree != foreign.tree_oid
+        retained = foreign
+        return foreign
+
+    invoke = RedThenGreenInvoker(
+        repository,
+        red_checkpoint_request_updates={"architect_risk_intent": _RISK_TRANSPORT},
+    )
+    outcome = run_segment(
+        ledger=ledger,
+        gitlab=FakeGitLab(),
+        repository=repository,
+        invoke=invoke,
+        timeout_seconds=10,
+        now=NOW,
+        apply_red_checkpoint=apply_checkpoint,
+        load_red_checkpoint=lambda *_args: retained,
+    )
+    assert outcome is not None and outcome.state is not RunnerState.PUBLISHING
+    assert len(invoke.prompts) == 1
+
+
+@pytest.mark.parametrize("include_intent", (False, True))
+def test_historical_checkpoint_recovers_after_current_base_miss_and_validates_pending_tree(
+    tmp_path: Path, *, include_intent: bool
+) -> None:
+    repository = _PendingCodingMergeRepository(_config(tmp_path))
+    queries: list[tuple[int, int, str]] = []
+    prompts: list[str] = []
+
+    def probe(
+        action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ],
+    ) -> None:
+        tree = cast(str, action("stage", None, None)["candidate_tree"])
+        validated = action("validate", tree, None)
+        assert validated["state"] == "terminal-success"
+        assert (validated["source_sha"], validated["target_sha"]) == (
+            repository.green_sha,
+            repository.target_sha,
+        )
+        assert action("read", tree, {"mode": "changed_paths"})["candidate_tree"] == tree
+
+    _run_pending_coding_probe(
+        tmp_path,
+        repository,
+        probe,
+        checkpoint_updates=(
+            {"architect_risk_intent": _RISK_TRANSPORT} if include_intent else {}
+        ),
+        queries=queries,
+        prompts=prompts,
+    )
+    assert queries[:2] == [
+        (310967, 12, repository.green_sha),
+        (310967, 12, repository.red_parent),
+    ]
+    assert repository.judged_paths == [repository.paths]
+    assert repository.red_commits == repository.hook_runs == 0
+    assert len(prompts) == 1
+    serialized = json.dumps(_RISK_TRANSPORT, separators=(",", ":"))
+    assert (serialized in prompts[0]) is include_intent
+
+
+@pytest.mark.parametrize("stale_side", ("audit", "reload"))
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        {"architect_risk_intent": None},
+        {
+            "architect_risk_intent": {
+                "risks": [
+                    {
+                        "kind": "state",
+                        "scenario": "STALE_HISTORICAL_RISK",
+                        "invariant": "Keep identity",
+                    }
+                ]
+            }
+        },
+        {"project_id": 99},
+        {"issue_iid": 99},
+        {"source_branch": "agent/foreign"},
+        {"base_sha": "f" * 40},
+        {"tree_oid": "f" * 40},
+    ),
+)
+def test_historical_checkpoint_rejects_independent_stale_audit_or_exact_reload(
+    tmp_path: Path, stale_side: str, mutation: dict[str, object]
+) -> None:
+    repository = _PendingCodingMergeRepository(_config(tmp_path))
+    queries: list[tuple[int, int, str]] = []
+    prompts: list[str] = []
+    probes: list[str] = []
+
+    def probe(
+        action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ],
+    ) -> None:
+        tree = cast(str, action("stage", None, None)["candidate_tree"])
+        probes.append("staged")
+        with pytest.raises(WorkerProtocolError):
+            action("commit", tree, None)
+        with pytest.raises(WorkerProtocolError):
+            action("read", tree, {"mode": "changed_paths"})
+        with pytest.raises(WorkerProtocolError):
+            action(
+                "review",
+                tree,
+                {"verdict": "approved", "summary": "stale proof", "findings": []},
+            )
+
+    _run_pending_coding_probe(
+        tmp_path,
+        repository,
+        probe,
+        checkpoint_updates={"architect_risk_intent": _RISK_TRANSPORT},
+        audit_updates=mutation if stale_side == "audit" else None,
+        reload_updates=mutation if stale_side == "reload" else None,
+        queries=queries,
+        prompts=prompts,
+    )
+    assert queries[0] == (310967, 12, repository.green_sha)
+    assert probes == ["staged"]
+    assert repository.judged_paths == []
+    assert repository.reconcile_calls == []
+    assert repository.red_commits == repository.hook_runs == 0
+    assert len(prompts) == 1
+    assert json.dumps(_RISK_TRANSPORT, separators=(",", ":")) not in prompts[0]
+    assert "STALE_HISTORICAL_RISK" not in prompts[0]

@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Any, Self, cast
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from agent_work.cli import build_parser, main
 from agent_work.domain import RunnerState, WorkflowLane, WorkflowPhase, WorkKind
@@ -2637,3 +2639,122 @@ def test_broker_rejects_a_client_request_bound_to_another_invocation(
             session.close_and_capture()
         except WorkerProtocolError:
             pass
+
+
+@given(
+    scenario=st.text(
+        alphabet=st.characters(
+            blacklist_categories=("Cs",), blacklist_characters="\x00"
+        ),
+        min_size=1,
+        max_size=100,
+    ).filter(lambda value: bool(value.strip()))
+)
+def test_risk_intent_survives_envelope_and_accepted_artifact_pure_roundtrip(
+    scenario: str,
+) -> None:
+    worker = importlib.import_module("agent_work.worker")
+    checkpoint = importlib.import_module("agent_work.red_checkpoint")
+    intent = checkpoint.ArchitectRiskIntent(
+        risks=(
+            checkpoint.ArchitectRiskCase(
+                kind="protocol", scenario=scenario, invariant="Reject replay"
+            ),
+        )
+    )
+    record = _record(Path("/isolated")).model_copy(
+        update={"workflow_lane": WorkflowLane.UNKNOWN}
+    )
+    assert record.source_sha is not None
+    path = "tests/test_widget.py"
+    request = checkpoint.RedCheckpointRequest.model_validate(
+        {
+            "argv": ("uv", "run", "pytest", path),
+            "expected_failure": "failure",
+            "test_paths": (path,),
+            "architect_risk_intent": intent,
+        }
+    )
+    evidence = checkpoint.RedCheckpointEvidence.model_validate(
+        {
+            "project_id": record.project_id,
+            "issue_iid": record.issue_iid,
+            "source_branch": record.source_branch,
+            "base_sha": record.source_sha,
+            "tree_oid": "b" * 40,
+            "ref": f"refs/agent-work/red-checkpoints/81/{record.source_sha}",
+            "argv": request.argv,
+            "expected_failure": request.expected_failure,
+            "test_paths": request.test_paths,
+            "exit_code": 1,
+            "output_sha256": "d" * 64,
+            "architect_risk_intent": intent,
+        }
+    )
+    build_input = worker.WorkerResultBuildInput(
+        workflow_lane=WorkflowLane.CODING,
+        result_kind="red_checkpoint_ready",
+        change_summary="Ready to capture Red",
+        next_action="Resume Green",
+        red_checkpoint_request=request,
+    )
+    result = worker.build_worker_result(
+        record, build_input, changed_paths=(path,), red_checkpoint=evidence
+    )
+    assert (
+        worker.build_worker_result(
+            record, build_input, changed_paths=(path,), red_checkpoint=evidence
+        )
+        == result
+    )
+    artifact = worker.build_worker_result_artifact(
+        record,
+        result,
+        nonce=_request().nonce,
+        changed_paths=(path,),
+        red_checkpoint=evidence,
+    )
+    parsed = worker.parse_worker_result_accepted_artifact(
+        artifact, request=_request(), changed_paths=(path,)
+    )
+    assert parsed.red_checkpoint == evidence
+    assert parsed.envelope.red_checkpoint_request == request
+    assert (
+        worker.build_worker_result_artifact(
+            record,
+            result,
+            nonce=_request().nonce,
+            changed_paths=(path,),
+            red_checkpoint=evidence,
+        )
+        == artifact
+    )
+    for mismatch in (
+        None,
+        intent.model_copy(
+            update={"risks": tuple(reversed(intent.risks)) + intent.risks}
+        ),
+    ):
+        conflicting = evidence.model_copy(update={"architect_risk_intent": mismatch})
+        with pytest.raises(WorkerProtocolError):
+            worker.build_worker_result_artifact(
+                record,
+                result,
+                nonce=_request().nonce,
+                changed_paths=(path,),
+                red_checkpoint=conflicting,
+            )
+        payload = json.loads(artifact)
+        payload["red_checkpoint"] = conflicting.model_dump(mode="json")
+        with pytest.raises(WorkerProtocolError):
+            worker.parse_worker_result_accepted_artifact(
+                json.dumps(payload).encode(), request=_request(), changed_paths=(path,)
+            )
+    for fresh in (
+        replace(_request(), nonce="f" * 32),
+        replace(_request(), ledger_revision=8),
+    ):
+        with pytest.raises(WorkerProtocolError):
+            worker.parse_worker_result_accepted_artifact(
+                artifact, request=fresh, changed_paths=(path,)
+            )
