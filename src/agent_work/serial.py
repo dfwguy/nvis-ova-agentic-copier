@@ -103,6 +103,7 @@ from .repository import (
     ReconciliationTargetChanged,
     RepositoryError,
     RepositoryTransientError,
+    _UnsupportedTestExecutionHook,
 )
 from .state_machine import (
     apply_worker_result,
@@ -5893,6 +5894,13 @@ def _publish(
                         "Review the retained Green source and start a fresh "
                         "reconciliation against the current target."
                     ),
+                )
+            except _UnsupportedTestExecutionHook:
+                return _block_publication_identity(
+                    record,
+                    ledger=ledger,
+                    gitlab=gitlab,
+                    summary="unsupported_hook",
                 )
             except RepositoryError:
                 return _block_publication_identity(

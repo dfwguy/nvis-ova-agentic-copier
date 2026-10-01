@@ -299,6 +299,42 @@ Compare the commit message with the reviewed message file separately. Ordinary
 `interactive-commit green` remains the single-parent Green commit for work
 without a pending merge.
 
+### Optional test execution policy
+
+`TestExecutionPolicy` is an optional, host-owned Python boundary for Red test
+execution. A trusted host supplies it through runtime dependency injection.
+The default trusted workflow stays unchanged. Environment values, model text,
+and public JSON cannot select this policy or grant execution authority.
+
+This boundary supplies grouped execution ports and runtime consumers. It does
+not include a production OS confinement backend, a working confined Red route,
+or a native-hook adapter. The host route stays closed until a real backend
+and host proof exist. Positive tests with fake ports prove caller and proof
+logic; they do not prove host isolation. These parts remain work for issue 387.
+
+A selected policy binds the exact project, issue, ledger revision, branch,
+base, candidate tree, test paths, and session nonce. It must also bind five
+private known-file categories: `auth`, `source_auth`, `controller`,
+`git_admin`, and `sibling`. Proof must cover each category independently and
+match the expected path manifest. Empty, incomplete, duplicate, or changed
+coverage cannot authorize a payload. Proof reports include no private paths or file
+bytes. The public probe producer and parser support future backend proof;
+they do not grant host authority.
+
+Red execution checks assets and proof, closes input descriptors, and executes
+through the supplied ports. It then stops descendants, checks assets, and
+cleans up.
+Only a complete lifecycle can return a command result. Refusal raises a safe
+error and cannot count as an expected Red failure or retain a checkpoint.
+Missing providers or unknown host support refuse with no ordinary-process
+fallback. An unproven sandbox audit uses `sandbox_or_probe_failed` with
+`cause_proven` false.
+
+Every native-hook operation is refused when this policy is selected, including
+Judge validation and serial Green commits. The backend, host proof, and hook
+adapter remain required before that route can run. This boundary enables no
+role profile or factory loop.
+
 ### Coding workflow Red boundary
 
 A coding workflow creates its Red checkpoint while its producer is still live.
