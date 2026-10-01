@@ -28,6 +28,7 @@ from xml.etree import ElementTree
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .ports import CommandResult, CommandRunner
+from .test_executor import TestExecutionPolicy
 from .test_timing import is_safe_timing_case_id, safe_timing_case_id
 from .timing_admission import TimingAdmissionLease
 from .timing_capture import (
@@ -596,6 +597,7 @@ class JudgeValidationDependencies:
     run_license_preflight: Callable[[str], object]
     monotonic_clock: Callable[[], float]
     sleeper: Callable[[float], None]
+    test_execution_policy: TestExecutionPolicy | None = None
     run_hook: (
         Callable[[tuple[str, ...], TimingAdmissionLease | None], CommandResult] | None
     ) = None
@@ -1399,6 +1401,8 @@ def run_judge_validation(
     *, candidate_tree: str, apply: bool, dependencies: JudgeValidationDependencies
 ) -> JudgeValidationReport:
     """Preview or run exactly one hook for the current, locked staged tree."""
+    if apply and dependencies.test_execution_policy is not None:
+        dependencies.test_execution_policy.require_native_hook("judge")
     if not _valid_tree(candidate_tree):
         raise JudgeValidationError("candidate tree is malformed")
     if not apply:

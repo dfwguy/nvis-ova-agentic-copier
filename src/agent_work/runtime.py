@@ -23,6 +23,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
+from . import test_executor
 from .classification import ClassificationError, classify_work
 from .domain import (
     ACTIVE_STATES,
@@ -148,6 +149,19 @@ from .timing_admission import (
     read_validation_admission,
 )
 from .worker import AgentInvoker, is_safe_worker_result_diagnostic
+
+# Public host-embedding API, owned and implemented by test_executor.
+OpenedTestAsset = test_executor.OpenedTestAsset
+PreparedTestExecution = test_executor.PreparedTestExecution
+TestExecutionError = test_executor.TestExecutionError
+TestExecutionIdentity = test_executor.TestExecutionIdentity
+TestExecutionPolicy = test_executor.TestExecutionPolicy
+TestExecutionRequest = test_executor.TestExecutionRequest
+TestExecutorPorts = test_executor.TestExecutorPorts
+TestProtectedPaths = test_executor.TestProtectedPaths
+build_test_execution_probe = test_executor.build_test_execution_probe
+create_test_execution_policy = test_executor.create_test_execution_policy
+parse_test_execution_probe = test_executor.parse_test_execution_probe
 
 
 class RecoveryIneligibleError(RuntimeError):
@@ -3005,6 +3019,7 @@ def build_runtime_dependencies(
     *,
     debug: bool,
     composition: RuntimeCompositionDependencies | None = None,
+    test_execution_policy: TestExecutionPolicy | None = None,
 ) -> RuntimeDependencies:
     """Wire real process and filesystem boundaries at the composition root."""
     if composition is None:
@@ -3020,6 +3035,7 @@ def build_runtime_dependencies(
             run_subprocess,
             service_environment=os.environ,
             diagnostic_sink=lambda diagnostic: logger.info("%s", diagnostic),
+            test_execution_policy=test_execution_policy,
         )
         invoke: InvokerPort = AgentInvoker(
             run_subprocess,
@@ -3036,6 +3052,14 @@ def build_runtime_dependencies(
         invoke = composition.invoke
         checkpoint_store = composition.checkpoint_store
         create_checkpoint = composition.create_checkpoint
+
+    if test_execution_policy is not None:
+        try:
+            bind = getattr(repository, "bind_test_execution_policy", None)
+            if bind is None or bind(test_execution_policy) is not True:
+                raise TestExecutionError("policy_binding_failed")
+        except (OSError, RuntimeError) as error:
+            raise TestExecutionError("policy_binding_failed") from error
 
     def process_alive(pid: int) -> bool | None:
         """Return liveness when this platform can verify the marker PID."""
@@ -3086,6 +3110,64 @@ def build_runtime_dependencies(
     def apply_red_checkpoint(
         issue_iid: int, request: RedCheckpointRequest, expected_tree_oid: str
     ) -> RedCheckpointEvidence:
+        original = (
+            ledger.load_read_only(issue_iid)
+            if test_execution_policy is not None
+            else None
+        )
+
+        def run_selected_red(worktree: Path, argv: tuple[str, ...]) -> CommandResult:
+            if test_execution_policy is None:
+                return repository.run_red_command(worktree, argv)
+            if original is None or original.source_sha is None:
+                raise RedCheckpointError("red checkpoint record is unavailable")
+
+            base_sha = original.source_sha
+
+            def verify_identity() -> None:
+                current = ledger.load_read_only(issue_iid)
+                if (
+                    current is None
+                    or current.project_id != original.project_id
+                    or current.issue_iid != original.issue_iid
+                    or current.revision != original.revision
+                    or current.source_branch != original.source_branch
+                    or current.source_sha != original.source_sha
+                    or current.worktree != original.worktree
+                    or current.state != original.state
+                    or current.phase != original.phase
+                    or current.project_id != config.project_id
+                    or worktree != original.worktree
+                    or repository.head(worktree) != original.source_sha
+                    or tuple(sorted(repository.changed_paths(worktree)))
+                    != request.test_paths
+                    or repository.snapshot_test_tree(
+                        worktree, base_sha, request.test_paths
+                    )
+                    != expected_tree_oid
+                ):
+                    raise RedCheckpointError("red execution identity changed")
+
+            verify_identity()
+            try:
+                bound = TestExecutionIdentity(
+                    project_id=original.project_id,
+                    issue_iid=original.issue_iid,
+                    ledger_revision=original.revision,
+                    source_branch=original.source_branch,
+                    base_sha=original.source_sha,
+                    candidate_tree=expected_tree_oid,
+                    test_paths=request.test_paths,
+                    nonce=test_execution_policy.fresh_nonce(),
+                )
+                result = test_execution_policy.execute_red(
+                    TestExecutionRequest(identity=bound, worktree=worktree, argv=argv)
+                )
+            except (TestExecutionError, ValueError) as error:
+                raise RedCheckpointError("isolated red execution refused") from error
+            verify_identity()
+            return result
+
         def snapshot_test_tree(base_sha: str, paths: tuple[str, ...]) -> str:
             record = ledger.load_read_only(issue_iid)
             if record is None:
@@ -3105,7 +3187,11 @@ def build_runtime_dependencies(
                 load_record=ledger.load_read_only,
                 current_head=repository.head,
                 changed_paths=repository.changed_paths,
-                run_red_command=repository.run_red_command,
+                run_red_command=(
+                    repository.run_red_command
+                    if test_execution_policy is None
+                    else run_selected_red
+                ),
                 snapshot_test_tree=snapshot_test_tree,
                 expected_tree_oid=expected_tree_oid,
                 read_evidence=load_red_checkpoint,

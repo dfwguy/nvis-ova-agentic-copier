@@ -52,6 +52,7 @@ from .red_checkpoint import RedCheckpointError, RedCheckpointEvidence, checkpoin
 from .red_commit import RedCommitDependencies
 from .red_preflight import production_module_exists
 from .red_preflight import run_red_preflight as check_red_preflight
+from .test_executor import TestExecutionError, TestExecutionPolicy
 from .test_timing import is_safe_timing_case_id, parse_full_junit_inventory
 from .validation import (
     MAX_TIMING_CASE_LIST_BYTES,
@@ -65,6 +66,13 @@ from .validation import (
 
 class RepositoryError(RuntimeError):
     """A repository operation could not be completed safely."""
+
+
+class _UnsupportedTestExecutionHook(RepositoryError):
+    """Internal fixed refusal from a selected host test-execution policy."""
+
+    def __init__(self) -> None:
+        super().__init__("unsupported_hook")
 
 
 class CandidateRangeRead(TypedDict):
@@ -525,8 +533,10 @@ class GitRepository:
         service_environment: Mapping[str, str] | None = None,
         diagnostic_sink: Callable[[dict[str, object]], None] | None = None,
         read_git_blob: Callable[..., bytes] | None = None,
+        test_execution_policy: TestExecutionPolicy | None = None,
     ) -> None:
         self.config = config
+        self._test_execution_policy = test_execution_policy
         self._run_command = run_command
         self._environment = _git_environment_controls(
             service_environment or {},
@@ -534,6 +544,16 @@ class GitRepository:
         )
         self._diagnostic_sink = diagnostic_sink or (lambda _diagnostic: None)
         self._read_git_blob = read_git_blob or run_subprocess_bytes
+
+    def bind_test_execution_policy(self, policy: TestExecutionPolicy) -> bool:
+        """Affirm the exact host policy used by the owning runtime composition."""
+        if (
+            self._test_execution_policy is not None
+            and self._test_execution_policy is not policy
+        ):
+            return False
+        self._test_execution_policy = policy
+        return self._test_execution_policy is policy
 
     def _bounded_command(
         self,
@@ -1012,6 +1032,8 @@ class GitRepository:
         self, worktree: Path, argv: tuple[str, ...]
     ) -> CommandResultProtocol:
         """Run one bounded shell-free Red command in its durable worktree."""
+        if self._test_execution_policy is not None:
+            raise TestExecutionError("invalid_identity")
         return self._bounded_command(
             argv,
             environment=self._environment,
@@ -1221,6 +1243,8 @@ class GitRepository:
         message: str,
     ) -> IsolatedGreenCommit:
         """Run one normal hooked commit in a detached worktree from Red."""
+        if self._test_execution_policy is not None:
+            self._test_execution_policy.require_native_hook("serial-green")
         if (
             not re.fullmatch(r"[0-9a-f]{40}", red_sha)
             or not re.fullmatch(r"[0-9a-f]{40}", candidate_tree)
@@ -1918,6 +1942,8 @@ class GitRepository:
         timing_review_required: bool = False,
     ) -> dict[str, object]:
         """Run or observe durable Judge evidence from the trusted checkout."""
+        if self._test_execution_policy is not None and action == "validate":
+            self._test_execution_policy.require_native_hook("judge")
         if action not in {"validate", "status"}:
             raise RepositoryError("candidate action is invalid")
         if self._git("write-tree", cwd=worktree) != candidate_tree:
@@ -2584,6 +2610,13 @@ class GitRepository:
         validated_paths: tuple[str, ...] | None = None,
     ) -> str:
         """Create exactly one runner commit and return its unpushed SHA."""
+        if self._test_execution_policy is not None:
+            try:
+                self._test_execution_policy.require_native_hook("serial-green")
+            except TestExecutionError as error:
+                if error.reason == "unsupported_hook":
+                    raise _UnsupportedTestExecutionHook from error
+                raise RepositoryError(error.reason) from error
         current_branch = self._git("branch", "--show-current", cwd=worktree)
         if current_branch != branch:
             raise RepositoryError("publication worktree is on the wrong branch")
@@ -2674,6 +2707,13 @@ class GitRepository:
         green_ref: str,
     ) -> str:
         """Commit one reviewed pending merge with source and target in order."""
+        if self._test_execution_policy is not None:
+            try:
+                self._test_execution_policy.require_native_hook("serial-green")
+            except TestExecutionError as error:
+                if error.reason == "unsupported_hook":
+                    raise _UnsupportedTestExecutionHook from error
+                raise RepositoryError(error.reason) from error
         self._git(
             "fetch", "origin", self.config.default_branch, cwd=worktree, transient=True
         )
