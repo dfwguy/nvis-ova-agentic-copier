@@ -69,6 +69,9 @@ agent-work worker-result build --issue-iid IID --input-file PATH
 agent-work interactive-commit red --worktree PATH --branch-ref REF
     --base-sha SHA --red-ref REF [--red-sha PRIOR_RED_SHA] --red-tree TREE
     --message-file PATH [--apply] [--json] [--debug]
+agent-work interactive-commit diagnose --worktree PATH --branch-ref REF
+    --base-sha SHA --red-ref REF --red-sha SHA --candidate-tree TREE
+    [--baseline-module PATH ...] [--apply] [--json] [--debug]
 agent-work interactive-commit green --worktree PATH --branch-ref REF
     --base-sha SHA --red-ref REF --red-sha SHA --judge-tree TREE
     --message-file PATH [--apply] [--json] [--debug]
@@ -145,6 +148,7 @@ agent-work slow-root reconcile --manifest-file PATH [--json] [--apply] [--debug]
 | `service-environment migrate` | `--environment-file PATH`, `--unit-name NAME` | Bare invocation previews; choose `--apply` or `--dry-run`. |
 | `worker-result build` | Exact `--issue-iid`, `--input-file PATH`, private `--broker-socket PATH`, and `--broker-nonce NONCE` when applying | The live producer invokes the trusted controller-checkout builder through the socket. An accepted envelope stays in controller memory. |
 | `interactive-commit red` | Worktree, branch, base, Red ref, test-only tree, message, and optional prior Red commit | `--apply` preflights and rechecks the exact changed test tree, then makes a test-only Red commit with `--no-verify`. Its JSON result lists accepted missing APIs in `residual_details`. |
+| `interactive-commit diagnose` | Worktree, branch, base, authentic Red ref and commit, and exact `--candidate-tree` | Previews by default; `--apply` runs bounded focused feedback. `--baseline-module` needs trusted host approval and unchanged source. No commit or validation proof is created. |
 | `interactive-commit green` | Worktree, branch, base, final Red commit and ref, Judge tree, and message | After Judge reads the exact tree, `--apply` runs its license preflight and shared cheap gate, then makes the sole normal Green commit; its installed hook runs the full suite. |
 | `interactive-commit verify` | Green commit, Judge tree, final Red commit and ref, branch, and base | Checks commit, tree, and ancestry read-only. |
 | `reconcile-commit commit` | Worktree, branch, captured source and exact target commits, retained Red ref and commit, Judge tree, and message file | Omitting `--apply` or using `--dry-run` previews without changing Git state. `--apply` checks the pending merge and exact tree, runs the license preflight and shared cheap gate, then makes one normal commit with the source first and target second. The installed hook runs the full suite. |
@@ -280,6 +284,25 @@ commits for a human squash merge.
 After a restart, reconstruct the workflow from source code, Git commits, and
 the exact issue and merge request. Rerun any needed checks. Do not restore an
 agent session or stored role and session receipts.
+
+### Interactive focused diagnostics
+
+`interactive-commit diagnose` provides early feedback on the staged candidate
+before Judge's sole full native validation. It uses the same retained Red,
+branch, base, tree, test-freeze, merge, and staged-only checks as the commit
+boundary. It does not commit or grant validation, review, or publication
+permission.
+
+| Area | Diagnostic contract |
+| --- | --- |
+| Preview and selection | Without `--apply`, verifies the candidate and lists selected modules without starting pytest. The standalone command selects authentic Red test modules only. Each repeatable `--baseline-module` must name a canonical tracked regular test module approved by trusted host composition and byte-unchanged from base to candidate. No arbitrary pytest arguments or node IDs are accepted. |
+| Trusted caller | Main invokes the installed production `cli.main` with `approved_diagnostic_modules` from Architect's approved owning inventory. For issue 392, that inventory includes `tests/test_agent_work_interactive_commit.py` and `tests/test_agent_work_cli.py`. A CLI selector or environment value cannot approve a module. Later work needs its own approved inventory. |
+| Process | Uses a fixed installed Python in isolated mode with bytecode disabled (`-I -B`) and installed pytest, then loads the exact candidate source. The fixed `-p no:cacheprovider` option suppresses pytest cache artifacts; other plugins remain enabled. No UV sync, shell, or custom pytest recipe runs. Pytest capture is disabled; process stdin, stdout and stderr use `DEVNULL`. Owned process cleanup runs after each attempt. This supplies no descendant confinement or sandbox-backend proof; an unsupported selected execution policy refuses before execution. |
+| Safe failure facts | Reports only selected module, declared static test/function name and `setup`, `call`, `teardown`, or `collection` phase. Parametrization labels, exception messages, captured output, and private traces are absent. Unsupported dynamic names make details unavailable. A collection failure has no test name. `details_unavailable` and `truncated` qualify bounded failed-case details. |
+| Report and exit | Reports `applied`, `candidate_tree`, `red_sha`, `modules`, `outcome`, `returncode`, safe failed cases, `details_unavailable`, `truncated`, and a fixed `stop_reason`. Outcomes are `preview`, `passed`, `failed`, `unavailable`, `identity_changed`, `unsupported_policy`, `invalid_selection`, or `invalid_result`. Human output gives the safe outcome summary, with failures on stderr; `--json` exposes the full safe report on stdout. Only preview or passed exits `0`; other outcomes exit `1`. Invalid command or request input exits `2` with a fixed error. `--debug` keeps diagnostics safe and adds no raw traceback. |
+| Result handling | Uses one owned temporary result file with checked identity and bounded reads, then cleans it up. Missing, malformed, oversized, or changed result data cannot count as success. No persistent result store, JUnit validation receipt, or workflow proof is created. |
+| Candidate guards | Checks the exact candidate before and after each attempted process, including failure or timeout. Drift invalidates the result. A passing diagnostic still requires the full native hook, Non-functional Reviewer, required reviews, Finalizer, and human MR approval and merge. |
+| Correction | A diagnostic failure follows the approved production-only repair before the first Green commit. Tests stay frozen; production changes require restaging and invalidate earlier candidate evidence. A needed test change returns to fresh Red. These diagnostics change no serial or MCP route, review concurrency, profile, or loop activation. |
 
 ### Coding reconciliation commit
 

@@ -99,6 +99,26 @@ the controller observes and normalizes the exact worktree's changed paths,
 stages only allowed changes, and returns its tree OID. No model path list
 authorizes serial staging. Repeat the applicable boundary after each correction.
 
+Editors must stop first. Main then stages the exact tree. For normal
+interactive work, Main may invoke checkout-owned `interactive-commit diagnose` before the sole native
+Judge. Main calls production `cli.main` through explicit injection. Use only approved
+canonical baseline owning modules. Their bytes must be unchanged. The trusted boundary checks authentic Red. Tests stay frozen. Check the exact
+staged identity before and after each run. Do not accept arbitrary pytest arguments. Do not use an environment approval
+fallback. Green still cannot run behavior tests on its own. Results contain only safe known failed-function and phase facts. No raw
+traces, new store, or validation proof are allowed. Failure may use the approved production-only repair before the first
+Green commit; Main restages and voids old candidate proof after editors
+stop. Test edits require a fresh cycle. So does any existing Green commit. A pass
+grants no new rights. Keep the full native hook, Non-functional Review,
+all applicable reviews, Finalizer, and human MR authority. Serial, MCP, review
+concurrency, security, and timing thresholds remain unchanged.
+
+Before freezing Red, audit planned pure helpers for generated rule checks through
+public interfaces. Before freeze, prove existing owning prerequisites apart
+from missing APIs. Author independent pass and fail assertions through each
+new real producer for I/O and strict inputs. They pass after implementation
+during full validation, not before Red. Record the case map before
+the checkpoint. Do not substitute fake failure alone or policy-prose tests.
+
 These fast commands are repair tools. In interactive work, Judge owns the sole
 normal Green commit and installed hook under its role contract. In
 serial work, Judge requests the controller-owned `candidate commit` for

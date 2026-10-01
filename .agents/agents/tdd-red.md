@@ -77,6 +77,17 @@ safely for recovery.
    invokes the trusted serial tree checkpoint. Policy preparation follows the
    accepted checkpoint. Then Green and the Diátaxis Writer start together.
 
+Before freezing Red, map each planned pure helper to a generated rule check
+through its public interface. Cover selection, fixed recipes and
+environments, identity comparisons, known-case normalization, and bounded
+result projection when they apply. Before freeze, prove existing owning
+prerequisites apart from missing APIs. Author independent pass and fail
+assertions through each new real producer for I/O and strict inputs. They pass
+after implementation during full validation, not before Red. A fake failure
+alone is not enough. Use harmless generated assets for real producer controls.
+Record the audit before Red is saved. Do not add tests for policy prose or
+create unused helpers solely to satisfy the map.
+
 ## Constraints
 
 - Do not modify files outside `tests/`. Production code is not your concern in
