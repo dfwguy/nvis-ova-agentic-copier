@@ -20,7 +20,9 @@ import pwd
 import re
 import shutil
 import stat
+import subprocess
 import sys
+import tempfile
 import time
 import unicodedata
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -60,6 +62,11 @@ from .gitlab import (
 from .gitlab import publish_issue as default_publish_issue
 from .gitlab import publish_merge_request as default_publish_merge_request
 from .interactive_commit import (
+    FocusedDiagnosticDependencies,
+    FocusedDiagnosticExecution,
+    FocusedDiagnosticRequest,
+    FocusedDiagnosticRunner,
+    FocusedProcessPort,
     InteractiveCommitDependencies,
     InteractiveCommitError,
     InteractiveCommitRequest,
@@ -67,6 +74,8 @@ from .interactive_commit import (
     commit_interactive_green,
     commit_interactive_red,
     commit_reconcile,
+    run_focused_diagnostic,
+    run_focused_pytest,
     run_worktree_commit,
     verify_interactive_final,
     verify_reconcile_final,
@@ -769,6 +778,18 @@ def build_parser() -> argparse.ArgumentParser:
             apply=action != "verify",
             apply_help="create the exact retained commit",
         )
+    diagnose = interactive_actions.add_parser(
+        "diagnose", help="inspect advisory focused test feedback"
+    )
+    diagnose.add_argument("--worktree", type=Path, required=True)
+    for name in ("branch-ref", "base-sha", "red-ref", "red-sha", "candidate-tree"):
+        diagnose.add_argument(f"--{name}", required=True)
+    diagnose.add_argument("--baseline-module", action="append", default=[])
+    _common(
+        diagnose,
+        apply_help="run advisory focused tests without commit authority",
+        debug_help="accepted for compatibility; diagnostics remain fixed and safe",
+    )
     reconcile_commit = resources.add_parser(
         "reconcile-commit", help="commit or verify an exact pending merge"
     )
@@ -1702,6 +1723,57 @@ def _default_apply_upstream(
     ).apply(draft.preview, draft)
 
 
+@contextmanager
+def _focused_temporary_directory() -> Iterator[Path]:
+    """Own only the diagnostic's ephemeral result directory."""
+    with tempfile.TemporaryDirectory(prefix="agent-work-diagnostic-") as directory:
+        yield Path(directory)
+
+
+def _create_focused_result(path: Path) -> os.stat_result:
+    """Precreate an exclusive private regular inode before child launch."""
+    descriptor = os.open(
+        path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+    )
+    try:
+        return os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _read_focused_result(path: Path, expected: os.stat_result) -> bytes:
+    """Read only the bounded, unchanged controller-owned result inode."""
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        actual = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(actual.st_mode)
+            or (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino)
+            or actual.st_size > 65_536
+        ):
+            raise OSError("diagnostic result identity is invalid")
+        return os.read(descriptor, 65_537)
+    finally:
+        os.close(descriptor)
+
+
+def _stop_focused_process(process: FocusedProcessPort) -> None:
+    """Reap the owned child; no descendant containment is claimed."""
+    if process.poll() is None:
+        try:
+            os.kill(process.pid, 15)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.kill(process.pid, 9)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=5)
+
+
 def main(
     arguments: Sequence[str] | None = None,
     *,
@@ -1714,6 +1786,8 @@ def main(
     read_credential: Callable[[Path], bytes] = Path.read_bytes,
     run_command: CommandRunner = run_subprocess,
     candidate_gate: Callable[[str], CommandResult] | None = None,
+    approved_diagnostic_modules: tuple[str, ...] = (),
+    focused_runner: FocusedDiagnosticRunner | None = None,
     systemd_smoke_action: Callable[..., SystemdSmokeReport] = run_systemd_smoke,
     discover_agent_work_config: Callable[..., AgentWorkConfig] = discover_config,
     sleeper: Callable[[float], None] = time.sleep,
@@ -1779,7 +1853,18 @@ def main(
     ):
         write_stderr("candidate read selector is invalid")
         return 2
-    parsed = build_parser().parse_args(arguments)
+    if arguments is not None and tuple(arguments[:2]) == (
+        "interactive-commit",
+        "diagnose",
+    ):
+        try:
+            parsed = build_parser().parse_args(arguments)
+        except SystemExit as error:
+            return (
+                int(error.code or 0) if isinstance(error.code, (int, type(None))) else 2
+            )
+    else:
+        parsed = build_parser().parse_args(arguments)
     if parsed.resource == "cli-contract":
         selected = (
             str(parsed.executable)
@@ -1908,6 +1993,63 @@ def main(
             else " ".join(f"{key}={value}" for key, value in payload.items())
         )
         return 0
+    if parsed.resource == "interactive-commit" and parsed.action == "diagnose":
+        try:
+            diagnostic_request = FocusedDiagnosticRequest(
+                worktree=parsed.worktree,
+                branch_ref=parsed.branch_ref,
+                base_sha=parsed.base_sha,
+                red_ref=parsed.red_ref,
+                red_sha=parsed.red_sha,
+                candidate_tree=parsed.candidate_tree,
+                baseline_modules=tuple(parsed.baseline_module),
+            )
+        except ValueError:
+            write_stderr("focused diagnostic request is invalid")
+            return 2
+
+        def default_focused_runner(
+            root: Path, modules: tuple[str, ...], known: tuple[tuple[str, str], ...]
+        ) -> FocusedDiagnosticExecution:
+            return run_focused_pytest(
+                root,
+                modules,
+                known_cases=known,
+                interpreter=Path(sys.executable),
+                environment=environment,
+                temporary_directory=_focused_temporary_directory,
+                create_result=_create_focused_result,
+                read_result=_read_focused_result,
+                open_process=subprocess.Popen,
+                stop_process=_stop_focused_process,
+            )
+
+        diagnostic_runner = (
+            focused_runner if focused_runner is not None else default_focused_runner
+        )
+        diagnostic = run_focused_diagnostic(
+            diagnostic_request,
+            FocusedDiagnosticDependencies(
+                git=InteractiveCommitDependencies(
+                    run_git=partial(
+                        run_interactive_git,
+                        run_command=run_command,
+                        environment=environment,
+                    )
+                ),
+                approved_baseline_modules=approved_diagnostic_modules,
+                runner=diagnostic_runner,
+            ),
+            apply=parsed.apply,
+        )
+        successful = diagnostic.outcome in {"preview", "passed"}
+        output = (
+            diagnostic.model_dump_json()
+            if parsed.json
+            else f"outcome={diagnostic.outcome} applied={str(diagnostic.applied).lower()} stop_reason={diagnostic.stop_reason}"
+        )
+        (write_stdout if parsed.json or successful else write_stderr)(output)
+        return 0 if successful else 1
     if parsed.resource == "interactive-commit":
         try:
             request = InteractiveCommitRequest(

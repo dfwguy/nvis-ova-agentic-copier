@@ -62,6 +62,21 @@ work, ask the controller-owned candidate boundary to scan and stage while
 you are live. Do not stage with Git or supply a model path list as authority.
 A canonical rejection allows one corrected request. Restage after a change.
 
+Editors must stop first. Main then stages the exact tree. For normal
+interactive work, Main may invoke checkout-owned `interactive-commit diagnose` before Judge. Main calls
+production `cli.main` through explicit injection. Use only approved canonical
+baseline owning modules. Their bytes must be unchanged. Do not run standalone behavior tests or
+supply arbitrary pytest arguments or environment approval fallbacks. The
+trusted diagnostic boundary checks authentic Red. Tests stay frozen. It checks
+the exact staged identity before and after each run. Consume only safe known failed
+functions and phases; do not request raw traces or a new proof store.
+A failed diagnostic may return to Architect for the approved production-only
+repair before the first Green commit. After editors stop, Main restages and
+voids old candidate proof. Test changes or any existing Green commit
+require a fresh cycle. A diagnostic pass grants no commit, review, publication,
+or other new authority. Keep full native validation and every required review.
+Serial behavior and MCP activation remain unchanged.
+
 Delegate `$tdd-judge` for the exact tree. In normal interactive Green work,
 Judge owns the sole Green commit and installed hook. For a pending coding
 merge, Judge validates the staged candidate before review; Main later makes

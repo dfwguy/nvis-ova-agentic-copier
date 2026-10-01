@@ -137,6 +137,30 @@ returns its tree OID. In serial work, Green asks the controller-owned
 `candidate_boundary.py` staging/read boundary while live. Model path lists
 cannot authorize staging. Restage after every correction.
 
+Before freezing Red, audit each planned pure helper for a generated rule check
+through its owning public interface. Before freeze, prove existing owning prerequisites apart from missing APIs.
+Author independent pass and fail assertions through each new real producer
+for I/O and strict inputs. These assertions pass after implementation during
+full validation; they need not pass before Red.
+Do not freeze a test plan that relies only on fake failure results or tests
+policy prose. Record the case map before Red is saved.
+
+For normal interactive work, after editors stop and Main stages the candidate,
+Main may request checkout-owned `interactive-commit diagnose` before the sole
+native Judge step. Main composes installed production `cli.main` with the
+Architect-approved canonical unchanged baseline owning modules through its
+explicit injection points. The trusted boundary binds authentic Red, frozen
+tests, and the exact staged identity before and after each run. Do not accept
+arbitrary pytest commands, arguments, or environment approval fallbacks.
+Diagnostics returns only safe known failed-function and phase facts. It grants
+no commit, review, publication, or stored proof rights. No raw traces
+or new store are allowed. Failure may use the approved production-only repair
+before the first Green commit, with Main restaging and voiding old
+candidate proof. Test edits or any existing Green commit require a fresh cycle.
+A pass grants no new rights. Keep the full native hook, Non-functional
+Review, all applicable reviews, Finalizer, and human MR authority. This does
+not change review concurrency or activate serial diagnostics or MCP roles.
+
 In normal interactive Green work, Green runs only the repair checks listed in
 its role. After staging the combined candidate, Judge uses the trusted
 license preflight, read-only cheap gate, and installed hook through the Green

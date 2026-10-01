@@ -11,19 +11,26 @@
 
 from __future__ import annotations
 
+import ast
+import json
 import os
 import re
+import stat
 import subprocess
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from os import stat_result
 from pathlib import Path
+from typing import Literal, Protocol
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from .domain import sanitize_diagnostic
 from .ports import CommandRunner
 from .red_preflight import parse_red_preflight_success
 from .repository import CommandResult, RepositoryError, run_subprocess
+from .test_executor import TestExecutionPolicy
 from .validation import cheap_gate_failure_id, license_preflight_compliant
 
 
@@ -590,30 +597,7 @@ def commit_interactive_green(
 ) -> InteractiveCommitReport:
     """Commit the exact staged Judge tree on Red with installed hooks."""
     worktree = request.worktree
-    _require_equal(
-        _git(dependencies, worktree, ("symbolic-ref", "HEAD")),
-        request.branch_ref,
-        "checked-out branch",
-    )
-    _no_pending_merge(dependencies, worktree)
-    _require_equal(
-        _git(dependencies, worktree, ("rev-parse", request.red_ref)),
-        request.red_sha,
-        "Red ref",
-    )
-    _verify_red_chain(request, dependencies)
-    _require_equal(
-        _git(dependencies, worktree, ("write-tree",)),
-        request.judge_tree,
-        "staged Judge tree",
-    )
-    _require_equal(
-        _git(dependencies, worktree, ("rev-parse", "HEAD")),
-        request.red_sha,
-        "HEAD",
-    )
-    _staged_only(dependencies, worktree, "Green candidate")
-    _tests_frozen(dependencies, worktree, request.red_sha)
+    _green_candidate_identity(request, dependencies)
     if not apply:
         return InteractiveCommitReport(applied=False, new_commit=None)
     _check_commit_preflight(request.judge_tree, dependencies)
@@ -821,3 +805,557 @@ def commit_interactive_red(
     return InteractiveCommitReport(
         applied=True, new_commit=red_sha, residual_details=details
     )
+
+
+FocusedReason = Literal[
+    "runtime_unavailable",
+    "timeout",
+    "invalid_result",
+    "cleanup_failed",
+    "invalid_selection",
+]
+
+
+class FocusedDiagnosticError(InteractiveCommitError):
+    """A closed, safe diagnostic process refusal."""
+
+    def __init__(self, reason: FocusedReason) -> None:
+        self.reason: FocusedReason = (
+            reason
+            if reason
+            in {
+                "runtime_unavailable",
+                "timeout",
+                "invalid_result",
+                "cleanup_failed",
+                "invalid_selection",
+            }
+            else "invalid_result"
+        )
+        super().__init__(f"focused diagnostic: {self.reason}")
+
+
+class FocusedDiagnosticRequest(BaseModel):
+    """Immutable identities and requested baseline modules from the CLI edge."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    worktree: Path
+    branch_ref: str
+    base_sha: str
+    red_ref: str
+    red_sha: str
+    candidate_tree: str
+    baseline_modules: tuple[str, ...] = ()
+
+    @field_validator("base_sha", "red_sha", "candidate_tree")
+    @classmethod
+    def _object_id(cls, value: str) -> str:
+        return InteractiveCommitRequest._object_id(value)
+
+    @field_validator("branch_ref")
+    @classmethod
+    def _branch_ref(cls, value: str) -> str:
+        return InteractiveCommitRequest._branch_ref(value)
+
+    @field_validator("red_ref")
+    @classmethod
+    def _red_ref(cls, value: str) -> str:
+        return InteractiveCommitRequest._red_ref(value)
+
+
+class FocusedFailureCase(BaseModel):
+    """Only a selected module, static declaration and failure phase."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    module: str
+    test_name: str | None
+    phase: Literal["setup", "call", "teardown", "collection"]
+
+
+class _FocusedArtifact(BaseModel):
+    """Strict bounded process result; raw diagnostics are not accepted."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    failed_cases: tuple[FocusedFailureCase, ...] = Field(max_length=128)
+    details_unavailable: bool
+    truncated: bool
+
+
+class FocusedDiagnosticExecution(_FocusedArtifact):
+    """Revalidated safe execution facts from an injected runner."""
+
+    failed_cases: tuple[FocusedFailureCase, ...] = Field(default=(), max_length=128)
+    details_unavailable: bool = False
+    truncated: bool = False
+    returncode: int
+
+
+class FocusedDiagnosticReport(_FocusedArtifact):
+    """Advisory outcome with no validation, commit or publication authority."""
+
+    failed_cases: tuple[FocusedFailureCase, ...] = Field(default=(), max_length=128)
+    details_unavailable: bool = False
+    truncated: bool = False
+    applied: bool
+    candidate_tree: str
+    red_sha: str
+    modules: tuple[str, ...]
+    outcome: Literal[
+        "preview",
+        "passed",
+        "failed",
+        "unavailable",
+        "identity_changed",
+        "unsupported_policy",
+        "invalid_selection",
+        "invalid_result",
+    ]
+    returncode: int | None = None
+    stop_reason: (
+        FocusedReason | Literal["identity_changed", "unsupported_policy"] | None
+    ) = None
+
+
+class FocusedDiagnosticRunner(Protocol):
+    """Run exactly the selected modules with the declared safe case inventory."""
+
+    def __call__(
+        self,
+        worktree: Path,
+        modules: tuple[str, ...],
+        known_cases: tuple[tuple[str, str], ...],
+        /,
+    ) -> FocusedDiagnosticExecution:
+        """Return safe execution facts only."""
+        ...
+
+
+@dataclass(frozen=True)
+class FocusedDiagnosticDependencies:
+    """Host-owned Git, module approval and optional execution composition."""
+
+    git: InteractiveCommitDependencies
+    approved_baseline_modules: tuple[str, ...] = ()
+    runner: FocusedDiagnosticRunner | None = None
+    test_execution_policy: TestExecutionPolicy | None = None
+
+
+class FocusedProcessPort(Protocol):
+    """The owned child process wait and cleanup boundary."""
+
+    pid: int
+
+    def wait(self, *, timeout: float) -> int:
+        """Wait within the existing housekeeping bound."""
+        ...
+
+    def poll(self) -> int | None:
+        """Observe whether this child has exited."""
+        ...
+
+
+def _focused_commit_request(
+    request: FocusedDiagnosticRequest,
+) -> InteractiveCommitRequest:
+    return InteractiveCommitRequest(
+        worktree=request.worktree,
+        branch_ref=request.branch_ref,
+        base_sha=request.base_sha,
+        red_ref=request.red_ref,
+        red_sha=request.red_sha,
+        passing_sha=request.red_sha,
+        judge_tree=request.candidate_tree,
+    )
+
+
+def _green_candidate_identity(
+    request: InteractiveCommitRequest, dependencies: InteractiveCommitDependencies
+) -> None:
+    """Shared authentic Red, frozen tests and exact staged candidate proof."""
+    worktree = request.worktree
+    _require_equal(
+        _git(dependencies, worktree, ("symbolic-ref", "HEAD")),
+        request.branch_ref,
+        "checked-out branch",
+    )
+    _no_pending_merge(dependencies, worktree)
+    _require_equal(
+        _git(dependencies, worktree, ("rev-parse", request.red_ref)),
+        request.red_sha,
+        "Red ref",
+    )
+    _verify_red_chain(request, dependencies)
+    _require_equal(
+        _git(dependencies, worktree, ("write-tree",)),
+        request.judge_tree,
+        "staged Judge tree",
+    )
+    _require_equal(
+        _git(dependencies, worktree, ("rev-parse", "HEAD")), request.red_sha, "HEAD"
+    )
+    _require_equal(
+        _git(dependencies, worktree, ("rev-parse", request.branch_ref)),
+        request.red_sha,
+        "branch",
+    )
+    _staged_only(dependencies, worktree, "Green candidate")
+    _tests_frozen(dependencies, worktree, request.red_sha)
+
+
+def _canonical_test_module(path: str) -> bool:
+    return bool(
+        re.fullmatch(
+            r"(?:template/)?tests/(?:[a-zA-Z0-9_-]+/)*test_[a-zA-Z0-9_-]+\.py", path
+        )
+    )
+
+
+def _static_test_cases(module: str, source: str) -> tuple[tuple[str, str], ...]:
+    """Extract bounded static declarations without parameter values or messages."""
+    if len(source.encode("utf-8")) > 1_048_576:
+        raise FocusedDiagnosticError("invalid_selection")
+    try:
+        parsed = ast.parse(source)
+    except (SyntaxError, ValueError) as error:
+        raise FocusedDiagnosticError("invalid_selection") from error
+    names: list[tuple[str, str]] = []
+    for node in parsed.body:
+        if isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef)
+        ) and node.name.startswith("test_"):
+            names.append((module, node.name))
+        elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+            names.extend(
+                (module, f"{node.name}::{child.name}")
+                for child in node.body
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and child.name.startswith("test_")
+            )
+    return tuple(sorted(set(names)))
+
+
+def _focused_baseline_selection(
+    request: FocusedDiagnosticRequest, dependencies: FocusedDiagnosticDependencies
+) -> None:
+    """Check requested host approval and regular immutable baseline blobs."""
+    for module in request.baseline_modules:
+        if (
+            not _canonical_test_module(module)
+            or module not in dependencies.approved_baseline_modules
+        ):
+            raise FocusedDiagnosticError("invalid_selection")
+        baseline = _git(
+            dependencies.git,
+            request.worktree,
+            ("ls-tree", "-z", request.base_sha, "--", module),
+        )
+        candidate = _git(
+            dependencies.git,
+            request.worktree,
+            ("ls-tree", "-z", request.candidate_tree, "--", module),
+        )
+        if (
+            not re.fullmatch(
+                r"100(?:644|755) blob [0-9a-f]{40}\t" + re.escape(module) + r"\x00?",
+                candidate,
+            )
+            or baseline != candidate
+        ):
+            raise FocusedDiagnosticError("invalid_selection")
+
+
+def _focused_selection(
+    request: FocusedDiagnosticRequest, dependencies: FocusedDiagnosticDependencies
+) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
+    """Derive Red modules and verify each approved baseline's immutable blob."""
+    _focused_baseline_selection(request, dependencies)
+    git = dependencies.git
+    current = request.red_sha
+    modules: set[str] = set()
+    for _ in range(128):
+        modules.update(_committed_test_paths(git, request.worktree, current))
+        current = _git(git, request.worktree, ("show", "-s", "--format=%P", current))
+        if current == request.base_sha:
+            break
+    modules.update(request.baseline_modules)
+    known: list[tuple[str, str]] = []
+    for module in sorted(modules):
+        if not _canonical_test_module(module):
+            raise FocusedDiagnosticError("invalid_selection")
+        candidate = _git(
+            git,
+            request.worktree,
+            ("ls-tree", "-z", request.candidate_tree, "--", module),
+        )
+        if not re.fullmatch(
+            r"100(?:644|755) blob [0-9a-f]{40}\t" + re.escape(module) + r"\x00?",
+            candidate,
+        ):
+            raise FocusedDiagnosticError("invalid_selection")
+        source = _git(
+            git, request.worktree, ("show", f"{request.candidate_tree}:{module}")
+        )
+        known.extend(_static_test_cases(module, source))
+    return tuple(sorted(modules)), tuple(sorted(set(known)))
+
+
+def _validate_focused_execution(
+    execution: FocusedDiagnosticExecution,
+    modules: tuple[str, ...],
+    known: tuple[tuple[str, str], ...],
+) -> FocusedDiagnosticExecution:
+    """Revalidate injected DTOs and bind every fact to the selected declarations."""
+    checked = FocusedDiagnosticExecution.model_validate(execution.model_dump())
+    if checked.returncode == 0 and (
+        checked.failed_cases or checked.details_unavailable or checked.truncated
+    ):
+        raise FocusedDiagnosticError("invalid_result")
+    for case in checked.failed_cases:
+        if (
+            case.module not in modules
+            or (case.test_name is None and case.phase != "collection")
+            or (
+                case.test_name is not None
+                and (case.module, case.test_name) not in known
+            )
+        ):
+            raise FocusedDiagnosticError("invalid_result")
+    return checked
+
+
+def run_focused_diagnostic(
+    request: FocusedDiagnosticRequest,
+    dependencies: FocusedDiagnosticDependencies,
+    *,
+    apply: bool = False,
+) -> FocusedDiagnosticReport:
+    """Preview or run one advisory diagnostic behind unchanged commit guards."""
+    modules: tuple[str, ...] = ()
+    commit_request = _focused_commit_request(request)
+
+    def refused(
+        outcome: Literal[
+            "unavailable",
+            "identity_changed",
+            "unsupported_policy",
+            "invalid_selection",
+            "invalid_result",
+        ],
+        reason: FocusedReason | Literal["identity_changed", "unsupported_policy"],
+    ) -> FocusedDiagnosticReport:
+        return FocusedDiagnosticReport(
+            applied=False,
+            candidate_tree=request.candidate_tree,
+            red_sha=request.red_sha,
+            modules=modules,
+            outcome=outcome,
+            stop_reason=reason,
+        )
+
+    try:
+        _focused_baseline_selection(request, dependencies)
+    except (InteractiveCommitError, OSError, UnicodeError, subprocess.SubprocessError):
+        return refused("invalid_selection", "invalid_selection")
+    try:
+        _green_candidate_identity(commit_request, dependencies.git)
+    except (InteractiveCommitError, OSError, UnicodeError, subprocess.SubprocessError):
+        return refused("identity_changed", "identity_changed")
+    try:
+        modules, known = _focused_selection(request, dependencies)
+    except (InteractiveCommitError, OSError, UnicodeError, subprocess.SubprocessError):
+        return refused("invalid_selection", "invalid_selection")
+    if not apply:
+        return FocusedDiagnosticReport(
+            applied=False,
+            candidate_tree=request.candidate_tree,
+            red_sha=request.red_sha,
+            modules=modules,
+            outcome="preview",
+        )
+    if dependencies.test_execution_policy is not None:
+        return refused("unsupported_policy", "unsupported_policy")
+    if dependencies.runner is None:
+        return refused("unavailable", "runtime_unavailable")
+    result: FocusedDiagnosticExecution | None = None
+    reason: FocusedReason | None = None
+    try:
+        result = _validate_focused_execution(
+            dependencies.runner(request.worktree, modules, known), modules, known
+        )
+    except FocusedDiagnosticError as error:
+        reason = error.reason
+    except (ValidationError, TypeError, AttributeError, ValueError):
+        reason = "invalid_result"
+    except (OSError, subprocess.SubprocessError, RuntimeError):
+        reason = "runtime_unavailable"
+    try:
+        _green_candidate_identity(commit_request, dependencies.git)
+        after_modules, after_known = _focused_selection(request, dependencies)
+        _require_equal(
+            repr((after_modules, after_known)),
+            repr((modules, known)),
+            "selected modules",
+        )
+    except (InteractiveCommitError, OSError, UnicodeError, subprocess.SubprocessError):
+        return refused("identity_changed", "identity_changed")
+    if reason is not None:
+        return refused(
+            "invalid_result" if reason == "invalid_result" else "unavailable", reason
+        )
+    if result is None:
+        return refused("invalid_result", "invalid_result")
+    return FocusedDiagnosticReport(
+        applied=True,
+        candidate_tree=request.candidate_tree,
+        red_sha=request.red_sha,
+        modules=modules,
+        outcome="passed" if result.returncode == 0 else "failed",
+        **result.model_dump(),
+    )
+
+
+_FOCUSED_BOOTSTRAP = """
+import json, os, stat, sys
+try:
+    import pytest
+except ImportError:
+    raise SystemExit(77)
+from pathlib import Path
+root, result_path, device, inode, modules_json, known_json = sys.argv[1:]
+modules = tuple(json.loads(modules_json))
+known = set(tuple(pair) for pair in json.loads(known_json))
+sys.path.insert(0, str(Path(root) / "src"))
+class Reports:
+    def __init__(self) -> None:
+        "Retain only bounded selected-source failure facts."
+        self.cases: set[tuple[str, str | None, str]] = set()
+        self.unavailable = False
+        self.truncated = False
+    def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
+        "Project a failed test without reading its diagnostics."
+        if report.failed:
+            module, separator, name = report.nodeid.partition("::")
+            name = name.split("[", 1)[0]
+            self.retain(module, name if separator else None, report.when)
+    def pytest_collectreport(self, report: pytest.CollectReport) -> None:
+        "Project selected-module collection failures only."
+        if report.failed:
+            module = report.nodeid.split("::", 1)[0]
+            self.retain(module, None, "collection")
+    def retain(self, module: str, name: str | None, phase: str) -> None:
+        "Omit undeclared names and bound the safe inventory."
+        if module not in modules or (name is not None and (module, name) not in known):
+            self.unavailable = True
+            return
+        if len(self.cases) >= 128:
+            self.truncated = True
+            return
+        self.cases.add((module, name, phase))
+reports = Reports()
+code = pytest.main(["-q", "--capture=no", "-p", "no:cacheprovider", *modules], plugins=[reports])
+payload = json.dumps({"failed_cases": [{"module": module, "test_name": name, "phase": phase} for module, name, phase in sorted(reports.cases, key=lambda item: (item[0], item[1] or "", item[2]))], "details_unavailable": reports.unavailable, "truncated": reports.truncated}).encode()
+if len(payload) > 65536:
+    raise SystemExit(78)
+fd = os.open(result_path, os.O_WRONLY | os.O_NOFOLLOW)
+try:
+    actual = os.fstat(fd)
+    if not stat.S_ISREG(actual.st_mode) or (actual.st_dev, actual.st_ino) != (int(device), int(inode)):
+        raise SystemExit(78)
+    os.ftruncate(fd, 0)
+    with os.fdopen(fd, "wb", closefd=False) as output:
+        output.write(payload)
+finally:
+    os.close(fd)
+raise SystemExit(code)
+"""
+
+
+def run_focused_pytest(
+    worktree: Path,
+    modules: tuple[str, ...],
+    *,
+    known_cases: tuple[tuple[str, str], ...],
+    interpreter: Path,
+    environment: Mapping[str, str],
+    timeout_seconds: float = 10_800,
+    temporary_directory: Callable[[], AbstractContextManager[Path]],
+    create_result: Callable[[Path], stat_result],
+    read_result: Callable[[Path, stat_result], bytes],
+    open_process: Callable[..., FocusedProcessPort],
+    stop_process: Callable[[FocusedProcessPort], None],
+) -> FocusedDiagnosticExecution:
+    """Run installed pytest with discarded streams and a verified ephemeral result."""
+    if not modules or any(not _canonical_test_module(module) for module in modules):
+        raise FocusedDiagnosticError("invalid_selection")
+    safe_environment = {
+        name: value
+        for name, value in environment.items()
+        if not name.startswith(("PYTHON", "PYTEST"))
+    }
+    process: FocusedProcessPort | None = None
+    try:
+        with temporary_directory() as directory:
+            result_path = directory / "result.json"
+            expected = create_result(result_path)
+            if (
+                not stat.S_ISREG(expected.st_mode)
+                or stat.S_IMODE(expected.st_mode) != 0o600
+            ):
+                raise FocusedDiagnosticError("invalid_result")
+            command = (
+                str(interpreter),
+                "-I",
+                "-B",
+                "-c",
+                _FOCUSED_BOOTSTRAP,
+                str(worktree),
+                str(result_path),
+                str(expected.st_dev),
+                str(expected.st_ino),
+                json.dumps(modules),
+                json.dumps(known_cases),
+            )
+            try:
+                try:
+                    process = open_process(
+                        command,
+                        cwd=worktree,
+                        env=safe_environment,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        start_new_session=True,
+                        shell=False,
+                    )
+                except (OSError, ValueError) as error:
+                    raise FocusedDiagnosticError("runtime_unavailable") from error
+                try:
+                    returncode = process.wait(timeout=timeout_seconds)
+                except subprocess.TimeoutExpired as error:
+                    raise FocusedDiagnosticError("timeout") from error
+            finally:
+                if process is not None:
+                    try:
+                        stop_process(process)
+                    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                        raise FocusedDiagnosticError("cleanup_failed") from error
+            if returncode == 77:
+                raise FocusedDiagnosticError("runtime_unavailable")
+            try:
+                raw = read_result(result_path, expected)
+                if len(raw) > 65_536:
+                    raise FocusedDiagnosticError("invalid_result")
+                artifact = _FocusedArtifact.model_validate_json(raw)
+                return _validate_focused_execution(
+                    FocusedDiagnosticExecution(
+                        returncode=returncode, **artifact.model_dump()
+                    ),
+                    modules,
+                    known_cases,
+                )
+            except (OSError, ValueError, UnicodeError) as error:
+                raise FocusedDiagnosticError("invalid_result") from error
+    except FocusedDiagnosticError:
+        raise
+    except (OSError, RuntimeError) as error:
+        raise FocusedDiagnosticError("cleanup_failed") from error
