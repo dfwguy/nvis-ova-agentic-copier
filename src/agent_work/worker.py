@@ -62,11 +62,13 @@ from .models import (
     LedgerRecord,
     MergeRequestDraft,
     SplitPlan,
+    StageTimingReport,
     WorkerExitEvidence,
     WorkerResultEnvelope,
 )
 from .ports import CommandResult, CommandRunner
 from .red_checkpoint import RedCheckpointEvidence, RedCheckpointRequest
+from .timing import stage_timing_identity, stage_timing_report
 from .workflow_router import WorkflowFacts, route_workflow
 
 
@@ -2217,6 +2219,26 @@ def build_worker_prompt(
     """Build the trusted protocol instructions for one bounded phase."""
     safe_record = dict(record)
     safe_record.pop("red_checkpoint", None)
+    safe_record.pop("controller_stage_timing", None)
+    try:
+        timing_record = LedgerRecord.model_validate(safe_record)
+        expected_identity = stage_timing_identity(timing_record)
+        if (timing_record.project_id, timing_record.issue_iid) != (
+            project_id,
+            issue_iid,
+        ):
+            expected_identity = None
+        controller_timing = stage_timing_report(
+            timing_record, expected_identity=expected_identity
+        )
+    except (TypeError, ValueError):
+        controller_timing = StageTimingReport(
+            identity=None,
+            coverage="unavailable",
+            history_complete=False,
+            unavailable_reasons=("missing_identity", "internal_roles_unavailable"),
+        )
+    safe_record["controller_stage_timing"] = controller_timing.model_dump(mode="json")
     diagnostic_context = ""
     attempt = safe_record.get("repair_attempt")
     if isinstance(attempt, Mapping):

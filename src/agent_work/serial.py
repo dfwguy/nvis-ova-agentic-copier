@@ -26,7 +26,7 @@ from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 
 from .candidate_boundary import (
     GIT_READ_MAX_CHUNK_BYTES,
@@ -53,7 +53,11 @@ from .domain import (
     parse_split_marker,
     render_split_marker,
 )
-from .gitlab import GitLabError, GitLabIdentityError
+from .gitlab import (
+    GitLabError,
+    GitLabIdentityError,
+    canonical_merge_request_description,
+)
 from .green_commit import (
     GreenCommitDependencies,
     GreenCommitError,
@@ -75,6 +79,7 @@ from .models import (
     PublicationCorrectionIdentity,
     RepairAttemptEvidence,
     SplitPlan,
+    StageTimingIdentity,
     TransitionIntentRecord,
 )
 from .outcome_projection import replay_outcome_projection
@@ -111,7 +116,13 @@ from .state_machine import (
     retained_ordinary_is_untouched,
     transition_record,
 )
-from .timing import append_phase_timing
+from .timing import (
+    append_phase_timing,
+    append_record_timing,
+    render_stage_timing_report,
+    stage_timing_identity,
+    stage_timing_report,
+)
 from .worker import (
     WorkerProtocolError,
     WorkerResultBrokerRequest,
@@ -2971,7 +2982,17 @@ def _completed_closed_record(record: LedgerRecord) -> LedgerRecord:
         "error_code": None,
         "worker_exit": None,
         "pending_feedback": None,
-        "summary": "Issue is closed; durable record reconciled.",
+        "summary": "Issue is closed; durable record reconciled."
+        + (
+            " "
+            + render_stage_timing_report(
+                stage_timing_report(
+                    record, expected_identity=stage_timing_identity(record)
+                )
+            )
+            if record.phase_timings
+            else ""
+        ),
         "next_action": "No action required.",
     }
     if record.state is RunnerState.COMPLETE:
@@ -5684,6 +5705,18 @@ def _execute(
     return outcome
 
 
+def _observe_stage_identity(
+    record: LedgerRecord,
+    observe: Callable[[LedgerRecord], StageTimingIdentity | None] | None,
+) -> StageTimingIdentity | None:
+    if observe is None:
+        return None
+    try:
+        return observe(record)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return None
+
+
 def _publish(
     record: LedgerRecord,
     *,
@@ -5692,6 +5725,8 @@ def _publish(
     repository: RepositoryPort,
     now: datetime,
     load_red_checkpoint: Callable[[int, int, str], RedCheckpointEvidence | None]
+    | None = None,
+    observe_stage_identity: Callable[[LedgerRecord], StageTimingIdentity | None]
     | None = None,
 ) -> LedgerRecord:
     try:
@@ -6251,6 +6286,8 @@ def _publish(
                         "worktree before deciding whether to resume this issue."
                     ),
                 )
+        if draft is not None and record.pending_feedback is None:
+            canonical_merge_request_description(draft, issue_iid=record.issue_iid)
         if already_published:
             repository.verify_worktree(
                 record.worktree, record.source_branch, publication_sha
@@ -6267,6 +6304,29 @@ def _publish(
                 gitlab=gitlab,
                 summary="Published feedback worktree is not clean.",
             )
+        if draft is not None and record.phase_timings:
+            source_record = record.model_copy(update={"source_sha": sha})
+            timing_report = stage_timing_report(
+                source_record,
+                expected_identity=_observe_stage_identity(
+                    source_record, observe_stage_identity
+                ),
+            )
+            candidate_draft = draft.model_copy(
+                update={
+                    "description": draft.description
+                    + "\n\n"
+                    + render_stage_timing_report(timing_report)
+                }
+            )
+            try:
+                canonical_merge_request_description(
+                    candidate_draft, issue_iid=record.issue_iid
+                )
+            except GitLabError:
+                pass
+            else:
+                draft = candidate_draft
         if remediation:
             if record.merge_request_iid is None:
                 raise SegmentError(
@@ -6838,6 +6898,8 @@ def run_segment(
     timeout_seconds: int,
     now: datetime,
     clock: Callable[[], datetime] | None = None,
+    observe_stage_identity: Callable[[LedgerRecord], StageTimingIdentity | None]
+    | None = None,
     issue_iid: int | None = None,
     allow_pinned_conflict: bool = False,
     remaining_seconds: Callable[[], float] | None = None,
@@ -7140,7 +7202,58 @@ def run_segment(
             repository=repository,
             now=now,
         )
-    boundary_clock = clock or (lambda: now)
+    clock_available = clock is not None
+
+    def boundary_clock() -> datetime:
+        nonlocal clock_available
+        if clock is None:
+            return now
+        try:
+            return clock()
+        except (OSError, RuntimeError, TypeError, ValueError, StopIteration):
+            clock_available = False
+            return now
+
+    def retain_timing(
+        outcome: LedgerRecord,
+        *,
+        phase_or_role: str,
+        started_at: datetime,
+        finished_at: datetime,
+        timing_outcome: str,
+        classification: Literal["execution", "wait"],
+    ) -> LedgerRecord:
+        if observe_stage_identity is None:
+            timed = outcome.model_copy(
+                update={
+                    "phase_timings": append_phase_timing(
+                        outcome.phase_timings,
+                        phase_or_role=phase_or_role,
+                        attempt=record.retry_count + 1,
+                        started_at=started_at,
+                        finished_at=finished_at,
+                        outcome=timing_outcome,
+                        classification=classification,
+                    )
+                }
+            )
+        else:
+            timed = append_record_timing(
+                outcome,
+                phase_or_role=phase_or_role,
+                attempt=record.retry_count + 1,
+                started_at=started_at,
+                finished_at=finished_at,
+                outcome=timing_outcome,
+                classification=classification,
+                identity=_observe_stage_identity(outcome, observe_stage_identity),
+                boundary_revision=record.revision,
+                clock_available=clock_available,
+            )
+        if timed.state is RunnerState.COMPLETE:
+            timed = _completed_closed_record(timed)
+        return ledger.persist(timed)
+
     if record.state in {RunnerState.EXECUTING, RunnerState.REPAIR}:
         started_at = boundary_clock()
         outcome = _execute(
@@ -7176,20 +7289,13 @@ def run_segment(
             timing_outcome = outcome.error_code.value
         else:
             timing_outcome = "complete"
-        return ledger.persist(
-            outcome.model_copy(
-                update={
-                    "phase_timings": append_phase_timing(
-                        outcome.phase_timings,
-                        phase_or_role=phase_or_role,
-                        attempt=record.retry_count + 1,
-                        started_at=started_at,
-                        finished_at=finished_at,
-                        outcome=timing_outcome,
-                        classification="wait" if capacity_wait else "execution",
-                    )
-                }
-            )
+        return retain_timing(
+            outcome,
+            phase_or_role=phase_or_role,
+            started_at=started_at,
+            finished_at=finished_at,
+            timing_outcome=timing_outcome,
+            classification="wait" if capacity_wait else "execution",
         )
     if record.state is RunnerState.PUBLISHING:
         started_at = boundary_clock()
@@ -7200,6 +7306,7 @@ def run_segment(
             repository=repository,
             now=now,
             load_red_checkpoint=load_red_checkpoint,
+            observe_stage_identity=observe_stage_identity,
         )
         finished_at = boundary_clock()
         timing_outcome = (
@@ -7211,20 +7318,13 @@ def run_segment(
                 else outcome.state.value
             )
         )
-        return ledger.persist(
-            outcome.model_copy(
-                update={
-                    "phase_timings": append_phase_timing(
-                        outcome.phase_timings,
-                        phase_or_role=record.phase.value,
-                        attempt=record.retry_count + 1,
-                        started_at=started_at,
-                        finished_at=finished_at,
-                        outcome=timing_outcome,
-                        classification="execution",
-                    )
-                }
-            )
+        return retain_timing(
+            outcome,
+            phase_or_role=record.phase.value,
+            started_at=started_at,
+            finished_at=finished_at,
+            timing_outcome=timing_outcome,
+            classification="execution",
         )
     if record.state is RunnerState.OBSERVING:
         started_at = boundary_clock()
@@ -7242,19 +7342,12 @@ def run_segment(
             timing_outcome = "pending"
         else:
             timing_outcome = outcome.state.value
-        return ledger.persist(
-            outcome.model_copy(
-                update={
-                    "phase_timings": append_phase_timing(
-                        outcome.phase_timings,
-                        phase_or_role="pipeline-poll",
-                        attempt=record.retry_count + 1,
-                        started_at=started_at,
-                        finished_at=finished_at,
-                        outcome=timing_outcome,
-                        classification="execution",
-                    )
-                }
-            )
+        return retain_timing(
+            outcome,
+            phase_or_role="pipeline-poll",
+            started_at=started_at,
+            finished_at=finished_at,
+            timing_outcome=timing_outcome,
+            classification="execution",
         )
     raise SegmentError("record is not runnable")

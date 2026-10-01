@@ -89,6 +89,7 @@ from .models import (
     RecoveryCandidateReport,
     RecoveryChildState,
     RecoverySummary,
+    StageTimingIdentity,
     TransitionIntentRecord,
     ValidationAdmissionReport,
 )
@@ -114,6 +115,7 @@ from .repository import (
 )
 from .repository import (
     GitRepository,
+    LegacyPublicationCandidate,
     RepositoryError,
     RepositoryTransientError,
     WorktreeStatus,
@@ -139,7 +141,7 @@ from .serial import (
 )
 from .state_machine import retained_ordinary_is_untouched, transition_record
 from .status import project_status
-from .timing import is_bounded_timing_append
+from .timing import is_bounded_timing_append, stage_timing_identity, stage_timing_report
 from .timing_admission import (
     InteractiveValidationRequest,
     mark_interactive_validation_yield,
@@ -201,6 +203,9 @@ def _item(
         audit_evidence=record.audit_evidence,
         condition_history=record.condition_history,
         phase_timings=record.phase_timings,
+        stage_timing_report=stage_timing_report(
+            record, expected_identity=stage_timing_identity(record)
+        ),
         current_condition=_current_condition(record),
         activation_started_at=record.activation_started_at,
         latest_meaningful_update_at=record.latest_meaningful_update_at,
@@ -2587,6 +2592,9 @@ class RuntimeDependencies:
         Callable[[int, RedCheckpointRequest, str], RedCheckpointEvidence] | None
     ) = None
     run_segment_boundary: Callable[..., LedgerRecord | None] = run_segment
+    observe_stage_identity: (
+        Callable[[LedgerRecord], StageTimingIdentity | None] | None
+    ) = None
     observe_interactive_validation: Callable[[], object] = lambda: None
     observe_yielded_interactive_validation: Callable[
         [], InteractiveValidationRequest | None
@@ -3015,6 +3023,45 @@ def _build_local_logger(config: AgentWorkConfig, *, debug: bool) -> logging.Logg
     return logger
 
 
+def observe_stage_timing_identity(
+    record: LedgerRecord,
+    *,
+    project_id: int,
+    observe_worktree: Callable[[Path], LegacyPublicationCandidate],
+    read_tree: Callable[[str], str | None],
+) -> StageTimingIdentity | None:
+    """Bind timing only to stable clean snapshots and an immutable source tree."""
+    if record.project_id != project_id or record.source_sha is None:
+        return None
+    try:
+        before = observe_worktree(record.worktree)
+        if (
+            before.branch != record.source_branch
+            or before.head != record.source_sha
+            or before.merge_head is not None
+            or before.staged_paths
+            or before.unstaged_paths
+            or before.has_untracked
+            or before.has_unmerged
+            or before.has_renames
+        ):
+            return None
+        tree = read_tree(record.source_sha)
+        if tree is None:
+            return None
+        after = observe_worktree(record.worktree)
+        if before != after:
+            return None
+        return StageTimingIdentity(
+            project_id=record.project_id,
+            issue_iid=record.issue_iid,
+            source_sha=record.source_sha,
+            candidate_tree=tree,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return None
+
+
 def build_runtime_dependencies(
     *,
     debug: bool,
@@ -3207,8 +3254,19 @@ def build_runtime_dependencies(
             ),
         )
 
+    def observe_stage_identity(record: LedgerRecord) -> StageTimingIdentity | None:
+        if not hasattr(repository, "checkpoint_tree"):
+            return None
+        return observe_stage_timing_identity(
+            record,
+            project_id=config.project_id,
+            observe_worktree=repository.observe_legacy_publication_candidate,
+            read_tree=repository.checkpoint_tree,
+        )
+
     return RuntimeDependencies(
         config=config,
+        observe_stage_identity=observe_stage_identity,
         ledger=ledger,
         gitlab=gitlab,
         repository=repository,
@@ -4970,6 +5028,7 @@ def dispatch(
                         timeout_seconds=request.max_activation_seconds,
                         now=wired.clock(),
                         clock=wired.clock,
+                        observe_stage_identity=wired.observe_stage_identity,
                         issue_iid=target,
                         allow_pinned_conflict=True,
                         issue_lock=wired.issue_lock,
@@ -5514,6 +5573,7 @@ def dispatch(
                 timeout_seconds=request.max_activation_seconds,
                 now=wired.clock(),
                 clock=wired.clock,
+                observe_stage_identity=wired.observe_stage_identity,
                 issue_iid=issue_iid,
                 issue_lock=wired.issue_lock,
                 load_red_checkpoint=wired.load_red_checkpoint,
@@ -5565,6 +5625,8 @@ def dispatch(
                     update={
                         "revision": record.revision,
                         "phase_timings": record.phase_timings,
+                        "phase_timing_count": record.phase_timing_count,
+                        "phase_timing_unavailable_reasons": record.phase_timing_unavailable_reasons,
                         "latest_meaningful_update_at": (
                             record.latest_meaningful_update_at
                         ),
