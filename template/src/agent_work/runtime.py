@@ -23,7 +23,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
-from . import approved_scope, models, test_executor
+from . import actor_frontend, approved_scope, models, test_executor
 from .classification import ClassificationError, classify_work
 from .domain import (
     ACTIVE_STATES,
@@ -3095,6 +3095,8 @@ def build_runtime_dependencies(
     ]
     | None = None,
     test_execution_policy: TestExecutionPolicy | None = None,
+    actor_transport_limits: actor_frontend.ActorTransportLimits | None = None,
+    actor_frontend_factory: actor_frontend.ActorFrontendFactory | None = None,
 ) -> RuntimeDependencies:
     """Wire real process and filesystem boundaries at the composition root."""
     if composition is None:
@@ -3116,6 +3118,8 @@ def build_runtime_dependencies(
             run_subprocess,
             environment=os.environ,
             controller_state_root=config.state_root,
+            actor_transport_limits=actor_transport_limits,
+            actor_frontend_factory=actor_frontend_factory,
         )
         checkpoint_store: RuntimeCheckpointStore = RedCheckpointStore(config.state_root)
         create_checkpoint: RuntimeCheckpointCreator = create_red_checkpoint

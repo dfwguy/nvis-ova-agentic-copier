@@ -13,9 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, cast
 
 import pytest
 from mcp.server import MCPServer
@@ -23,33 +23,9 @@ from mcp.types import CallToolResult
 
 from agent_work import mcp_server
 from agent_work.mcp_server import create_candidate_mcp_server
-from agent_work.ports import CommandRunner
 from agent_work.repository import CommandResult
-from agent_work.worker import AgentInvoker, RoleExecutionProfile
-
-
-class _SandboxInvokerConstructor(Protocol):
-    """Declare the approved future constructor contract without untyped values."""
-
-    def __call__(
-        self,
-        run_command: CommandRunner,
-        *,
-        environment: Mapping[str, str],
-        temporary_directory: Path | None = None,
-        controller_state_root: Path | None = None,
-        read_only_host_audit: Callable[
-            [tuple[str, ...], Mapping[str, str]], Mapping[str, bool]
-        ]
-        | None = None,
-        read_only_sandbox_audit: Callable[
-            [tuple[str, ...], Mapping[str, str]], Mapping[str, bool]
-        ]
-        | None = None,
-    ) -> AgentInvoker:
-        """Construct the invoker with the architect-approved audit seams."""
-        ...
-
+from agent_work.worker import RoleExecutionProfile
+from tests.test_agent_work_actor_mcp_host import InvokerTranscript, actor_invoker
 
 TREE = "b" * 40
 NONCE = "read-only-role-nonce"
@@ -78,16 +54,12 @@ def _assert_audit_command(command: tuple[str, ...]) -> None:
 
 
 def _role_profile(role: str, socket: Path) -> RoleExecutionProfile:
-    profile_type = cast(Any, RoleExecutionProfile)
-    return cast(
-        RoleExecutionProfile,
-        profile_type.read_only(
-            role=role,
-            candidate_socket=socket,
-            nonce=NONCE,
-            issue_iid=351,
-            candidate_tree=TREE,
-        ),
+    return RoleExecutionProfile.read_only(
+        role=role,
+        candidate_socket=socket,
+        nonce=NONCE,
+        issue_iid=351,
+        candidate_tree=TREE,
     )
 
 
@@ -96,6 +68,7 @@ def test_read_only_role_launch_has_closed_host_tool_profile(
     tmp_path: Path, role: str
 ) -> None:
     commands: list[tuple[str, ...]] = []
+    processes: list[InvokerTranscript] = []
     events: list[tuple[str, str]] = []
 
     def audit_host(
@@ -109,15 +82,7 @@ def test_read_only_role_launch_has_closed_host_tool_profile(
         return SAFE_FEATURES
 
     def run_command(command: tuple[str, ...], **kwargs: object) -> CommandResult:
-        commands.append(command)
-        environment = cast(Mapping[str, str], kwargs["environment"])
-        events.append(("launch", environment["CODEX_HOME"]))
-        assert environment["AGENT_WORK_CANDIDATE_ROLE"] == role
-        assert environment["AGENT_WORK_CANDIDATE_TREE"] == TREE
-        assert environment["AGENT_WORK_CANDIDATE_NONCE"] == NONCE
-        assert "GITLAB_TOKEN" not in environment
-        assert not (Path(environment["CODEX_HOME"]) / "config.toml").exists()
-        return CommandResult(0, "review complete", "")
+        pytest.fail("Legacy executable launch must not be used")
 
     source_home = tmp_path / "source-codex"
     source_home.mkdir()
@@ -125,7 +90,7 @@ def test_read_only_role_launch_has_closed_host_tool_profile(
         '[mcp_servers.untrusted]\ncommand = "false"\n'
     )
     (source_home / "config.toml").chmod(0o600)
-    invocation = cast(_SandboxInvokerConstructor, AgentInvoker)(
+    invocation = actor_invoker(
         run_command,
         environment={
             "AGENT_WORK_AGENT": "codex",
@@ -143,6 +108,8 @@ def test_read_only_role_launch_has_closed_host_tool_profile(
             "controller_state_unreadable": True,
         },
         read_only_host_audit=audit_host,
+        processes=processes,
+        events=events,
     ).invoke(
         tmp_path,
         "Inspect the bound candidate.",
@@ -150,6 +117,7 @@ def test_read_only_role_launch_has_closed_host_tool_profile(
         role_profile=_role_profile(role, tmp_path / "candidate.sock"),
     )
 
+    commands.extend(spec.argv for process in processes for spec in process.specs)
     assert invocation.returncode == 0
     assert len(commands) == 1
     assert [event[0] for event in events] == ["audit", "launch"]
@@ -164,8 +132,13 @@ def test_read_only_role_launch_has_closed_host_tool_profile(
         if value.startswith("mcp_servers.candidate.enabled_tools=")
     )
     assert set(enabled) == ROLE_TOOLS[role]
-    assert command[command.index("--sandbox") + 1] == "read-only"
-    assert "--ignore-user-config" in command
+    assert command[:4] == ("/codex", "app-server", "--stdio", "--strict-config")
+    assert "--sandbox" not in command and "--ignore-user-config" not in command
+    environment = dict(processes[0].specs[0].environment)
+    assert environment["AGENT_WORK_CANDIDATE_ROLE"] == role
+    assert environment["AGENT_WORK_CANDIDATE_TREE"] == TREE
+    assert environment["AGENT_WORK_CANDIDATE_NONCE"] == NONCE
+    assert "GITLAB_TOKEN" not in environment
     assert "--strict-config" in command
     assert "features.shell_tool=false" in config
     assert "features.unified_exec=false" in config
@@ -196,7 +169,7 @@ def test_read_only_role_fails_closed_without_supported_host(
         commands.append(command)
         return CommandResult(0, "unexpected", "")
 
-    invoker = cast(_SandboxInvokerConstructor, AgentInvoker)(
+    invoker = actor_invoker(
         run_command,
         environment={"AGENT_WORK_AGENT": agent},
         temporary_directory=tmp_path,
@@ -238,7 +211,7 @@ def test_read_only_role_refuses_unsafe_or_unverifiable_host_before_launch(
         commands.append(command)
         return CommandResult(0, "unexpected launch", "")
 
-    invoker = cast(_SandboxInvokerConstructor, AgentInvoker)(
+    invoker = actor_invoker(
         run_command,
         environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
         temporary_directory=tmp_path,
@@ -275,7 +248,7 @@ def test_read_only_role_refuses_audit_failure_before_launch(tmp_path: Path) -> N
         commands.append(command)
         return CommandResult(0, "unexpected launch", "")
 
-    invoker = cast(_SandboxInvokerConstructor, AgentInvoker)(
+    invoker = actor_invoker(
         run_command,
         environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
         temporary_directory=tmp_path,
@@ -330,6 +303,7 @@ def test_default_host_audit_parses_effective_capabilities_before_launch(
     tmp_path: Path, audit_output: str, audit_exit: int, *, should_launch: bool
 ) -> None:
     commands: list[tuple[str, ...]] = []
+    processes: list[InvokerTranscript] = []
     homes: list[str] = []
 
     def run_command(command: tuple[str, ...], **kwargs: object) -> CommandResult:
@@ -343,11 +317,12 @@ def test_default_host_audit_parses_effective_capabilities_before_launch(
             return CommandResult(audit_exit, audit_output, "")
         return CommandResult(0, "review complete", "")
 
-    invocation = cast(_SandboxInvokerConstructor, AgentInvoker)(
+    invocation = actor_invoker(
         run_command,
         environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
         temporary_directory=tmp_path,
         controller_state_root=tmp_path,
+        processes=processes,
         read_only_sandbox_audit=lambda _command, _environment: {
             "write_denied": True,
             "network_denied": True,
@@ -360,6 +335,12 @@ def test_default_host_audit_parses_effective_capabilities_before_launch(
         "Inspect the bound candidate.",
         10,
         role_profile=_role_profile("judge", tmp_path / "candidate.sock"),
+    )
+    commands.extend(spec.argv for process in processes for spec in process.specs)
+    homes.extend(
+        dict(spec.environment)["CODEX_HOME"]
+        for process in processes
+        for spec in process.specs
     )
     assert commands[0][-2:] == ("features", "list")
     assert len(commands) == (2 if should_launch else 1)

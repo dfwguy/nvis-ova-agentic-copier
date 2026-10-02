@@ -17,7 +17,6 @@ import re
 import shutil
 import socket
 import stat
-import sys
 import tempfile
 import threading
 import unicodedata
@@ -39,6 +38,7 @@ from pydantic import (
     model_validator,
 )
 
+from . import actor_frontend, actor_mcp_host
 from .candidate_boundary import (
     GIT_READ_MAX_CHUNK_BYTES,
     GIT_READ_MAX_FILE_BYTES,
@@ -68,6 +68,7 @@ from .models import (
 )
 from .ports import CommandResult, CommandRunner
 from .red_checkpoint import RedCheckpointEvidence, RedCheckpointRequest
+from .repository import CommandResult as ProcessCommandResult
 from .timing import stage_timing_identity, stage_timing_report
 from .workflow_router import WorkflowFacts, route_workflow
 
@@ -2716,27 +2717,6 @@ _READ_ONLY_ROLE_TOOLS = {
 _READ_ONLY_HOST_FEATURES = frozenset({"shell_tool", "unified_exec", "code_mode_host"})
 
 
-def _parse_read_only_host_features(result: CommandResult) -> dict[str, bool]:
-    """Accept only complete, unambiguous effective Codex feature states."""
-    if result.returncode != 0:
-        raise RuntimeError("read-only host capability unavailable")
-    observed: dict[str, bool] = {}
-    for line in result.stdout.splitlines():
-        columns = line.split()
-        if not columns or columns[0] not in _READ_ONLY_HOST_FEATURES:
-            continue
-        if (
-            len(columns) != 3
-            or columns[0] in observed
-            or columns[2] not in {"true", "false"}
-        ):
-            raise RuntimeError("read-only host capability unavailable")
-        observed[columns[0]] = columns[2] == "true"
-    if observed.keys() != _READ_ONLY_HOST_FEATURES:
-        raise RuntimeError("read-only host capability unavailable")
-    return observed
-
-
 class _ReadOnlySandboxEvidence(BoundaryModel):
     """Strict proof returned by the actual sandbox boundary."""
 
@@ -2745,96 +2725,6 @@ class _ReadOnlySandboxEvidence(BoundaryModel):
     auth_unreadable: StrictBool
     source_auth_unreadable: StrictBool
     controller_state_unreadable: StrictBool
-
-
-def _unique_sandbox_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    """Reject duplicate fields before validating sandbox JSON."""
-    fields: dict[str, object] = {}
-    for key, value in pairs:
-        if key in fields:
-            raise ValueError("duplicate sandbox evidence field")
-        fields[key] = value
-    return fields
-
-
-_READ_ONLY_SANDBOX_PROBE = """\
-import errno
-import json
-import os
-import socket
-import sys
-from pathlib import Path
-
-DENIED = {errno.EACCES, errno.EPERM}
-
-def descriptor_denied(path: Path, flags: int) -> bool:
-    try:
-        descriptor = os.open(path, flags, 0o600)
-    except OSError as error:
-        return error.errno in DENIED
-    os.close(descriptor)
-    if flags & os.O_CREAT:
-        Path(path).unlink()
-    return False
-
-def listing_denied(path: Path) -> bool:
-    try:
-        os.listdir(path)
-    except OSError as error:
-        return error.errno in DENIED
-    return False
-
-def network_denied() -> bool:
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
-            connection.settimeout(1)
-            connection.connect(("192.0.2.1", 9))
-    except OSError as error:
-        return error.errno in DENIED
-    return False
-
-write_path, auth_path, source_auth_path, state_root = map(Path, sys.argv[1:])
-state_listing_denied = listing_denied(state_root)
-state_file_denied = descriptor_denied(state_root / "project.lock", os.O_RDONLY)
-print(json.dumps({
-    "write_denied": descriptor_denied(write_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL),
-    "network_denied": network_denied(),
-    "auth_unreadable": descriptor_denied(auth_path, os.O_RDONLY),
-    "source_auth_unreadable": descriptor_denied(source_auth_path, os.O_RDONLY),
-    "controller_state_unreadable": state_listing_denied and state_file_denied,
-}))
-"""
-
-
-def _read_only_sandbox_command(
-    executable: str, checkout: Path, home: Path, source: Path, state_root: Path
-) -> tuple[str, ...]:
-    """Build a fixed descriptor-only probe under the role's sandbox controls."""
-    return (
-        executable,
-        "sandbox",
-        "-C",
-        str(checkout),
-        "-c",
-        'approval_policy="never"',
-        "-c",
-        'sandbox_mode="read-only"',
-        "-c",
-        "features.shell_tool=false",
-        "-c",
-        "features.unified_exec=false",
-        "-c",
-        "features.code_mode_host=false",
-        "--",
-        sys.executable,
-        "-I",
-        "-c",
-        _READ_ONLY_SANDBOX_PROBE,
-        str(checkout / (home.parent.name + "-write-probe")),
-        str(home / "auth.json"),
-        str(source / "auth.json"),
-        str(state_root),
-    )
 
 
 def candidate_tools_for_role(role: str) -> tuple[str, ...]:
@@ -2853,9 +2743,8 @@ def _candidate_preview_command(
     trusted_checkout: Path,
     controller_environment: Mapping[str, str],
     enabled_tools: tuple[str, ...],
-    role: str,
 ) -> tuple[str, ...]:
-    """Build a standalone Codex command with read-only host controls."""
+    """Build the standalone read-only candidate-preview command."""
     configured_uv = controller_environment.get("AGENT_WORK_UV")
     uv_executable = configured_uv if configured_uv is not None else shutil.which("uv")
     if uv_executable is None or not Path(uv_executable).is_absolute():
@@ -2865,7 +2754,6 @@ def _candidate_preview_command(
         raise RuntimeError("candidate MCP requires executable uv")
     return (
         executable,
-        *(("--ask-for-approval", "never") if role != "candidate-preview" else ()),
         "exec",
         "--model",
         "gpt-6.1-sol",
@@ -2874,16 +2762,10 @@ def _candidate_preview_command(
         "--sandbox",
         "read-only",
         "--ignore-user-config",
-        *(("--strict-config",) if role != "candidate-preview" else ()),
         "-c",
         "features.shell_tool=false",
         "-c",
         "features.unified_exec=false",
-        *(
-            ("-c", "features.code_mode_host=false")
-            if role != "candidate-preview"
-            else ()
-        ),
         "-c",
         "mcp_servers.candidate.command=" + json.dumps(str(uv_path)),
         "-c",
@@ -2949,6 +2831,8 @@ class AgentInvoker:
         read_only_host_audit: (
             Callable[[tuple[str, ...], Mapping[str, str]], Mapping[str, bool]] | None
         ) = None,
+        actor_transport_limits: actor_frontend.ActorTransportLimits | None = None,
+        actor_frontend_factory: actor_frontend.ActorFrontendFactory | None = None,
     ) -> None:
         self._run_command = run_command
         self._environment = environment
@@ -2957,6 +2841,8 @@ class AgentInvoker:
             candidate_broker_factory or create_candidate_broker
         )
         self._clock = clock
+        self._actor_transport_limits = actor_transport_limits
+        self._actor_frontend_factory = actor_frontend_factory
         self._read_only_host_audit = read_only_host_audit
         self._read_only_sandbox_audit = read_only_sandbox_audit
         self._controller_state_root = controller_state_root
@@ -2992,11 +2878,8 @@ class AgentInvoker:
         timeout_seconds: int,
         environment: dict[str, str],
         include_config: bool = True,
-        read_only_role: bool = False,
     ) -> CommandResult:
         """Give a Codex worker an owned session home for exactly one invocation."""
-        if read_only_role and self._controller_state_root is None:
-            raise RuntimeError("read-only sandbox capability unavailable")
         if agent != "codex":
             return self._run_command(
                 command,
@@ -3024,49 +2907,6 @@ class AgentInvoker:
                 **environment,
                 "CODEX_HOME": str(home),
             }
-            if read_only_role:
-                audit_command = (
-                    command[0],
-                    "-c",
-                    "features.shell_tool=false",
-                    "-c",
-                    "features.unified_exec=false",
-                    "-c",
-                    "features.code_mode_host=false",
-                    "features",
-                    "list",
-                )
-                try:
-                    if self._read_only_host_audit is None:
-                        audit_result = self._run_command(
-                            audit_command,
-                            stdin=None,
-                            timeout_seconds=min(
-                                timeout_seconds, HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS
-                            ),
-                            environment=scoped_environment,
-                        )
-                        features = _parse_read_only_host_features(audit_result)
-                    else:
-                        features = self._read_only_host_audit(
-                            audit_command, scoped_environment
-                        )
-                    if (
-                        not isinstance(features, Mapping)
-                        or features.keys() != _READ_ONLY_HOST_FEATURES
-                        or any(
-                            type(value) is not bool or value
-                            for value in features.values()
-                        )
-                    ):
-                        raise RuntimeError("read-only host capability unavailable")
-                except Exception:  # noqa: BLE001 - injected audit errors must deny launch
-                    raise RuntimeError(
-                        "read-only host capability unavailable"
-                    ) from None
-                self._audit_read_only_sandbox(
-                    command, home, source, scoped_environment, timeout_seconds
-                )
             return self._run_command(
                 command,
                 stdin=stdin,
@@ -3101,47 +2941,184 @@ class AgentInvoker:
                         "private Codex home cleanup failed"
                     ) from cleanup_error
 
-    def _audit_read_only_sandbox(
+    def _run_actor_role(
         self,
-        command: tuple[str, ...],
-        home: Path,
-        source: Path,
-        environment: Mapping[str, str],
-        timeout_seconds: int,
-    ) -> None:
-        """Require complete independent sandbox denial proof before role launch."""
+        executable: str,
+        checkout: Path,
+        prompt: str,
+        timeout: int,
+        environment: dict[str, str],
+        role_profile: RoleExecutionProfile,
+    ) -> actor_mcp_host.ActorResult:
+        if self._actor_transport_limits is None:
+            raise actor_frontend.ActorHostError("actor_limits_unavailable")
         if self._controller_state_root is None:
-            raise RuntimeError("read-only sandbox capability unavailable")
-        probe = _read_only_sandbox_command(
-            command[0],
-            Path(command[command.index("-C") + 1]),
-            home,
-            source,
-            self._controller_state_root,
+            raise actor_frontend.ActorHostError("actor_plan_invalid")
+        deadline = self._clock() + timeout
+        configured_uv = self._environment.get("AGENT_WORK_UV") or shutil.which("uv")
+        if configured_uv is None or not Path(configured_uv).is_absolute():
+            raise actor_frontend.ActorHostError("actor_plan_invalid")
+        uv_path = Path(configured_uv).resolve()
+        if not uv_path.is_file() or not os.access(uv_path, os.X_OK):
+            raise actor_frontend.ActorHostError("actor_plan_invalid")
+        root = Path(
+            tempfile.mkdtemp(prefix="agent-work-codex-", dir=self._temporary_directory)
         )
+        root_evidence = root.lstat()
         try:
-            if self._read_only_sandbox_audit is None:
-                result = self._run_command(
-                    probe,
-                    stdin=None,
-                    timeout_seconds=min(
-                        timeout_seconds, HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS
-                    ),
-                    environment=environment,
+            os.chmod(root, 0o700)
+            home = root / "codex"
+            home.mkdir(mode=0o700)
+            source = Path(self._environment.get("CODEX_HOME", Path.home() / ".codex"))
+            if credential := self._owned_codex_credential(source, "auth.json"):
+                os.symlink(credential, home / "auth.json")
+            scoped_environment = {
+                **environment,
+                "CODEX_HOME": str(home),
+                "HOME": str(home),
+            }
+            binding = actor_mcp_host.ActorBinding(
+                role=role_profile.role,
+                issue_iid=role_profile.issue_iid,
+                candidate_tree=role_profile.candidate_tree,
+                checkout=checkout,
+                scoped_home=home,
+                trusted_checkout=self._trusted_controller_checkout,
+                source_home=source,
+                controller_state_root=self._controller_state_root,
+                executable=executable,
+                candidate_socket=role_profile.candidate_socket,
+                nonce=role_profile.nonce,
+                candidate_command=(
+                    str(uv_path),
+                    "run",
+                    "--project",
+                    str(self._trusted_controller_checkout),
+                    "--frozen",
+                    "python",
+                    "-I",
+                    "-m",
+                    "agent_work.mcp_server",
+                ),
+            )
+            protected = self._snapshot_actor_paths(
+                (home / "auth.json", source / "auth.json", self._controller_state_root)
+            )
+            plan = actor_mcp_host.build_actor_permission_plan(binding, protected)
+            spec = actor_frontend.ActorProcessSpec(
+                argv=(
+                    executable,
+                    "app-server",
+                    "--stdio",
+                    "--strict-config",
+                    *plan.configuration_tokens,
+                ),
+                environment=tuple(scoped_environment.items()),
+                cwd=checkout,
+                deadline=deadline,
+            )
+
+            def audit_command(
+                command: tuple[str, ...],
+                *,
+                stdin: str | None = None,
+                timeout_seconds: float | None = None,
+                environment: Mapping[str, str] | None = None,
+                current_directory: Path | None = None,
+            ) -> CommandResult:
+                audit_environment = (
+                    scoped_environment if environment is None else environment
                 )
-                if result.returncode != 0:
-                    raise RuntimeError("read-only sandbox capability unavailable")
-                evidence = _ReadOnlySandboxEvidence.model_validate(
-                    json.loads(result.stdout, object_pairs_hook=_unique_sandbox_fields)
+                if (
+                    command[-2:] == ("features", "list")
+                    and self._read_only_host_audit is not None
+                ):
+                    features = self._read_only_host_audit(command, audit_environment)
+                    if (
+                        not isinstance(features, Mapping)
+                        or features.keys() != _READ_ONLY_HOST_FEATURES
+                        or any(
+                            type(value) is not bool or value
+                            for value in features.values()
+                        )
+                    ):
+                        raise actor_frontend.ActorHostError(
+                            "actor_features_unavailable"
+                        )
+                    return ProcessCommandResult(
+                        0, "\n".join(f"{key} stable false" for key in features), ""
+                    )
+                if (
+                    command[1] == "sandbox"
+                    and self._read_only_sandbox_audit is not None
+                ):
+                    evidence = _ReadOnlySandboxEvidence.model_validate(
+                        self._read_only_sandbox_audit(command, audit_environment)
+                    )
+                    if not all(evidence.model_dump().values()):
+                        raise actor_frontend.ActorHostError("actor_privacy_unavailable")
+                    return ProcessCommandResult(0, evidence.model_dump_json(), "")
+                return self._run_command(
+                    command,
+                    stdin=stdin,
+                    timeout_seconds=timeout_seconds,
+                    environment=audit_environment,
+                    current_directory=current_directory,
                 )
-            else:
-                evidence = _ReadOnlySandboxEvidence.model_validate(
-                    self._read_only_sandbox_audit(probe, environment)
+
+            result = actor_mcp_host.run_actor_session(
+                plan,
+                prompt,
+                spec=spec,
+                limits=self._actor_transport_limits,
+                ports=actor_mcp_host.ActorHostPorts(
+                    snapshot_protected=self._snapshot_actor_paths,
+                    run_command=audit_command,
+                    clock=self._clock,
+                    frontend_factory=self._actor_frontend_factory
+                    or actor_frontend.create_stdio_actor_frontend(),
+                ),
+            )
+            return result
+        finally:
+            try:
+                current = root.lstat()
+                if (
+                    not stat.S_ISDIR(current.st_mode)
+                    or current.st_uid != os.geteuid()
+                    or stat.S_IMODE(current.st_mode) != 0o700
+                    or (current.st_dev, current.st_ino)
+                    != (root_evidence.st_dev, root_evidence.st_ino)
+                ):
+                    raise OSError("private actor root changed")
+                shutil.rmtree(root)
+            except OSError:
+                raise actor_frontend.ActorHostError("actor_cleanup_failed") from None
+
+    def _snapshot_actor_paths(
+        self, paths: tuple[Path, ...]
+    ) -> tuple[actor_mcp_host.ProtectedPathSnapshot, ...]:
+        values = []
+        for path in paths:
+            try:
+                observed = path.lstat()
+            except FileNotFoundError:
+                observed = None
+            canonical = path.resolve(strict=False)
+            values.append(
+                actor_mcp_host.ProtectedPathSnapshot(
+                    lexical_path=path,
+                    canonical_path=canonical,
+                    device=observed.st_dev if observed is not None else None,
+                    inode=observed.st_ino if observed is not None else None,
+                    mode=observed.st_mode if observed is not None else None,
+                    symlink_target=os.readlink(path)
+                    if observed is not None and stat.S_ISLNK(observed.st_mode)
+                    else None,
+                    present=observed is not None,
                 )
-            if not all(evidence.model_dump().values()):
-                raise RuntimeError("read-only sandbox capability unavailable")
-        except Exception:  # noqa: BLE001 - injected audit errors must deny launch
-            raise RuntimeError("read-only sandbox capability unavailable") from None
+            )
+        return tuple(values)
 
     def preflight(self) -> None:
         """Verify the selected agent supports the required worker boundary."""
@@ -3308,6 +3285,30 @@ class AgentInvoker:
                     "AGENT_WORK_CANDIDATE_ROLE": role_profile.role,
                 }
             )
+            if role_profile.role != "candidate-preview":
+                try:
+                    actor_result = self._run_actor_role(
+                        executable,
+                        checkout,
+                        prompt,
+                        timeout,
+                        worker_environment,
+                        role_profile,
+                    )
+                except actor_frontend.ActorHostError as error:
+                    return WorkerInvocation(None, stderr=error.reason)
+                except (OSError, RuntimeError, ValueError, TypeError):
+                    return WorkerInvocation(None, stderr="actor_frontend_unavailable")
+                rendered = _redact(actor_result.stdout, worker_environment)
+                for private in (
+                    str(role_profile.candidate_socket),
+                    role_profile.nonce,
+                    role_profile.candidate_tree,
+                ):
+                    rendered = rendered.replace(private, "[REDACTED]")
+                return WorkerInvocation(
+                    actor_result.returncode, rendered, actor_result.stderr
+                )
             try:
                 result = self._run_worker_command(
                     agent,
@@ -3317,21 +3318,14 @@ class AgentInvoker:
                         self._trusted_controller_checkout,
                         self._environment,
                         candidate_tools_for_role(role_profile.role),
-                        role_profile.role,
                     ),
                     stdin=prompt,
                     timeout_seconds=timeout,
                     environment=worker_environment,
                     include_config=False,
-                    read_only_role=role_profile.role != "candidate-preview",
                 )
             except RuntimeError:
-                failure = (
-                    "candidate preview setup failed"
-                    if role_profile.role == "candidate-preview"
-                    else "read-only host capability unavailable"
-                )
-                return WorkerInvocation(None, stderr=failure)
+                return WorkerInvocation(None, stderr="candidate preview setup failed")
             private_values = (
                 str(role_profile.candidate_socket),
                 role_profile.nonce,
