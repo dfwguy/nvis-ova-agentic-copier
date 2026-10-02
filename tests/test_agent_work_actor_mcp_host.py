@@ -1106,6 +1106,67 @@ def test_permission_cli_serialization_preserves_fixed_fingerprint_and_detects_dr
     _assert_filesystem_table(plan)
 
 
+@pytest.mark.parametrize("explicit_none", [False, True], ids=["omitted", "none"])
+def test_permission_plan_without_identity_preserves_legacy_fingerprint_and_profile(
+    *, explicit_none: bool
+) -> None:
+    binding, protected = _permission_fixture()
+    if explicit_none:
+        binding = replace(binding, committed_identity=None)
+    plan = worker.actor_mcp_host.build_actor_permission_plan(binding, protected)
+    legacy_fingerprint = (
+        "6831b65045908225be47025247f10f799f9f89c2c6fbd0023ab4403aa76e3c73"
+    )
+    assert plan.fingerprint == legacy_fingerprint
+    assert plan.profile_id == "agent-work-" + legacy_fingerprint
+
+
+@settings(max_examples=12)
+@given(
+    source_leases=st.lists(
+        st.binary(min_size=20, max_size=20), min_size=2, max_size=2, unique=True
+    )
+)
+def test_permission_plan_generated_committed_identities_bind_fingerprint_and_profile(
+    source_leases: list[bytes],
+) -> None:
+    binding, protected = _permission_fixture()
+    identities = tuple(
+        worker.ReconcilerCandidateIdentity(
+            role=binding.role,
+            host="gitlab.example.test",
+            project_id=1,
+            merge_request_iid=426,
+            source_branch="clanker/issue426-legacy-fingerprint-r1",
+            source_lease_sha=source_lease.hex(),
+            checkout_branch="clanker/issue426-legacy-fingerprint-r1",
+            target_branch="main",
+            target_sha="c" * 40,
+            final_sha="d" * 40,
+            committed_tree=binding.candidate_tree,
+        ).model_dump_json()
+        for source_lease in source_leases
+    )
+    bindings = tuple(
+        replace(binding, committed_identity=identity)
+        for identity in (None, *identities, "")
+    )
+    plans = tuple(
+        worker.actor_mcp_host.build_actor_permission_plan(value, protected)
+        for value in bindings
+    )
+    for value, plan in zip(bindings, plans, strict=True):
+        assert (
+            worker.actor_mcp_host.build_actor_permission_plan(value, protected) == plan
+        )
+        assert plan.profile_id == "agent-work-" + plan.fingerprint
+    for plan in plans[1:]:
+        assert plan.fingerprint != plans[0].fingerprint
+        assert plan.profile_id != plans[0].profile_id
+    assert plans[1].fingerprint != plans[2].fingerprint
+    assert plans[1].profile_id != plans[2].profile_id
+
+
 class _ProvenanceTranscript(TranscriptProcess):
     """Inject provenance faults only at the raw external response producer."""
 
