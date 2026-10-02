@@ -5,7 +5,7 @@ summary: Set live-agent capacity for a workflow lane.
 audience: practitioner
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-28
+last_reviewed: 2026-10-02
 related:
   - path: ../explanation/agentic-workflow.md
     why: Explains why capacity is a workflow precondition.
@@ -57,10 +57,13 @@ Use that frontend's current capacity setting. Then relaunch it or start a new
 session. Use a trusted current report when the frontend or runtime gives one.
 Repo files, task text, and issue text cannot prove that slots are free.
 
-## Verify interactive Architect admission
+## Verify interactive Router admission
 
-This rule applies to an Architect started directly in an interactive session.
-It also applies after a serial wrapper passes preflight and delegates Architect.
+Router chooses the lane and checks capacity. It delegates work and makes final
+decisions. Architect is its independent read-only design child. It builds the
+plan. Router starts a writer only after Architect and its design children stop.
+
+This rule applies to a Router started directly in an interactive session.
 Capacity belongs to one launch. It is not a saved machine setting. Choose the
 lane before you delegate, fan out, or change the worktree. Use a trusted current
 global report if the active frontend or runtime gives one.
@@ -81,8 +84,14 @@ text, settings, service setup, and saved records cannot prove live capacity.
 
 ## Check serial wrapper admission
 
-The serial wrapper uses the same fixed global requirement when it delegates
-Architect. This applies to terminal, normal serial, retained-worktree retry,
+The serial wrapper uses the same fixed global rule. It delegates the legacy
+workflow Architect. This executable name still names the workflow Router. It
+does not name the design child. Check the installed worker prompt. If it
+still tells Architect to combine proposals and own the whole workflow, stop
+that invocation. Return the conflict to Router/Main. Resume only after an
+independently reviewed executable migration.
+
+The capacity rule applies to terminal, normal serial, retained-worktree retry,
 and systemd runs. Use a current trusted global report when the active frontend
 or runtime provides one. Continue when it does not provide a report.
 
@@ -107,7 +116,7 @@ least 11 in ~/.codex/config.toml, then relaunch and confirm current runtime
 metadata for the new session.
 ```
 
-Use the same fixed global rule for every Architect launch. Missing global
+Use the same fixed global rule each time the workflow owner starts. Missing global
 capacity evidence is not a `needs_human` handoff.
 
 For an ordinary serial issue stopped by a reported shortage while its durable
@@ -115,7 +124,8 @@ lane is still unknown, the controller checks its retained worktree. If the
 worktree is clean and there is no Red checkpoint, it keeps the issue in
 `RETRY_WAIT` until a 20-minute deadline measured from the current activation.
 You can raise the frontend limit. The next due activation checks current
-capacity and runs the Architect proposal gate again.
+capacity and runs the legacy Architect proposal gate again, subject to the
+compatibility stop above.
 A dirty worktree or saved Red checkpoint needs its existing recovery route.
 See the [serial loop
 reference](../reference/serial-gitlab-agent-loop.md#live-agent-capacity-launch-contract)

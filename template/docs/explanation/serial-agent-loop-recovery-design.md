@@ -5,7 +5,7 @@ summary: Learn how the loop recovers unattended work.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-29
+last_reviewed: 2026-10-02
 related:
   - path: serial-gitlab-agent-loop.md
     why: Explains the operational model implemented by this architecture.
@@ -232,7 +232,7 @@ internal agent handoffs.
 | Human block | A failed or canceled default-branch pipeline blocks unrelated work. An ownerless failed or canceled open-MR pipeline stays item-local. | Earlier gates and targeted recovery must allow selection. | Continue only when that authority exists. |
 | Prerequisite projection | Derive and reconcile prerequisite-label projections from one complete marker and live-state proof before selection. | A changed projection. | End as housekeeping. Claim no work. Create no record, worktree, or worker session. |
 | Eligibility and ranking | Select open, non-confidential issues only. They need no lifecycle projection, ledger record, open split prerequisite, or required open descendant of a closed decomposition parent. Rank exact high, normal with no recognized exact priority, then exact low. | Absolute creation time and IID break rank ties. | Continue to classification. |
-| Classification | Classify before claim: ordinary work, existing-MR remediation, merge-conflict repair, or manual-lane protected policy work. | The applicable classification and Architect lane. | Claim only after classification. |
+| Classification | Classify before claim: ordinary work, existing-MR remediation, merge-conflict repair, or manual-lane protected policy work. | The applicable classification and Router-selected lane. | Claim only after classification. |
 | Write-ahead transition | Persist intent before each external mutation. Record its observed result. | Durable intent and observed result. | Reconciliation completes or compensates across interruption. |
 | Worker | Run one bounded owner worker in its durable worktree. Validate its versioned `ready_to_publish`, `retryable`, or `needs_human` result. | The one workflow-owning worker session and its versioned result. | Continue to publication only with a valid result. |
 | Publication | Publish idempotently. Verify exact same-project MR, branch, target, tip, and closing-issue evidence. Record one safe action. | Exact GitLab and Git evidence. | Continue only with safe progress. Otherwise yield for idle, no progress, future wait, terminal or human state, or workflow or wall-time bound. |
@@ -257,8 +257,8 @@ locally. Scanning continues. Never choose a plausible newest MR.
 Fresh selection begins its applicable workflow. It seeks human handoff or a
 yield in that activation. Reconciliation restores existing worktrees. It
 re-enters their coarse `WORKFLOW` state. Legacy phase-ledger values finish
-their recorded route. First rollout adds no sidecar checkpoints for Architect,
-Red, Green, documentation, or judges.
+their recorded route. First rollout adds no sidecar checkpoints for internal
+role handoffs, including Router, Architect, Red, Green, documentation, or judges.
 
 Default activation allows 16 workflow attempts in a 10,800-second
 (three-hour) budget. Each owning invocation gets positive, ceil-rounded time
@@ -324,12 +324,21 @@ The table maps each invariant to the required control or evidence.
 | Publication | Publication is idempotent. It needs exact GitLab and Git evidence. |
 | Protected-policy applicability | Protected-policy applicability uses the prospective publication tree against the durable verified reconciliation target, not raw worktree status. This assigns target-branch-only policy changes to the target branch. It keeps review evidence for issue-owned changes and merge resolutions that differ from the target tree. |
 | Human handoff | Before projecting `agent::awaiting-human`, the runner writes one factory-authored actionable issue handoff for the exact MR source commit. A deterministic project, issue, MR, and SHA marker, plus a verified factory author, make recovery noiseless. The same SHA reuses the note. A changed SHA needs a new handoff. The note asks a human to review the named commit and either approve and merge it if acceptable or leave actionable general or inline MR feedback. The runner never assigns a reviewer, approves, or merges. |
-| Workflow ownership | One session owns the full workflow. Red changes only `tests/` and stops at the accepted checkpoint. After any policy preparation, Green changes code and tests while the Diátaxis Writer changes `docs/` and README in parallel. After both stop editing, Green requests controller staging and the Green commit through the private candidate socket. Specialists review that commit and tree. Green consolidates judge findings and routes prose fixes to the writer for the Architect's final decision. |
+| Workflow ownership | Router owns the full workflow; Architect is its independent read-only design child. Red changes only `tests/` and stops at the accepted checkpoint. After any policy preparation, Green changes code and tests while the Diátaxis Writer changes `docs/` and README in parallel. After both stop editing, Green requests controller staging and the Green commit through the private candidate socket. Specialists review that commit and tree. Green consolidates judge findings and routes prose fixes to the writer for Router's final decision. |
 | Target reconciliation | If the target advances after Green, the controller proves the exact Green source, pending target, and retained Red and Green refs. It validates the joined tree before review, records a reconciliation intent, then makes an ordered two-parent commit with Green first and target second. Publication verifies that commit and pushes its SHA. |
 | Systemd outcomes | Expected durable outcomes do not fail the systemd unit. |
 | Authority boundary | The runner never approves or merges. It never widens authority from issue text, labels, comments, or worker output. |
 
 ## Workflow protocol and specialist context
+
+Router owns lane selection, admission, delegation, corrections, and final
+decisions. Architect supplies an independently reviewed design. Legacy
+executable `$architect` receipt keys still name the workflow Router. They do
+not rename the design child or migrate the installed worker prompt. If that
+prompt still tells Architect to combine proposals and own the whole workflow,
+stop the invocation and return the conflict to Router/Main. Resume only after
+an independently reviewed executable migration. The ownership below describes
+the portable route; existing serial mechanics remain subject to that stop.
 
 The producer sends bounded intent while the worker is live. It uses private
 scratch and a private Unix socket. The controller builds the result. A rejected
@@ -350,10 +359,10 @@ against the current record and Git evidence. A deliberate stop is not a failure.
 | `retryable` | Runner; current retry evidence | Retry now, or retain a future deadline for an external transient. An explicit retry of the exact issue resets the automatic budget after a human fix. |
 | `needs_human` | Runner; block and concrete action | Block publication. |
 | Malformed protocol or legacy receipt condition | Runner; current coarse phase and canonical identity: error code plus bounded, stable, redacted contract-field or reason diagnostic | Retry once immediately. The same later identity blocks, retains phase, worktree, and safe cause, and creates the normal blocked projection and comment. A changed code, diagnostic, or phase uses the bounded retry path; non-protocol transients keep their retry rules. Historical receipt prose cannot authorize the retry. |
-| Architecture through Green | Architect gives the approved design to Red, completes any policy preparation, then starts Green and the Diátaxis Writer after the accepted checkpoint | Green implements code and tests while the writer aligns docs and README with the final interface. After both stop editing, Green asks the controller to stage and commit one candidate with its installed hook. |
-| Green through finalization | Green; final interface, documentation, and applicable read-only judge receipts | Green runs judge fan-out against the Green SHA and tree, corrects code and tests from evidence, routes prose findings to the writer, consolidates feedback, and returns it to Architect. Each correction needs a new committed candidate and fresh receipts. The Diátaxis Judge compares design, writer receipt, final docs, and final interface; its verdict and writer evidence are required finalizer evidence. |
+| Architecture through Green | Router receives Architect's reviewed design, delegates Red and any policy preparation, then starts Green and the Diátaxis Writer after the accepted checkpoint | Green implements code and tests while the writer aligns docs and README with the final interface. After both stop editing, Green asks the controller to stage and commit one candidate with its installed hook. |
+| Green through finalization | Green; final interface, documentation, and applicable read-only judge receipts | Green runs judge fan-out against the Green SHA and tree, corrects code and tests from evidence, routes prose findings to the writer, consolidates feedback, and returns it to Router. Each correction needs a new committed candidate and fresh receipts. The Diátaxis Judge compares design, writer receipt, final docs, and final interface; its verdict and writer evidence are required finalizer evidence. |
 | Target reconciliation through finalization | Green and controller; joined tree and exact source and target identities | A pending target merge uses staged-tree validation and reviews before the controller makes the ordered two-parent commit. A changed joined tree needs fresh validation and receipts. |
-| Publication and required-job proof | Architect, finalizer, then runner; complete finalizer evidence | `observing` and exact-MR-conflict `repair` are durable. The controller verifies current required jobs before human handoff. |
+| Publication and required-job proof | Router, finalizer, then runner; complete finalizer evidence | `observing` and exact-MR-conflict `repair` are durable. The controller verifies current required jobs before human handoff. |
 
 For coding work, the hook checks the change as the controller makes the Green
 commit. This happens before review. The runner then pushes that SHA. It makes
