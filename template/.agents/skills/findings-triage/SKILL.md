@@ -24,6 +24,6 @@ Codex, Pi, and Claude Code.
 
 ## Model selection
 
-Use this skill's `metadata.model-tier`. The live Architect router resolves the
+Use this skill's `metadata.model-tier`. The live Router resolves the
 delegation mapping. Each frontend maps that tier. Do not hard-code a
 provider-specific model name here.

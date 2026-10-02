@@ -47,7 +47,7 @@ Root-only test harness changes may affect only the root.
 3. **Static shape:** inspect jobs for dead paths, needless duplication, missing
    tags/rules/artifact conventions, wrong dependencies, or an improper
    `allow_failure: true`.
-4. Send each actionable, non-blocking Minor to Green and Architect.
+4. Send each actionable, non-blocking Minor to Green and Router.
 
 ## Verdict
 

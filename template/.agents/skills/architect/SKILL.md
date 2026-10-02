@@ -1,8 +1,8 @@
 ---
 name: architect
-description: Design non-trivial changes before tests or implementation; use at the start of feature work or refactors.
+description: Produce one reviewed Sol-based implementation plan for Router.
 metadata:
-  model-tier: balanced
+  model-tier: most-capable
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: LicenseRef-NvidiaProprietary -->
@@ -14,15 +14,15 @@ metadata:
 <!-- without an express license agreement from NVIDIA CORPORATION or -->
 <!-- its affiliates is strictly prohibited. -->
 
+
 # Architect
 
-Use this portable workflow skill for the architecture stage. Before acting, read
-and follow [the role instructions](../../agents/architect.md). That file is
-role-reference material. This directory is the shared skill entry point for
-Claude Code, Codex, and Pi.
+Use this skill as Router's read-only design child. Read and follow
+[the role instructions](../../agents/architect.md). Own the independent
+proposal trio, keep Sol base, and run the three plan checks once. Raw drafts
+stay in your context. Return only the final reviewed plan and blockers.
 
 ## Model selection
 
-Use this skill's `metadata.model-tier`. The live Architect router resolves the
-delegation mapping. Each frontend maps that tier through its configured model
-mapping. Do not hard-code a provider-specific model name in this skill.
+Use this skill's `metadata.model-tier`. Router maps the tier through the
+frontend's existing mapping and current user instructions.

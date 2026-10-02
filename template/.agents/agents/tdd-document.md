@@ -55,7 +55,7 @@ is accurate.”
 2. **Decide if README needs updating**: use the scope above. If a visitor does
    not need this change to learn or start the project, stop and report.
 3. **Return every finding**: give all missing or stale README facts in one
-   receipt to Green. Green routes them through Architect to the Diátaxis
+   receipt to Green. Green routes them through Router to the Diátaxis
    Writer for repair.
 
 ## Constraints

@@ -22,5 +22,5 @@ Those instructions govern the review.
 
 ## Model selection
 
-Use this skill's `metadata.model-tier`. Its tier is `fast`. The live Architect
+Use this skill's `metadata.model-tier`. Its tier is `fast`. The live Router
 router resolves the delegation mapping. It resolves it for delegation.

@@ -16,7 +16,7 @@ metadata:
 
 # Consistency Judge
 
-Use this read-only skill when a changed fact has copies or Architect cannot
+Use this read-only skill when a changed fact has copies or Router cannot
 rule that out. In serial work, require a live controller-owned `candidate read`
 for the exact candidate. Get the controller's canonical inventory, including
 each changed path's old/new mode, blob ID, and size. Account for both sides of
@@ -43,5 +43,5 @@ render when a template change can alter output.
 
 ## Model selection
 
-Use this skill's `metadata.model-tier`. Architect maps the tier for each
+Use this skill's `metadata.model-tier`. Router maps the tier for each
 frontend. Do not name a provider model here.

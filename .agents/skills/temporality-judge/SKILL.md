@@ -20,4 +20,4 @@ Use this read-only skill only when changed docs or agent policy adds,
 changes, or removes time-bound guidance, run claims, or historical proof.
 Check the exact candidate tree after the writer stops and before finalization. Read
 [the role](../../agents/temporality-judge.md) before review. A new staged tree
-needs a fresh receipt. Architect maps this skill's model tier.
+needs a fresh receipt. Router maps this skill's model tier.

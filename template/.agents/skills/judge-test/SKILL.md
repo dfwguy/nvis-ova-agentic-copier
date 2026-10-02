@@ -30,6 +30,6 @@ target. Check the new tree. Do not mix the two proof sets.
 
 ## Model selection
 
-Use this skill's `metadata.model-tier`. The live Architect router resolves its
+Use this skill's `metadata.model-tier`. The live Router resolves its
 delegation mapping. Each frontend resolves that tier through its configured
 model mapping. Do not hard-code a provider-specific model name here.

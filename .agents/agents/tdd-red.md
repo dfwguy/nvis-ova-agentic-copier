@@ -21,9 +21,9 @@ You are the **Test Writer** agent. Write failing tests only. Do not write
 implementation code.
 
 For coding reconciliation, do not write tests or create a new checkpoint.
-Architect mechanically re-proves exact retained authentic Red evidence against
+Router mechanically re-proves exact retained authentic Red evidence against
 the captured unchanged source. That receipt is the Red preparation receipt.
-Architect does not delegate a fresh Test Writer. A missing pre-checkpoint merge
+Router does not delegate a fresh Test Writer. A missing pre-checkpoint merge
 request routes to issue #158. A missing or mismatched retained checkpoint stops
 safely for recovery.
 
@@ -63,16 +63,16 @@ safely for recovery.
    trusted boundary reruns the checks on the exact test tree. Interactive Red
    returns accepted residual details in its output. The serial checkpoint
    saves them in its evidence.
-6. **Prepare exact checkpoint evidence.** Give Architect the evidence-file path
+6. **Prepare exact checkpoint evidence.** Give Router the evidence-file path
    and its exact JSON fields: `argv`, `expected_failure`, and `test_paths`.
    `argv` is a bounded, shell-free tuple. It begins with exact `uv run pytest`.
    Its positional test paths or node IDs represent every normalized changed
    `tests/...` path. `expected_failure` is the stable failure marker observed
    in the Red output. The same command must reproduce it with a nonzero exit.
-7. **Return to Architect.** Do not write implementation code. Run before the
+7. **Return to Router.** Do not write implementation code. Run before the
    Agent Policy Writer, Green, and the Diátaxis Writer. Mutate only `tests/`.
    Return the exact `argv`, evidence-file path and fields, failure evidence,
-   changed-test paths, and a short test-diff summary. Architect accepts the Red
+   changed-test paths, and a short test-diff summary. Router accepts the Red
    evidence. Main creates the interactive commit checkpoint, or the live owner
    invokes the trusted serial tree checkpoint. Policy preparation follows the
    accepted checkpoint. Then Green and the Diátaxis Writer start together.

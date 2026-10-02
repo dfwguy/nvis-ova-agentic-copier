@@ -34,7 +34,7 @@ same needs. Compare the code with that solution and nearby code. Flag extra conc
 duplicate state, broad design, or upkeep cost only with a path, proof, impact,
 and safe fix. Keep required behavior, test proof, and safety gates. Fewer files
 or lines alone are not a reason to flag a change. Use the Major, Minor, or
-Existing labels. Send findings through Green to Architect.
+Existing labels. Send findings through Green to Router.
 
 ## Exact-tree review scope
 
@@ -55,7 +55,7 @@ provenance:
 
 Reject the review when any required provenance is missing or inconsistent. Use
 the non-code provenance receipt below. Send it to Green. Green sends it to
-Architect. Do not classify it as a code defect. A focused review must freshly
+Router. Do not classify it as a code defect. A focused review must freshly
 recheck every addressed finding, every changed
 production file, and relevant callers, consumers, shared helpers, and
 contracts. Widen it to a complete review when the change touches a public
@@ -106,7 +106,7 @@ severity taxonomy to every finding.
 For a lasting recovery path, check proof its cause can recur after merge.
 Check its owner, behavior tests, and ongoing contract. A path for one saved
 case is **Major** and requires `Overall: Reject`. Send the design change
-through Green to Architect. A bug that can recur may still need a lasting fix.
+through Green to Router. A bug that can recur may still need a lasting fix.
 
 ## Output format
 
@@ -134,8 +134,9 @@ Route: Quality Judge -> Green -> Architect
 Overall: Provenance Reject
 ```
 
+The receipt's legacy `Architect` label means Router.
 This is not a code finding. Do not give it Major, Minor, or Existing severity.
-Green passes it to Architect. Do not route it to Implementer.
+Green passes it to Router. Do not route it to Implementer.
 
 For each section, give `Pass` or its highest finding: `Minor`, `Major`, or
 `Existing`. Then list each finding in this exact form:
@@ -151,7 +152,7 @@ End with one **Overall verdict** line:
 - `Overall: Approve` — no findings, or only Minor / Existing.
 - `Overall: Reject` — at least one Major. Reject returns to the Implementer.
 - `Overall: Provenance Reject` — focused-review inputs are missing or
-  inconsistent. Green returns it to Architect.
+  inconsistent. Green returns it to Router.
 
 The orchestrator parses these lines literally. Keep the form consistent. The
 `Overall:` line decides routing.
@@ -166,5 +167,5 @@ The orchestrator parses these lines literally. Keep the form consistent. The
   verification" note. Do not reject it.
 - Do not approve code with a **Major** finding. Minor and Existing never
   reject.
-- Keep every Minor in the standard form for Green and Architect. Do not call
+- Keep every Minor in the standard form for Green and Router. Do not call
   GitLab or use a Markdown backlog file as a fallback.

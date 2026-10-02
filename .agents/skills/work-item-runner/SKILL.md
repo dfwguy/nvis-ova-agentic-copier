@@ -57,26 +57,28 @@ The deterministic controller, AI workflow, and required nested agents use the
 same scoped Developer GitLab credential. Humans provide product and policy
 inputs. Only humans may approve. Only humans may merge.
 
-Classify the whole change. Then delegate one live `$architect`. In each fresh
-serial segment, it runs the proposal gate before its first child may edit.
-This covers the Red-first and resumed segments. One exact
-`$architect-proposal-balanced` and two exact `$architect-proposal-fast` children
-start concurrently. They work alone and send plans to the same Architect. All
-three valid plans are required. Architect checks repo facts itself and owns the
-sole formal receipt. Plans are direct AI-to-AI context, never
-`WorkerResultBuildInput` or controller evidence. For a failed child, one fresh
-same-skill, same-tier replacement is allowed. If the gate still fails, stop
-before edits. The live router is `.agents/agents/architect.md`. It owns coding
-routing, documentation/policy routing, admission, parentage, and stage
-contracts. It also owns receipts and correction cycles. It owns normal, Draft,
-or `needs_human` decisions. Mixed or
-uncertain work uses the coding route. Read and activate each exact `$skill-id`.
-Never infer a skill from a display name. Never infer one from a rolled-up
-label. Keep every required
-or not-applicable receipt in the single result envelope.
+Classify the whole change. The instruction router is `$router` at
+`.agents/agents/router.md`. It owns workflow choice, admission, writer release,
+corrections, and final human handoff. Its design child `$architect` owns the
+proposal trio and the single pass of plan reviews. Raw drafts stay only in
+that design child's context. Router receives the final reviewed Sol plan and
+unresolved blockers. Mixed or uncertain work uses coding. Activate exact
+skill IDs; do not infer skills from display names.
+
+The executable worker prompt still tells the legacy workflow Architect to
+receive and combine proposals. It is incompatible with this split; this prose
+does not migrate or activate the live serial route.
+If this session starts with the incompatible legacy worker prompt, stop.
+Return the conflict to Router/Main. Resume the serial route only after an
+independently reviewed executable migration.
+Existing executable
+`$architect` receipt keys still identify the workflow Router. Keep those wire
+keys, controller records, required fields, and checks unchanged. Do not claim
+live readiness from renamed instructions. Keep every required or N/A receipt
+in the existing result envelope.
 
 The worker makes one launch-scoped capacity decision before it delegates
-Architect. Architect checks again before Red, Documentation Writer, worktree
+Router. Router checks again before Red, Documentation Writer, worktree
 mutation, or later fanout. Both use the fixed global live-slot requirement for
 the selected lane. Coding requires 12. Content requires 5. For capacity, stop
 only on an actual report from the active frontend or runtime. That report must
@@ -126,7 +128,7 @@ changed paths before publishing that same commit. Content work retains its
 separate staged-tree publication route.
 
 The Red-only intent is one protocol-version-2 `red_checkpoint_ready` envelope.
-It has the Architect and Red receipts, the exact `red_checkpoint_request`, a
+It has the legacy `$architect` workflow and Red receipts, the exact `red_checkpoint_request`, a
 change summary, and the next action. It has no documentation or policy receipt,
 merge-request draft, audit summary, split plan, or error result. The trusted
 broker rejects a missing or mismatched checkpoint, a passing command, a missing
@@ -136,7 +138,7 @@ the resumed segment without accepted program-owned evidence.
 
 For a recoverable command, API, retained-work, or review failure, diagnose the
 evidence. Pursue one bounded safeguard-preserving alternative. Preserve the
-Architect and Finalizer normal or Draft decision. A resolved, validated change
+Router and Finalizer normal or Draft decision. A resolved, validated change
 proceeds to a normal MR. A mechanically safe, sufficiently validated change
 with a real human decision proceeds to a Draft MR. Keep detailed findings and
 receipts. Keep the correction ledger in the result envelope and durable audit.

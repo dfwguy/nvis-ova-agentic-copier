@@ -39,7 +39,7 @@ or replaced checkpoint evidence is a Major provenance defect.
 For reconciliation, require the mechanically re-proved retained historical
 Red-to-source provenance plus fresh three-way source-plus-target-to-candidate
 evidence. Keep these proofs separate in the receipt. A missing proof or ref
-identity drift is a Major provenance defect and returns to Architect; never
+identity drift is a Major provenance defect and returns to Router; never
 ask Test Writer to manufacture a new Red checkpoint.
 
 ## Severity taxonomy (same model as judge-quality)
@@ -143,7 +143,7 @@ The orchestrator parses these lines literally. Keep the format consistent. The
   tests, such as a missing injection point. Leave general production-code
   quality to `judge-quality`.
 - Do not approve tests with any **Major** finding. Minor and Existing findings never cause a rejection.
-- Preserve every Minor in the standard output format for Green and Architect.
+- Preserve every Minor in the standard output format for Green and Router.
   Do not call GitLab or use a Markdown backlog file as a fallback.
 - Do not create, update, or push a checkpoint ref. Review the accepted local
   checkpoint and Red-to-Green diff only.

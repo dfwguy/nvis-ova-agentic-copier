@@ -31,14 +31,20 @@ session to finish a check. The normal Finalizer route is unchanged. Follow
 
 Use the full list. Check each item. Keep each proof. Stop on a gap.
 
+For interactive work, direct messages are enough. Use each role's result.
+State a concrete failure and the next owner. Link the original proof when
+needed. No agent progress or repair log is required. Do not rebuild receipts
+from prose. Check the trusted output and exact IDs. Keep serial receipts and
+recovery records.
+
 1. Check for the Judge's current non-functional child receipt and each needed
    specialist-review receipt, including the current approving license receipt. Check the
    Policy Writer receipt or exact N/A, and the independent Policy Judge receipt
    matching the final policy diff. Get the Consistency Judge receipt or
-   Architect's exact `$consistency-judge: not applicable — <reason>`.
+   Router's exact `$consistency-judge: not applicable — <reason>`.
    Check whether changed docs or policy add, change, or remove time-bound
    guidance, run claims, or old proof. If so, get the Temporality Judge receipt
-   for the final tree. Otherwise get Architect's exact
+   for the final tree. Otherwise get Router's exact
    `$temporality-judge: not applicable — <reason>` with its scope rationale.
    In serial work, an applicable receipt must approve the final Green SHA and candidate tree
    and cite a live controller-owned `candidate read` snapshot taken after the
@@ -68,14 +74,14 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
    `$consistency-judge: not applicable — trusted pre-finalization candidate tree/read boundary unavailable`
    with mode and capability evidence. A missing, rejected, failed, or stale
    expected read is a block, not N/A. When Temporality Judge applies, check
-   its tree and read proof the same way. An interactive receipt must
+   its tree and read proof the same way. An interactive review result must
    approve the final staged tree and name its base and tree OID. In
    reconciliation, it also names source, target, and joined-tree proof.
    Check the writer's final docs and README receipt. Check the Diátaxis and
    README Judge verdicts against the staged
    tree. Check that both writers stopped before the applicable staging
-   boundary, including after a fix. Check the correction ledger and allowed
-   N/A records. In serial work, use the existing repair ledger.
+   boundary, including after a fix. Check the allowed N/A results.
+   In serial work, use the existing repair ledger.
    In interactive work, use direct specialist handoffs from the current run.
 2. Check the accepted Red identity for this mode. For interactive work, require
    Main's commit SHA, approved test paths, local named ref, and original base.
@@ -133,7 +139,7 @@ Use the full list. Check each item. Keep each proof. Stop on a gap.
 ## Verdict
 
 Approve only when all evidence and the exact-tree check pass. Else reject to
-Green or Architect with the missing or stale proof. A draft-safety verdict does
+Green or Router with the missing or stale proof. A draft-safety verdict does
 not approve merge.
 
 For a guarded template update, include both judge results in the existing

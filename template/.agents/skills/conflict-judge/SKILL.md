@@ -18,5 +18,5 @@ metadata:
 
 Use after the exact merge request and conflict list are known. Writer must
 stage the joined tree first. Read and follow
-[the role instructions](../../agents/conflict-judge.md). Architect checks the
+[the role instructions](../../agents/conflict-judge.md). Router checks the
 proof and picks the route.

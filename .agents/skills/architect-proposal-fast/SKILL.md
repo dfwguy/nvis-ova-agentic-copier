@@ -1,6 +1,6 @@
 ---
 name: architect-proposal-fast
-description: Give Architect one read-only plan at the fast tier.
+description: Give the owning Architect one read-only plan at the fast tier.
 metadata:
   model-tier: fast
   reasoning-effort: high
@@ -18,4 +18,4 @@ metadata:
 # Architect Proposal Fast
 
 Read and follow [the shared role](../../agents/architect-proposal.md). Work on
-your own. Send one plan straight to your live Architect parent.
+your own. Send one raw plan only to your live Architect parent, never to Router.
