@@ -26,7 +26,7 @@ from enum import Enum
 from hashlib import sha1, sha256
 from pathlib import Path, PurePosixPath
 from time import monotonic
-from typing import IO, TypedDict
+from typing import IO, TYPE_CHECKING, TypedDict
 from urllib.parse import urlparse
 
 from pydantic import ValidationError
@@ -71,6 +71,9 @@ from .validation import (
     is_safe_junit_test_name,
     parse_installed_precommit_failures,
 )
+
+if TYPE_CHECKING:
+    from .worker import ReconcilerCandidateIdentity
 
 
 class RepositoryError(RuntimeError):
@@ -2646,6 +2649,93 @@ class GitRepository:
     def worktree_exists(self, worktree: Path) -> bool:
         """Return whether the durable worktree directory still exists."""
         return worktree.is_dir()
+
+    def verify_reconciler_checkout(
+        self, worktree: Path, expected: ReconcilerCandidateIdentity
+    ) -> bool:
+        """Observe a clean exact committed checkout without remote/API reads."""
+        try:
+            if (
+                expected.host != self.config.host
+                or expected.project_id != self.config.project_id
+                or expected.identity_kind != "committed"
+                or self._git("symbolic-ref", "--short", "HEAD", cwd=worktree)
+                != expected.checkout_branch
+                or self._git("rev-parse", "HEAD", cwd=worktree) != expected.final_sha
+                or self._git("rev-parse", "HEAD^{tree}", cwd=worktree)
+                != expected.committed_tree
+                or self._git(
+                    "status", "--porcelain=v1", "-z", cwd=worktree, preserve_output=True
+                )
+                or not self._is_ancestor(
+                    expected.target_sha, expected.final_sha, worktree
+                )
+            ):
+                return False
+            for name in ("MERGE_HEAD", "rebase-merge", "rebase-apply"):
+                raw_path = self._git("rev-parse", "--git-path", name, cwd=worktree)
+                if not raw_path or "\n" in raw_path or "\0" in raw_path:
+                    return False
+                path = Path(raw_path)
+                if not path.is_absolute():
+                    path = worktree / path
+                try:
+                    self._asset_lstat(path)
+                except FileNotFoundError:
+                    continue
+                return False
+        except (RepositoryError, OSError, ValueError):
+            return False
+        return True
+
+    def verify_reconciler_candidate(
+        self,
+        worktree: Path,
+        expected: ReconcilerCandidateIdentity,
+        *,
+        origin_url: str,
+    ) -> bool:
+        """Verify exact credential-free origin, remote leases, and committed checkout."""
+        try:
+            origin = self._git("remote", "get-url", "origin", cwd=worktree)
+            parsed = urlparse(origin)
+            if (
+                origin != origin_url
+                or parsed.scheme != "https"
+                or parsed.netloc != expected.host
+                or not parsed.path.startswith("/")
+                or not parsed.path.removesuffix(".git").strip("/")
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.query
+                or parsed.fragment
+                or any(part in {"", ".", ".."} for part in parsed.path[1:].split("/"))
+                or not self.verify_reconciler_checkout(worktree, expected)
+            ):
+                return False
+            refs = {
+                f"refs/heads/{expected.source_branch}": expected.source_lease_sha,
+                f"refs/heads/{expected.target_branch}": expected.target_sha,
+            }
+            if len(refs) != 2:
+                return False
+            output = self._git("ls-remote", "--heads", "origin", *refs, cwd=worktree)
+            observed: dict[str, str] = {}
+            for line in output.splitlines():
+                fields = line.split("\t")
+                if (
+                    len(fields) != 2
+                    or re.fullmatch(r"[0-9a-f]{40}", fields[0]) is None
+                    or fields[1] not in refs
+                    or fields[1] in observed
+                ):
+                    return False
+                observed[fields[1]] = fields[0]
+            return observed == refs and self.verify_reconciler_checkout(
+                worktree, expected
+            )
+        except (RepositoryError, OSError, ValueError):
+            return False
 
     def verify_worktree(self, worktree: Path, branch: str, expected_head: str) -> None:
         """Verify the durable worktree still owns its recorded baseline."""

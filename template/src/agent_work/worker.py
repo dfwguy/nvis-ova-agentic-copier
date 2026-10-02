@@ -33,6 +33,8 @@ from pydantic import (
     BaseModel,
     Field,
     StrictBool,
+    StrictInt,
+    StrictStr,
     ValidationError,
     field_validator,
     model_validator,
@@ -197,6 +199,44 @@ class WorkerResultBrokerClientRequest:
     issue_iid: int
 
 
+class ReconcilerCandidateIdentity(BoundaryModel):
+    """Private committed-inspection expectation; input alone grants no rights."""
+
+    role: Literal["router", "judge", "finalizer", "supervisor-inspect"]
+    host: StrictStr = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9.-]*$", max_length=255)
+    project_id: StrictInt = Field(gt=0)
+    merge_request_iid: StrictInt = Field(gt=0)
+    source_branch: StrictStr = Field(min_length=1, max_length=255)
+    source_lease_sha: StrictStr = Field(pattern=r"^[0-9a-f]{40}$")
+    checkout_branch: StrictStr = Field(min_length=1, max_length=255)
+    target_branch: StrictStr = Field(min_length=1, max_length=255)
+    target_sha: StrictStr = Field(pattern=r"^[0-9a-f]{40}$")
+    final_sha: StrictStr = Field(pattern=r"^[0-9a-f]{40}$")
+    committed_tree: StrictStr = Field(pattern=r"^[0-9a-f]{40}$")
+    identity_kind: Literal["committed"] = "committed"
+
+    def __init__(self, **data: object) -> None:
+        """Validate untrusted constructor values through the strict boundary model."""
+        super().__init__(**data)
+
+    @field_validator("source_branch", "checkout_branch", "target_branch")
+    @classmethod
+    def validate_branch(cls, value: str) -> str:
+        """Reject noncanonical branch names before constructing read commands."""
+        if (
+            re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", value) is None
+            or ".." in value
+            or "//" in value
+            or value.endswith(("/", "."))
+            or any(
+                part.startswith(".") or part.endswith(".lock")
+                for part in value.split("/")
+            )
+        ):
+            raise ValueError("invalid inspection branch")
+        return value
+
+
 CandidateOperation = Literal["stage", "read", "validate", "commit", "status", "review"]
 
 
@@ -235,7 +275,14 @@ class CandidateBrokerFactory(Protocol):
         candidate_action: Callable[
             [str, str | None, dict[str, object] | None], dict[str, object]
         ],
-        **kwargs: object,
+        *,
+        request: WorkerResultBrokerRequest,
+        timeout_seconds: int,
+        close_join_timeout_seconds: float = 1.0,
+        temporary_directory: Path | None = None,
+        clock: Callable[[], float] = monotonic,
+        inspection_identity: ReconcilerCandidateIdentity | None = None,
+        inspection_check: Callable[[ReconcilerCandidateIdentity], bool] | None = None,
     ) -> CandidateReviewBroker: ...
 
 
@@ -412,7 +459,20 @@ class CandidateBrokerSession:
         close_join_timeout_seconds: float,
         temporary_directory: Path | None,
         clock: Callable[[], float],
+        inspection_identity: ReconcilerCandidateIdentity | None = None,
+        inspection_check: Callable[[ReconcilerCandidateIdentity], bool] | None = None,
     ) -> None:
+        if (inspection_identity is not None or inspection_check is not None) and (
+            inspection_identity is None
+            or inspection_check is None
+            or request.project_id != inspection_identity.project_id
+            or request.source_branch != inspection_identity.source_branch
+            or request.source_sha != inspection_identity.source_lease_sha
+            or not inspection_check(inspection_identity)
+        ):
+            raise WorkerProtocolError("candidate_broker", "identity changed")
+        self._inspection_identity = inspection_identity
+        self._inspection_check = inspection_check
         self._candidate_action = candidate_action
         self._request = request
         self._clock = clock
@@ -426,7 +486,11 @@ class CandidateBrokerSession:
         self._review_tree: str | None = None
         self._review_result: dict[str, object] | None = None
         self._review_lock = threading.Lock()
-        self._prepared: str | None = None
+        self._prepared: str | None = (
+            inspection_identity.committed_tree
+            if inspection_identity is not None
+            else None
+        )
         self._read_base_sha: str | None = None
         self._requests = 0
         self._bytes_received = 0
@@ -530,6 +594,13 @@ class CandidateBrokerSession:
                         raise WorkerProtocolError(
                             "candidate_broker", "candidate request is invalid"
                         )
+                    if self._inspection_identity is not None and action not in {
+                        "read",
+                        "status",
+                    }:
+                        raise WorkerProtocolError(
+                            "candidate_broker", "request is not permitted"
+                        )
                     self._requests += 1
                     if self._requests > 512:
                         request_limit_reached = True
@@ -561,6 +632,19 @@ class CandidateBrokerSession:
                                 "candidate_broker", "candidate request is invalid"
                             )
                         selection = cast(dict[str, object], selector)
+                        if (
+                            self._inspection_identity is not None
+                            and action == "read"
+                            and set(selection)
+                            == {"mode", "path", "side", "offset", "length"}
+                            and selection["mode"] == "range"
+                        ):
+                            selection = {
+                                key: value
+                                for key, value in selection.items()
+                                if key != "mode"
+                            }
+                            selector = selection
                         mode = _candidate_selector_mode(selection)
                         if mode is None:
                             raise WorkerProtocolError(
@@ -665,7 +749,10 @@ class CandidateBrokerSession:
                             raise WorkerProtocolError(
                                 "candidate_broker", "malformed candidate read"
                             )
-                    if action in {"validate", "commit", "status"}:
+                    if (
+                        action in {"validate", "commit", "status"}
+                        and self._inspection_identity is None
+                    ):
                         self._candidate = (
                             candidate
                             if outcome.get("state") == "terminal-success"
@@ -765,6 +852,34 @@ class CandidateBrokerSession:
                             "candidate_broker", "response could not be delivered"
                         )
 
+    def matches_inspection(
+        self,
+        expected: ReconcilerCandidateIdentity,
+        request: WorkerResultBrokerRequest,
+        check_candidate: Callable[[ReconcilerCandidateIdentity], bool],
+        candidate_action: Callable[
+            [str, str | None, dict[str, object] | None], dict[str, object]
+        ],
+    ) -> bool:
+        """Prove broker ownership without adopting or closing a foreign session."""
+        return (
+            self._inspection_identity == expected
+            and self._request == request
+            and self._inspection_check is check_candidate
+            and self._candidate_action is candidate_action
+            and self._prepared == expected.committed_tree
+        )
+
+    @property
+    def inspection_active(self) -> bool:
+        """Refuse actor output after the bound inspection channel expires or fails."""
+        return (
+            self._inspection_identity is not None
+            and not self._stop.is_set()
+            and self._failure is None
+            and self._clock() < self._deadline
+        )
+
     def _cleanup_root(self) -> None:
         """Remove only the inode-verified private root after the server exits."""
         try:
@@ -819,6 +934,9 @@ class CandidateBrokerSession:
             threading.Thread(target=self._finish_deferred_cleanup, daemon=False).start()
             raise WorkerProtocolError("candidate_broker", "cleanup failed")
         self._cleanup_root()
+        if self._inspection_identity is not None:
+            # Request refusals were delivered; inspection never captures validation.
+            return None
         if self._failure is not None:
             raise self._failure
         return self._candidate
@@ -868,6 +986,8 @@ def create_candidate_broker(
     close_join_timeout_seconds: float = 1.0,
     temporary_directory: Path | None = None,
     clock: Callable[[], float] = monotonic,
+    inspection_identity: ReconcilerCandidateIdentity | None = None,
+    inspection_check: Callable[[ReconcilerCandidateIdentity], bool] | None = None,
 ) -> CandidateBrokerSession:
     """Create one private, deadline-bound candidate channel."""
     return CandidateBrokerSession(
@@ -877,6 +997,8 @@ def create_candidate_broker(
         close_join_timeout_seconds=close_join_timeout_seconds,
         temporary_directory=temporary_directory,
         clock=clock,
+        inspection_identity=inspection_identity,
+        inspection_check=inspection_check,
     )
 
 
@@ -2658,6 +2780,10 @@ class RoleExecutionProfile:
     nonce: str
     issue_iid: int
     candidate_tree: str
+    committed_identity: ReconcilerCandidateIdentity | None = None
+    committed_check: Callable[[ReconcilerCandidateIdentity], bool] | None = None
+    inspection_profile_check: Callable[[RoleExecutionProfile], bool] | None = None
+    inspection_checkout: Path | None = None
 
     def __post_init__(self) -> None:
         candidate_tools_for_role(self.role)
@@ -2705,6 +2831,32 @@ class RoleExecutionProfile:
             issue_iid=issue_iid,
             candidate_tree=candidate_tree,
         )
+
+
+def _committed_profile_is_exact(profile: RoleExecutionProfile, checkout: Path) -> bool:
+    """Check all populated committed proof before dispatch and at each actor gate."""
+    if all(
+        value is None
+        for value in (
+            profile.committed_identity,
+            profile.committed_check,
+            profile.inspection_profile_check,
+            profile.inspection_checkout,
+        )
+    ):
+        return True
+    identity = profile.committed_identity
+    if (
+        identity is None
+        or profile.committed_check is None
+        or profile.inspection_profile_check is None
+        or profile.inspection_checkout is None
+        or profile.role != identity.role
+        or profile.candidate_tree != identity.committed_tree
+        or checkout != profile.inspection_checkout
+    ):
+        return False
+    return profile.inspection_profile_check(profile)
 
 
 _CANDIDATE_MCP_TOOLS = (
@@ -2956,6 +3108,8 @@ class AgentInvoker:
         environment: dict[str, str],
         role_profile: RoleExecutionProfile,
     ) -> actor_mcp_host.ActorResult:
+        if not _committed_profile_is_exact(role_profile, checkout):
+            raise actor_frontend.ActorHostError("actor_identity_changed")
         if self._actor_transport_limits is None:
             raise actor_frontend.ActorHostError("actor_limits_unavailable")
         if self._controller_state_root is None:
@@ -3005,6 +3159,11 @@ class AgentInvoker:
                     "-I",
                     "-m",
                     "agent_work.mcp_server",
+                ),
+                committed_identity=(
+                    role_profile.committed_identity.model_dump_json()
+                    if role_profile.committed_identity is not None
+                    else None
                 ),
             )
             protected = self._snapshot_actor_paths(
@@ -3083,6 +3242,9 @@ class AgentInvoker:
                     clock=self._clock,
                     frontend_factory=self._actor_frontend_factory
                     or actor_frontend.create_stdio_actor_frontend(),
+                    check_candidate=lambda: _committed_profile_is_exact(
+                        role_profile, checkout
+                    ),
                 ),
             )
             return result
@@ -3182,6 +3344,10 @@ class AgentInvoker:
         role_profile: RoleExecutionProfile | None = None,
     ) -> WorkerInvocation:
         """Run one bounded worker and redact credential values."""
+        if role_profile is not None and not _committed_profile_is_exact(
+            role_profile, checkout
+        ):
+            return WorkerInvocation(None, stdout="", stderr="actor_identity_changed")
         agent, executable = _agent_profile(self._environment)
         if prompt.startswith("RECOVERY_ADVISORY_V1\n"):
             if (
