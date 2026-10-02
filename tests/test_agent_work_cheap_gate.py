@@ -12,16 +12,19 @@
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import shutil
 import subprocess
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
 import pytest
 
+from agent_work.cheap_gate import run_candidate_gate
 from agent_work.domain import HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS
 from agent_work.repository import CommandResult, run_subprocess
 
@@ -340,3 +343,209 @@ def test_candidate_gate_rejects_private_snapshot_mutation(
 
     assert result.returncode != 0
     assert len(tools) == 1
+
+
+@dataclass
+class CheapGateObservation:
+    """Shared public command/snapshot observations for original Ruff failures."""
+
+    snapshot: Path
+    tree: str
+    output: str = (
+        "src/widget.py:1:1: I001 [*] PRIVATE_TOKEN=discarded\n"
+        "tests/test_widget.py:7:2: I001 [*] private source context\n"
+        "Found 2 errors.\n[*] 2 fixable with the `--fix` option.\n"
+    )
+    returncode: int = 1
+    stderr: str = ""
+    tracked: tuple[str, ...] = ("src/widget.py", "tests/test_widget.py")
+    failed_tool: str = "ruff"
+    mutation: str = ""
+    commands: list[tuple[str, ...]] = field(default_factory=list)
+    events: list[str] = field(default_factory=list)
+    current_tree: str = ""
+
+    def __post_init__(self) -> None:
+        self.current_tree = self.tree
+        (self.snapshot / ".git").mkdir(parents=True)
+        for relative in self.tracked:
+            path = self.snapshot / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("import os\n")
+
+    @contextmanager
+    def open_snapshot(self, tree: str) -> Iterator[Path]:
+        """Observe exact candidate selection and snapshot release."""
+        assert tree == self.tree
+        self.events.append("opened")
+        try:
+            yield self.snapshot
+        finally:
+            self.events.append("closed")
+
+    def run(self, command: tuple[str, ...], **_kwargs: object) -> CommandResult:
+        """Admit ordinary checks and return the original failing child output."""
+        self.commands.append(command)
+        if command == ("git", "ls-files", "-z"):
+            return CommandResult(0, "\0".join(self.tracked) + "\0", "")
+        if command == ("git", "write-tree"):
+            return CommandResult(0, self.tree, "")
+        if command[0] == "git":
+            changed = self.mutation == "snapshot" and "failed" in self.events
+            return CommandResult(0, " M src/widget.py" if changed else "", "")
+        if self.failed_tool in command:
+            self.events.append("failed")
+            if self.mutation == "staged":
+                self.current_tree = "b" * 40
+            return CommandResult(self.returncode, self.output, self.stderr)
+        return CommandResult(0, "", "")
+
+    def gate(self, tree: str) -> CommandResult:
+        """Run the production gate using the same boundaries for all cases."""
+        return run_candidate_gate(
+            tree,
+            candidate_snapshot=self.open_snapshot,
+            current_staged_tree=lambda: self.current_tree,
+            run_command=self.run,
+            environment={},
+        )
+
+
+@pytest.mark.parametrize("absolute", (False, True))
+def test_original_ruff_locations_survive_snapshot_release_without_messages(
+    tmp_path: Path, *, absolute: bool
+) -> None:
+    observation = CheapGateObservation(tmp_path, "a" * 40)
+    if absolute:
+        observation.output = observation.output.replace(
+            "src/widget.py:", f"{tmp_path}/src/widget.py:"
+        ).replace("tests/test_widget.py:", f"{tmp_path}/tests/test_widget.py:")
+
+    result = observation.gate(observation.tree)
+
+    assert result.returncode == 1
+    assert observation.events == ["opened", "failed", "closed"]
+    assert result.stderr == "ruff-check failed"
+    assert result.stdout, "original Ruff I001 locations were discarded"
+    assert json.loads(result.stdout) == {
+        "candidate_tree": observation.tree,
+        "check_id": "ruff-check",
+        "diagnostic_lines": [
+            "src/widget.py:1:1: I001",
+            "tests/test_widget.py:7:2: I001",
+        ],
+    }
+    ruff = [command for command in observation.commands if "ruff" in command]
+    assert ruff == [
+        (
+            "uv",
+            "run",
+            "--no-sync",
+            "ruff",
+            "check",
+            "--no-cache",
+            "--output-format=concise",
+            ".",
+        )
+    ]
+    assert observation.commands.count(("git", "ls-files", "-z")) == 1
+    assert "PRIVATE_TOKEN" not in result.stdout
+    assert str(tmp_path) not in result.stdout
+
+
+@pytest.mark.parametrize(
+    "output",
+    (
+        "",
+        "Found 0 errors.\n",
+        "private free text\n",
+        "src/widget.py:1:1: F401 private\n",
+        "src/widget.py:1:1: I001 private\nunknown.py:2:1: I001 private\n",
+        "src/widget.py:1:1: I001 private\nprivate free text\n",
+        "src/widget.py:0:1: I001 private\n",
+        "src/widget.py:01:1: I001 private\n",
+        "src/widget.py:True:1: I001 private\n",
+        "src/widget.py:1:False: I001 private\n",
+        "src/widget.py:1000000000:1: I001 private\n",
+        "src/widget.py:1:-1: I001 private\n",
+        "unknown.py:1:1: I001 private\n",
+        "/foreign/src/widget.py:1:1: I001 private\n",
+        "../src/widget.py:1:1: I001 private\n",
+        "src/../src/widget.py:1:1: I001 private\n",
+        "./src/widget.py:1:1: I001 private\n",
+        "src//widget.py:1:1: I001 private\n",
+        "src\\widget.py:1:1: I001 private\n",
+        "\x1b[31msrc/widget.py:1:1: I001 private\n",
+        "src/widget.py:1:1: I001 private\x00text\n",
+        "src/widget.py:1:1: I001 " + "é" * 2048,
+        "\n".join(f"src/widget.py:{line}:1: I001 private" for line in range(1, 6)),
+    ),
+)
+def test_original_ruff_untrusted_or_unbounded_output_has_no_projection(
+    tmp_path: Path, output: str
+) -> None:
+    observation = CheapGateObservation(tmp_path, "a" * 40, output=output)
+
+    result = observation.gate(observation.tree)
+
+    assert result == CommandResult(1, "", "ruff-check failed")
+    assert observation.events[-1] == "closed"
+    assert not any("format" in command for command in observation.commands)
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stderr", "failed_tool", "failure"),
+    (
+        (2, "", "ruff", "ruff-check"),
+        (1, "secret", "ruff", "ruff-check"),
+        (1, "", "ty", "ty"),
+        (1, "", "yamllint", "yamllint"),
+    ),
+)
+def test_original_ruff_shape_from_setup_or_other_tool_has_no_projection(
+    tmp_path: Path, returncode: int, stderr: str, failed_tool: str, failure: str
+) -> None:
+    observation = CheapGateObservation(
+        tmp_path,
+        "a" * 40,
+        returncode=returncode,
+        stderr=stderr,
+        failed_tool=failed_tool,
+    )
+    assert observation.gate(observation.tree) == CommandResult(
+        returncode, "", f"{failure} failed"
+    )
+
+
+@pytest.mark.parametrize("topology", ("leaf", "ancestor", "untracked", "directory"))
+def test_original_ruff_location_requires_canonical_tracked_regular_membership(
+    tmp_path: Path, topology: str
+) -> None:
+    observation = CheapGateObservation(tmp_path / "snapshot", "a" * 40)
+    widget = observation.snapshot / "src/widget.py"
+    if topology == "leaf":
+        widget.unlink()
+        widget.symlink_to(observation.snapshot / "tests/test_widget.py")
+    elif topology == "ancestor":
+        outside = tmp_path / "outside"
+        widget.parent.rename(outside)
+        widget.parent.symlink_to(outside, target_is_directory=True)
+    elif topology == "untracked":
+        observation.tracked = ("tests/test_widget.py",)
+    else:
+        widget.unlink()
+        widget.mkdir()
+    assert observation.gate(observation.tree) == CommandResult(
+        1, "", "ruff-check failed"
+    )
+
+
+@pytest.mark.parametrize("mutation", ("snapshot", "staged"))
+def test_original_ruff_diagnostics_cannot_override_candidate_mutation(
+    tmp_path: Path, mutation: str
+) -> None:
+    observation = CheapGateObservation(tmp_path, "a" * 40, mutation=mutation)
+    result = observation.gate(observation.tree)
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "changed during cheap gate" in result.stderr

@@ -21,6 +21,7 @@ from pathlib import Path
 from .domain import HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS
 from .ports import CommandRunner
 from .repository import CommandResult, run_subprocess
+from .validation import project_cheap_gate_diagnostics
 
 _TREE = re.compile(r"[0-9a-f]{40}\Z")
 _YAML_CONFIG = (
@@ -115,21 +116,36 @@ def _environment(
     return environment
 
 
-def _shell_files(
-    snapshot: Path,
-    run_command: CommandRunner,
-    environment: Mapping[str, str] | None = None,
+def _regular_tracked_paths(
+    snapshot: Path, tracked: tuple[str, ...], *, canonical: bool = False
 ) -> tuple[str, ...]:
     files: list[str] = []
-    tracked = _checked(
-        ("git", "ls-files", "-z"), snapshot, run_command, environment
-    ).split("\0")
     for relative in tracked:
-        if not relative:
+        if not relative or Path(relative).is_absolute():
+            continue
+        if (
+            canonical
+            and re.fullmatch(r"(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+", relative) is None
+        ):
+            continue
+        parts = relative.split("/")
+        if any(part in {".", ".."} for part in parts):
             continue
         path = snapshot / relative
-        if not path.is_file() or path.is_symlink():
+        if any(
+            (snapshot.joinpath(*parts[:index])).is_symlink()
+            for index in range(1, len(parts) + 1)
+        ):
             continue
+        if path.is_file() and path.resolve().is_relative_to(snapshot.resolve()):
+            files.append(relative)
+    return tuple(sorted(files))
+
+
+def _shell_files(snapshot: Path, tracked: tuple[str, ...]) -> tuple[str, ...]:
+    files: list[str] = []
+    for relative in tracked:
+        path = snapshot / relative
         with path.open("rb") as stream:
             first_line = stream.readline(128)
         if path.suffix == ".sh" or first_line.startswith(
@@ -181,7 +197,13 @@ def run_candidate_gate(
             run_command,
             environment,
         )
-        shell_files = _shell_files(snapshot, run_command, environment)
+        tracked = tuple(
+            _checked(
+                ("git", "ls-files", "-z"), snapshot, run_command, environment
+            ).split("\0")
+        )
+        regular_paths = _regular_tracked_paths(snapshot, tracked)
+        shell_files = _shell_files(snapshot, regular_paths)
         commands = (
             (
                 "uv",
@@ -215,7 +237,16 @@ def run_candidate_gate(
                 "--no-validate",
                 "--no-update-check",
             ),
-            ("uv", "run", "--no-sync", "ruff", "check", "--no-cache", "."),
+            (
+                "uv",
+                "run",
+                "--no-sync",
+                "ruff",
+                "check",
+                "--no-cache",
+                "--output-format=concise",
+                ".",
+            ),
             ("uv", "run", "--no-sync", "ruff", "format", "--check", "--no-cache", "."),
         )
         checks: list[tuple[str, tuple[str, ...]]] = [("yamllint", commands[0])]
@@ -246,7 +277,22 @@ def run_candidate_gate(
             if current_staged_tree() != candidate_tree:
                 return CommandResult(2, "", "candidate tree changed during cheap gate")
             if result.returncode:
-                return CommandResult(result.returncode, "", f"{name} failed")
+                projection = ""
+                if (
+                    name == "ruff-check"
+                    and result.returncode == 1
+                    and not result.stderr
+                ):
+                    projection = project_cheap_gate_diagnostics(
+                        result.stdout,
+                        check_id=name,
+                        candidate_tree=candidate_tree,
+                        tracked_paths=_regular_tracked_paths(
+                            snapshot, tracked, canonical=True
+                        ),
+                        snapshot_prefix=f"{snapshot}/",
+                    )
+                return CommandResult(result.returncode, projection, f"{name} failed")
     if current_staged_tree() != candidate_tree:
         return CommandResult(2, "", "candidate tree changed during cheap gate")
     return CommandResult(0, "", "")

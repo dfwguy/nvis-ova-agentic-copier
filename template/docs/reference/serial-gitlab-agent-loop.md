@@ -1229,7 +1229,26 @@ failure cannot use
 `validation retry` because it has no saved session. Judge records a running
 session only after both checks pass. The full installed hook still decides
 whether the tree passes.
-It invokes exactly one `git hook run pre-commit` command. It then atomically
+
+The shared cheap gate can report safe locations from its original failed Ruff
+check. Green and reconciliation refusals, and shared validation reports, use
+the same checked facts. No extra Ruff run is needed.
+
+| Cheap-gate diagnostic | Contract |
+| --- | --- |
+| Supported failure | Ruff check exits `1` with empty stderr. Its concise output contains only `I001` records and recognized Ruff summaries. Each reported location has a canonical staged relative path to a tracked regular file, with no symlink in its path, and positive line and column numbers. |
+| Safe facts | The report contains only the checked path, line, column, and `I001` code. It discards Ruff messages, source, carets, context, and snapshot paths. The facts must match the candidate tree and check ID. |
+| Limits | At most four location lines, each at most 256 UTF-8 bytes. Original output and the serialized facts must each fit 4096 UTF-8 bytes. Line and column values must be canonical positive decimal numbers at most `999999999`. Overflow rejects the details rather than truncating them. |
+| Generic fallback | Other checks, unsupported rules, malformed or mixed output, unsafe or unknown paths, invalid positions, changed trees, and invalid facts keep the fixed generic refusal. Useful details never turn a failed check into a pass. |
+| Capture limit | `run_subprocess` uses `capture_output=True`, which reads the full child output before these checks. The limits bound admitted and emitted facts only. They do not bound process memory or guarantee private-file privacy or input isolation. |
+
+These facts add no saved session or diagnostic store. A failed cheap gate still
+stops before commit, JUnit cleanup, or the full hook. Green and reconciliation
+CLI refusals use stderr with exit `1` and empty stdout, including with `--json`.
+Preview starts neither the cheap gate nor the hook.
+
+After the checks pass, validation invokes exactly one
+`git hook run pre-commit` command. It then atomically
 records that command's terminal exit code. A terminal-failure record can also
 have the existing bounded, canonical
 `diagnostic` and additive structured `hook_failures` from that one invocation.

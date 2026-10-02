@@ -31,7 +31,7 @@ from .ports import CommandRunner
 from .red_preflight import parse_red_preflight_success
 from .repository import CommandResult, RepositoryError, run_subprocess
 from .test_executor import TestExecutionPolicy
-from .validation import cheap_gate_failure_id, license_preflight_compliant
+from .validation import cheap_gate_failure, license_preflight_compliant
 
 
 class InteractiveCommitError(RuntimeError):
@@ -422,7 +422,9 @@ def _check_commit_preflight(
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         raise InteractiveCommitError("cheap candidate gate failed") from error
     if gate.returncode != 0:
-        raise InteractiveCommitError(f"{cheap_gate_failure_id(gate)} failed")
+        failure = cheap_gate_failure(gate, candidate_tree=judge_tree)
+        details = "\n".join(failure.diagnostic_lines)
+        raise InteractiveCommitError(f"{failure.hook_id} failed\n{details}")
 
 
 def commit_reconcile(

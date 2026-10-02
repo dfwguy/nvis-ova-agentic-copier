@@ -29,11 +29,14 @@ from agent_work.interactive_commit import (
     InteractiveCommitDependencies,
     InteractiveCommitError,
     InteractiveCommitRequest,
+    ReconcileCommitRequest,
     commit_interactive_green,
     commit_interactive_red,
+    commit_reconcile,
     run_git,
 )
 from agent_work.repository import CommandResult
+from tests.test_agent_work_cheap_gate import CheapGateObservation
 
 BRANCH = "clanker/issue323-boundary"
 BRANCH_REF = f"refs/heads/{BRANCH}"
@@ -1201,3 +1204,133 @@ def test_verify_rejects_test_changes_in_green_and_each_red_commit(
         _verify_args(repo, base, wrong_red, wrong_green, wrong_tree),
         observational=True,
     )
+
+
+@pytest.mark.parametrize("valid", (True, False))
+def test_original_gate_locations_reach_green_refusal_with_retained_state(
+    tmp_path: Path, *, valid: bool
+) -> None:
+    repo, request = _staged_green_request(tmp_path)
+    observation = CheapGateObservation(tmp_path / "snapshot", request.judge_tree)
+    if not valid:
+        observation.output += "private free text\n"
+    commits: list[tuple[str, ...]] = []
+    dependencies = InteractiveCommitDependencies(
+        run_git=run_git,
+        commit_worktree=lambda _repo, args: (
+            commits.append(args) or CommandResult(0, "", "")
+        ),
+        run_license_preflight=lambda _tree: CommandResult(
+            0, '{"schema_version":1,"outcome":"compliant","violations":[]}', ""
+        ),
+        check_candidate_gate=observation.gate,
+    )
+    before = _state(repo, tmp_path / "hook-marker")
+
+    with pytest.raises(InteractiveCommitError) as error:
+        commit_interactive_green(request, dependencies, apply=True)
+
+    assert ("src/widget.py:1:1: I001" in str(error.value)) is valid
+    assert ("tests/test_widget.py:7:2: I001" in str(error.value)) is valid
+    assert "ruff-check failed" in str(error.value)
+    assert "PRIVATE_TOKEN" not in str(error.value)
+    assert "private" not in str(error.value)
+    assert str(observation.snapshot) not in str(error.value)
+    assert commits == []
+    assert observation.events == ["opened", "failed", "closed"]
+    assert _state(repo, tmp_path / "hook-marker") == before
+
+
+@pytest.mark.parametrize("json_output", (False, True))
+@pytest.mark.parametrize("apply", (False, True))
+def test_original_gate_cli_uses_error_stream_and_preview_skips_gate_and_commit(
+    tmp_path: Path, *, json_output: bool, apply: bool
+) -> None:
+    repo, request = _staged_green_request(tmp_path)
+    observation = CheapGateObservation(tmp_path / "snapshot", request.judge_tree)
+    arguments = _args(repo, request.base_sha, "green") + [
+        "--red-sha",
+        request.red_sha,
+        "--judge-tree",
+        request.judge_tree,
+        "--message-file",
+        str(request.message_file),
+    ]
+    if json_output:
+        arguments.append("--json")
+    if apply:
+        arguments.append("--apply")
+    before = _state(repo, tmp_path / "hook-marker")
+
+    code, out, err, commands = _invoke(arguments, candidate_gate=observation.gate)
+
+    assert code == (1 if apply else 0)
+    if apply:
+        assert out == []
+        assert "src/widget.py:1:1: I001" in "".join(err)
+        assert "tests/test_widget.py:7:2: I001" in "".join(err)
+        assert observation.events == ["opened", "failed", "closed"]
+    else:
+        assert err == []
+        assert observation.events == []
+        if json_output:
+            assert json.loads(out[0])["applied"] is False
+    assert "PRIVATE_TOKEN" not in "".join(out + err)
+    assert not any("commit" in command for command in commands)
+    assert _state(repo, tmp_path / "hook-marker") == before
+
+
+@pytest.mark.parametrize("valid", (True, False))
+def test_original_gate_locations_reach_reconciliation_refusal_before_native_commit(
+    tmp_path: Path, *, valid: bool
+) -> None:
+    repo, base = _repo(tmp_path)
+    red = _make_red(repo, base)
+    _git(repo, "switch", "-c", "target", base)
+    (repo / "target.txt").write_text("target\n")
+    _git(repo, "add", "target.txt")
+    _git(repo, "commit", "--no-verify", "-m", "target")
+    target = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "switch", BRANCH)
+    _git(repo, "merge", "--no-commit", "--no-ff", "target")
+    _git(repo, "update-ref", "refs/remotes/origin/main", target)
+    tree = _git(repo, "write-tree")
+    request = ReconcileCommitRequest(
+        worktree=repo,
+        branch_ref=BRANCH_REF,
+        source_sha=red,
+        target_sha=target,
+        red_ref=RED_REF,
+        red_sha=red,
+        judge_tree=tree,
+        message_file=_message(tmp_path),
+    )
+    observation = CheapGateObservation(tmp_path / "snapshot", tree)
+    if not valid:
+        observation.output += "private free text\n"
+    commits: list[tuple[str, ...]] = []
+    dependencies = InteractiveCommitDependencies(
+        run_git=run_git,
+        commit_worktree=lambda _repo, args: (
+            commits.append(args) or CommandResult(0, "", "")
+        ),
+        run_license_preflight=lambda _tree: CommandResult(
+            0, '{"schema_version":1,"outcome":"compliant","violations":[]}', ""
+        ),
+        check_candidate_gate=observation.gate,
+    )
+    before = _state(repo, tmp_path / "hook-marker")
+    preview = commit_reconcile(request, dependencies, apply=False)
+    assert not preview.applied
+    assert observation.events == []
+
+    with pytest.raises(InteractiveCommitError) as error:
+        commit_reconcile(request, dependencies, apply=True)
+
+    assert ("src/widget.py:1:1: I001" in str(error.value)) is valid
+    assert ("tests/test_widget.py:7:2: I001" in str(error.value)) is valid
+    assert "PRIVATE_TOKEN" not in str(error.value)
+    assert commits == []
+    assert observation.events == ["opened", "failed", "closed"]
+    assert _state(repo, tmp_path / "hook-marker") == before
+    assert _git(repo, "rev-parse", "MERGE_HEAD") == target
