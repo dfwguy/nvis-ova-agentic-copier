@@ -13,12 +13,19 @@ from __future__ import annotations
 
 import json
 import os
+from base64 import b64decode, b64encode
 from collections.abc import Callable, Mapping
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Literal, cast
 
 from mcp.server import MCPServer
-from mcp.types import CallToolResult, TextContent, Tool
+from mcp.types import (
+    SERVER_INFO_META_KEY,
+    CallToolResult,
+    Implementation,
+    TextContent,
+    Tool,
+)
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -28,7 +35,12 @@ from pydantic import (
     model_validator,
 )
 
-from .candidate_boundary import GIT_READ_MAX_CHUNK_BYTES
+from .candidate_boundary import (
+    GIT_READ_MAX_CHUNK_BYTES,
+    GIT_READ_MAX_FILE_BYTES,
+    GIT_READ_MAX_PATHS,
+    GIT_READ_MAX_TOTAL_BYTES,
+)
 from .domain import ErrorCode, WorkflowLane, WorkflowPhase
 from .file_patch import (
     DocumentationPatch,
@@ -60,6 +72,207 @@ _TOOL_NAMES = (
     "candidate_read",
     "candidate_submit_review",
 )
+
+
+_GitOID = Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
+_FileSize = Annotated[int, Field(ge=0, le=GIT_READ_MAX_FILE_BYTES)]
+
+
+class _ClosedReadModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class _ReadSelector(_ClosedReadModel):
+    path: str = Field(min_length=1)
+    side: Literal["old", "new"]
+    offset: int = Field(ge=0)
+    length: int = Field(gt=0, le=GIT_READ_MAX_CHUNK_BYTES)
+
+    @field_validator("path")
+    @classmethod
+    def _canonical_path(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if (
+            path.is_absolute()
+            or str(path) != value
+            or any(part in {"", ".", ".."} for part in value.split("/"))
+            or any(char in value for char in ("\\", "\n", "\r", "\x00"))
+        ):
+            raise ValueError("invalid candidate path")
+        return value
+
+
+class _ReadBatch(_ClosedReadModel):
+    reads: list[_ReadSelector] = Field(min_length=1)
+
+
+class _ReadIdentity(_ClosedReadModel):
+    accepted: Literal[True]
+    candidate_tree: _GitOID
+    base_sha: _GitOID
+    base_tree: _GitOID
+    ledger_revision: int = Field(ge=0)
+    source_branch: str = Field(min_length=1)
+    nonce: str = Field(min_length=1)
+    issue_iid: int = Field(gt=0)
+    project_id: int = Field(gt=0)
+    commit_sha: _GitOID | None = None
+    committed_tree: _GitOID | None = None
+
+    @field_validator("accepted", mode="before")
+    @classmethod
+    def _accepted_response(cls, value: object) -> object:
+        if value is not True:
+            raise ValueError("candidate response was not accepted")
+        return value
+
+    @model_validator(mode="after")
+    def _paired_commit(self) -> _ReadIdentity:
+        if (self.commit_sha is None) != (self.committed_tree is None) or (
+            self.committed_tree is not None
+            and self.committed_tree != self.candidate_tree
+        ):
+            raise ValueError("invalid committed identity")
+        return self
+
+
+class _ReadFile(_ClosedReadModel):
+    path: str
+    old_mode: Literal["100644", "100755"] | None
+    old_oid: _GitOID | None
+    old_size: _FileSize | None
+    new_mode: Literal["100644", "100755"] | None
+    new_oid: _GitOID | None
+    new_size: _FileSize | None
+
+    @field_validator("path")
+    @classmethod
+    def _canonical_path(cls, value: str) -> str:
+        return _ReadSelector._canonical_path(value)
+
+    @model_validator(mode="after")
+    def _side_metadata(self) -> _ReadFile:
+        for side in ("old", "new"):
+            values = tuple(
+                getattr(self, f"{side}_{key}") for key in ("mode", "oid", "size")
+            )
+            if any(value is None for value in values) and any(
+                value is not None for value in values
+            ):
+                raise ValueError("incomplete side metadata")
+        if self.old_oid is None and self.new_oid is None:
+            raise ValueError("absent changed file")
+        if self.old_mode == self.new_mode and self.old_oid == self.new_oid:
+            raise ValueError("unchanged file")
+        return self
+
+
+class _ReadInventory(_ReadIdentity):
+    changed_paths: list[str] = Field(min_length=1, max_length=GIT_READ_MAX_PATHS)
+    files: list[_ReadFile] = Field(min_length=1, max_length=GIT_READ_MAX_PATHS)
+
+    @model_validator(mode="after")
+    def _complete_inventory(self) -> _ReadInventory:
+        if self.changed_paths != sorted(
+            set(self.changed_paths)
+        ) or self.changed_paths != [file.path for file in self.files]:
+            raise ValueError("invalid inventory paths")
+        sizes: dict[str, int] = {}
+        total = 0
+        for file in self.files:
+            for side in ("old", "new"):
+                oid = getattr(file, f"{side}_oid")
+                size = getattr(file, f"{side}_size")
+                if oid is not None:
+                    if oid in sizes and sizes[oid] != size:
+                        raise ValueError("inconsistent object size")
+                    sizes[oid] = size
+                    total += size
+        if total > GIT_READ_MAX_TOTAL_BYTES:
+            raise ValueError("inventory exceeds existing byte limit")
+        return self
+
+
+class _ReadRange(_ReadIdentity, _ReadSelector):
+    oid: _GitOID
+    size: _FileSize
+    data_base64: str
+
+
+def _read_identity(value: _ReadIdentity) -> dict[str, object]:
+    return {
+        key: getattr(value, key)
+        for key in _ReadIdentity.model_fields
+        if key in value.model_fields_set
+    }
+
+
+def group_candidate_read_results(
+    inventory: dict[str, object],
+    selectors: tuple[dict[str, object], ...],
+    results: tuple[dict[str, object], ...],
+    *,
+    candidate_tree: str,
+) -> dict[str, object]:
+    """Validate independent range receipts and pool equal bytes in request order."""
+    described = _ReadInventory.model_validate(inventory)
+    identity = _read_identity(described)
+    if (
+        described.candidate_tree != candidate_tree
+        or not selectors
+        or len(selectors) != len(results)
+    ):
+        raise ValueError("invalid grouped candidate identity or count")
+    files = {file.path: file for file in described.files}
+    contents: list[dict[str, object]] = []
+    bindings: list[dict[str, object]] = []
+    byte_indices: dict[bytes, int] = {}
+    range_bytes: dict[tuple[str, int, int], bytes] = {}
+    for index, (raw_selector, raw_result) in enumerate(
+        zip(selectors, results, strict=True)
+    ):
+        selector = _ReadSelector.model_validate(raw_selector)
+        result = _ReadRange.model_validate(raw_result)
+        if _read_identity(result) != identity or any(
+            getattr(result, key) != getattr(selector, key)
+            for key in _ReadSelector.model_fields
+        ):
+            raise ValueError("range identity or selector mismatch")
+        file = files.get(selector.path)
+        if (
+            file is None
+            or getattr(file, f"{selector.side}_oid") != result.oid
+            or getattr(file, f"{selector.side}_size") != result.size
+            or selector.offset + selector.length > result.size
+        ):
+            raise ValueError("range does not match inventory")
+        decoded = b64decode(result.data_base64, validate=True)
+        if len(decoded) != selector.length:
+            raise ValueError("range byte length mismatch")
+        context = (result.oid, selector.offset, selector.length)
+        if context in range_bytes and range_bytes[context] != decoded:
+            raise ValueError("inconsistent object range bytes")
+        range_bytes[context] = decoded
+        if decoded not in byte_indices:
+            byte_indices[decoded] = len(contents)
+            contents.append({"data_base64": b64encode(decoded).decode("ascii")})
+        bindings.append(
+            selector.model_dump()
+            | {
+                "request_index": index,
+                "oid": result.oid,
+                "size": result.size,
+                "content_index": byte_indices[decoded],
+            }
+        )
+    return identity | {
+        "inventory": {
+            "changed_paths": described.changed_paths,
+            "files": [file.model_dump() for file in described.files],
+        },
+        "bindings": bindings,
+        "contents": contents,
+    }
 
 
 class _ReviewFinding(BaseModel):
@@ -108,15 +321,36 @@ class _CandidateMCPServer(MCPServer):
     async def list_tools(self) -> list[Tool]:
         """Advertise only role-granted tools with closed argument schemas."""
         tools = await super().list_tools()
-        return [
-            tool.model_copy(
-                update={
-                    "input_schema": {**tool.input_schema, "additionalProperties": False}
-                }
-            )
-            for tool in tools
-            if tool.name in self._allowed_tools
-        ]
+        listed = []
+        for tool in tools:
+            if tool.name not in self._allowed_tools:
+                continue
+            schema = {**tool.input_schema, "additionalProperties": False}
+            if tool.name == "candidate_read":
+                batch_schema = _ReadBatch.model_json_schema()
+                schema["properties"] = (
+                    _ReadSelector.model_json_schema()["properties"]
+                    | batch_schema["properties"]
+                )
+                schema["$defs"] = batch_schema["$defs"]
+                schema.pop("required", None)
+                schema["oneOf"] = [
+                    {
+                        "required": ["reads"],
+                        "not": {
+                            "anyOf": [
+                                {"required": [key]}
+                                for key in ("path", "side", "offset", "length")
+                            ]
+                        },
+                    },
+                    {
+                        "required": ["path", "side", "offset", "length"],
+                        "not": {"required": ["reads"]},
+                    },
+                ]
+            listed.append(tool.model_copy(update={"input_schema": schema}))
+        return listed
 
     async def call_tool(
         self,
@@ -130,26 +364,15 @@ class _CandidateMCPServer(MCPServer):
                 is_error=True,
             )
         if name == "candidate_read":
-            offset = arguments.get("offset")
-            length = arguments.get("length")
-            valid = (
-                set(arguments) == {"path", "side", "offset", "length"}
-                and isinstance(arguments.get("path"), str)
-                and bool(arguments["path"])
-                and not PurePosixPath(arguments["path"]).is_absolute()
-                and str(PurePosixPath(arguments["path"])) == arguments["path"]
-                and all(
-                    part not in {"", ".", ".."} for part in arguments["path"].split("/")
-                )
-                and not any(
-                    char in arguments["path"] for char in ("\\", "\n", "\r", "\x00")
-                )
-                and arguments.get("side") in {"old", "new"}
-                and type(offset) is int
-                and offset >= 0
-                and type(length) is int
-                and 0 < length <= GIT_READ_MAX_CHUNK_BYTES
-            )
+            try:
+                if set(arguments) == {"reads"}:
+                    _ReadBatch.model_validate(arguments)
+                else:
+                    _ReadSelector.model_validate(arguments)
+            except ValidationError:
+                valid = False
+            else:
+                valid = True
         elif name == "candidate_submit_review":
             try:
                 _ReviewSubmission.model_validate(arguments)
@@ -224,21 +447,94 @@ def create_candidate_mcp_server(
 
     @server.tool()
     def candidate_read(
-        path: str,
-        side: Literal["old", "new"],
-        offset: Annotated[int, Field(strict=True, ge=0)],
-        length: Annotated[int, Field(strict=True, gt=0, le=GIT_READ_MAX_CHUNK_BYTES)],
+        path: str | None = None,
+        side: Literal["old", "new"] | None = None,
+        offset: Annotated[int | None, Field(strict=True, ge=0)] = None,
+        length: Annotated[
+            int | None, Field(strict=True, gt=0, le=GIT_READ_MAX_CHUNK_BYTES)
+        ] = None,
+        reads: list[_ReadSelector] | None = None,
     ) -> CallToolResult:
-        """Read one independent byte range from a changed Git object."""
-        return read(
-            "read",
-            {
-                "path": path,
-                "side": side,
-                "offset": offset,
-                "length": length,
-            },
-        )
+        """Read one range, or pool independently verified ranges with full bindings."""
+        if reads is None:
+            return read(
+                "read", {"path": path, "side": side, "offset": offset, "length": length}
+            )
+        try:
+            selectors = tuple(selector.model_dump() for selector in reads)
+            # Every emitted binding necessarily contains these fields. This
+            # lower bound rejects impossible output before consuming broker calls.
+            minimum: dict[str, object] = {
+                "bindings": [
+                    selector | {"request_index": index}
+                    for index, selector in enumerate(selectors)
+                ]
+            }
+            # Prepopulate the SDK's public server identity stamp so the runner
+            # adds no unchecked metadata to either complete result body.
+            stamp = Implementation(
+                name=server.name,
+                version=server.version,
+                title=server.title,
+                description=server.description,
+                website_url=server.website_url,
+                icons=server.icons,
+            ).model_dump(by_alias=True, mode="json", exclude_none=True)
+            minimum_result = CallToolResult(
+                content=[TextContent(text=json.dumps(minimum, ensure_ascii=True))],
+                structured_content=minimum,
+                _meta={SERVER_INFO_META_KEY: stamp},
+            )
+            if (
+                len(
+                    minimum_result.model_dump_json(
+                        by_alias=True, exclude_none=True
+                    ).encode("utf-8")
+                )
+                > _MAX_RESPONSE_BYTES
+            ):
+                raise ValueError("mandatory bindings exceed MCP limit")
+            inventory = gateway("read", candidate_tree, {"mode": "changed_paths"})
+            described = _ReadInventory.model_validate(inventory)
+            if described.candidate_tree != candidate_tree:
+                raise ValueError("inventory candidate identity mismatch")
+            results = tuple(
+                gateway("read", candidate_tree, selector) for selector in selectors
+            )
+            response = cast(
+                dict[str, object],
+                _public_value(
+                    group_candidate_read_results(
+                        inventory, selectors, results, candidate_tree=candidate_tree
+                    )
+                ),
+            )
+            result = CallToolResult(
+                content=[TextContent(text=json.dumps(response, ensure_ascii=True))],
+                structured_content=response,
+                _meta={SERVER_INFO_META_KEY: stamp},
+            )
+            if (
+                len(
+                    result.model_dump_json(by_alias=True, exclude_none=True).encode(
+                        "utf-8"
+                    )
+                )
+                > _MAX_RESPONSE_BYTES
+            ):
+                raise ValueError("grouped response body exceeds MCP limit")
+        except (
+            WorkerProtocolError,
+            ValueError,
+            TypeError,
+            OverflowError,
+            RecursionError,
+        ):
+            return CallToolResult(
+                content=[TextContent(text="candidate_broker: read failed")],
+                is_error=True,
+            )
+        return result
 
     @server.tool()
     def candidate_submit_review(

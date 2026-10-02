@@ -775,14 +775,15 @@ Its stdio server is `agent_work.mcp_server`.
 | --- | --- | --- |
 | `candidate_status` | None | Saved status for the bound tree. |
 | `candidate_changed_paths` | None | Canonical changed paths with old and new mode, OID, and byte size. |
-| `candidate_read` | Changed `path`, `side` (`old` or `new`), nonnegative `offset`, and `length` from 1 to 131072 | Exact range identity and base64 bytes from that side's blob. |
+| `candidate_read` | Either `{path, side, offset, length}` or `{reads: [{path, side, offset, length}, ...]}` | The single form returns exact range identity and base64 bytes. The batch form returns inventory, ordered bindings, and shared content bytes. |
 | `candidate_submit_review` | `verdict` (`approve` or `reject`), bounded `summary`, and up to 32 findings with `severity`, `path`, and `summary` | Recorded advisory review for the bound tree. |
 
 The controller binds the socket, nonce, issue number, and tree outside model
 tool arguments. The MCP response omits the private nonce, issue number, and
 project ID. The broker exposes the exact staged candidate's changed content,
 including old and new sides, within its read limits. Reads may occur before
-the path inventory and in any order. They are independent and repeatable.
+the path inventory and in any order when using the single form. They are
+independent and repeatable.
 The broker does not provide the full repository for a broad quality review.
 A submitted review returns the candidate tree, `review-recorded` state,
 verdict, summary, and findings. An approval with a major or critical finding
@@ -793,6 +794,68 @@ workflow's authority. The same-UID host cannot prove reviewer authority:
 another process under that user may see process-environment values, including
 credentials. The pilot stays separate from the opt-in read-only role profiles
 below. Track the wider MCP migration in issue #341.
+
+##### Grouped candidate reads
+
+The batch form uses the existing `candidate_read` tool. Its `reads` list must
+be nonempty. Each entry names a canonical relative changed `path`.
+Its `side` is `old` or `new`. Its `offset` is a nonnegative integer.
+Its `length` is an integer from 1 to 131072.
+Boolean values are invalid offsets or lengths. Extra fields and mixed single
+and batch arguments are rejected. The single form keeps its existing result
+and failure contract.
+
+The server checks all selectors before calling the gateway. It then requests
+a fresh changed-path inventory and each ordinary range in request order.
+Every entry makes its own authorized read, including duplicate entries.
+Each response must agree with the bound candidate and inventory. This includes
+tree and available commit identities, ledger revision, source branch, path,
+side, mode, OID, full size, and range. Private identity proof must also agree
+when present. A selected side must exist and have regular-file mode `100644` or
+`100755`. Returned base64 must decode to exactly the requested byte length.
+
+| Batch result field | Meaning |
+| --- | --- |
+| `inventory` | Validated `changed_paths` and `files`, with old and new mode, OID, size, and explicit absent sides. An empty present file keeps size zero; an absent side has null metadata. |
+| `bindings` | One entry per requested read, in request order: `request_index`, `path`, `side`, `offset`, `length`, `oid`, `size`, and `content_index`. Indexes start at zero. |
+| `contents` | Entries with `data_base64`. Equal decoded range bytes share one entry. First occurrence sets its index. |
+| Public identity fields | The verified candidate and base identities retained by the existing gateway. Private nonce, issue number, and project ID remain omitted. |
+
+Each binding keeps its own context. Bytes may be shared across
+paths, sides, modes, OIDs, or offsets. Duplicate requests keep separate
+bindings. Sharing bytes does not grant review approval or reuse a semantic
+judgment. An inventory proves neither full read completion nor comprehension.
+Empty files do not gain a fabricated range read.
+
+The existing inventory limits remain 128 unique paths, 2 MiB per blob, and
+16 MiB of combined old and new blob content. The path and aggregate limits
+apply to inventory, not to the number of range entries or repeated bytes.
+Every gateway call still uses the broker's existing frame and session
+budgets. Executed reads use those budgets. A later member's failure does not
+restore them.
+
+The batch's whole `CallToolResult` JSON body must fit 900000 UTF-8 bytes.
+This includes inventory, identities, bindings, and content in both text and
+`structuredContent`. The count includes JSON text escaping, field names,
+wrappers, result type, error flag, and the SDK's public `serverInfo` metadata.
+It excludes the outer JSON-RPC envelope and request ID. The single form keeps
+its existing dictionary-only size check.
+
+Before gateway calls, the server checks a minimum result body.
+It holds each selector and request index in both text and structured content. If that body
+cannot fit, it rejects the request before reading inventory or ranges.
+The server checks the complete final body and returns that same checked result.
+Any member refusal, invalid proof, inconsistent bytes, or oversized final
+result rejects the whole batch with `candidate_broker: read failed`.
+Private error detail and partial results are discarded.
+A caller can use smaller independent calls.
+There is no page, cursor, cache, new tool, or automatic partial delivery.
+
+These output checks do not bound the SDK's incoming stdio line allocation.
+The SDK reads a complete line before JSON validation. Grouping provides no
+new process-memory, privacy, or OS-isolation guarantee. Existing tool
+allowlists, unsupported-host refusals, and live-host audit requirements still
+apply. This interface does not activate the factory's MCP route.
 
 #### Opt-in read-only role profiles
 
