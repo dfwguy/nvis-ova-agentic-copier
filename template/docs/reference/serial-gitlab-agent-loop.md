@@ -945,6 +945,48 @@ It does not activate a role, transport, profile, or timer, or complete the
 wider migration. Ordinary writable invocations and candidate-preview retain
 their existing routes and authority.
 
+#### Committed inspection profiles
+
+`agent_work.serial` provides a private read-only session for a fresh checkout
+of a reconciled commit. It uses the existing broker and read tools. The
+owner's saved worktree stays intact. Remote and local branch names may differ;
+each is checked against its own source.
+
+| Interface | Inputs and result |
+| --- | --- |
+| `worker.ReconcilerCandidateIdentity` | Pins `role`, `host`, `project_id`, `merge_request_iid`, `source_branch`, `source_lease_sha`, `checkout_branch`, `target_branch`, `target_sha`, `final_sha`, `committed_tree`, and `identity_kind="committed"`. It is private expected data, not proof. |
+| `serial.create_reconciler_candidate_check` | Takes the identity and keyword inputs `worktree`, `record`, `ledger`, `gitlab`, and `repository`. Returns `(full_check, local_check)`. Both reject an identity that differs from the captured one. |
+| `serial.create_reconciler_candidate_gateway` | Takes the identity and keyword inputs `worktree`, `record`, `check_candidate`, and `repository`. Returns the existing candidate action for status and reads only. |
+| `serial.create_reconciler_candidate_session` | Takes the identity and keyword inputs `worktree`, `record`, `ledger`, `gitlab`, `repository`, `timeout_seconds`, and `nonce_factory`. Optional inputs are `temporary_directory`, `clock`, and `broker_factory`. Its context yields `(broker, profile)` and closes the broker on exit. |
+
+The full check reads the current owner record and revision, configured project,
+open merge request, remote refs, and local committed checkout. The local check
+reads the current owner record and local checkout without remote or API calls.
+The repository checks the exact branch, HEAD, tree, clean state, and target
+ancestry. Missing facts, failed reads, or drift refuse inspection.
+
+| Binding | Checked source |
+| --- | --- |
+| `source_branch`, `source_lease_sha` | Remote source ref, merge request, and current owner record. |
+| `checkout_branch`, `final_sha`, `committed_tree` | Fresh inspection checkout; distinct from the owner's saved worktree. |
+| `inspection_checkout` | Captured `worktree` path and actual path passed to `AgentInvoker.invoke`. Exact `Path` equality is required; alternate spellings refuse. |
+
+The session sets all four private profile fields: `committed_identity`,
+`committed_check`, `inspection_profile_check`, and `inspection_checkout`.
+If any is set, all four must match the genuine session and committed role.
+Changing the invocation path, replacing both paths, omitting a field, or
+changing the role to `candidate-preview` refuses before preview or actor setup.
+The refusal returns empty stdout and `stderr="actor_identity_changed"`.
+Checks also run before the actor thread, before its turn, and at completion.
+Drift at completion discards buffered output.
+
+| Read result or limit | Contract |
+| --- | --- |
+| Status | `state="inspection-ready"`, `candidate_tree`, `commit_sha`, and `committed_tree`. |
+| Inventory and ranges | Read from `target_sha` to `final_sha`; existing read fields and grouped-content bindings stay unchanged. Private expectation fields stay out of MCP results. |
+| Broker binding | Uses the current owner's genuine `ledger_revision` and remote source lease. The first read pins the base SHA for later reads. |
+| Refused actions | Stage, commit, validate, and review; inspection output is not validation proof. |
+
 For coding and content results, the serial worker uses private `candidate`
 commands in addition to its applicable checkpoint and worker-result
 boundaries. Each live request includes a nonce. A `stage` request has no model

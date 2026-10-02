@@ -112,6 +112,7 @@ from .red_commit import (
     red_commit_ref,
 )
 from .repository import (
+    GitRepository,
     LegacyPublicationCandidate,
     PublicationCommitRejected,
     PublicationError,
@@ -134,11 +135,17 @@ from .timing import (
     stage_timing_report,
 )
 from .worker import (
+    CandidateBrokerFactory,
+    CandidateBrokerSession,
+    CandidateReviewBroker,
+    ReconcilerCandidateIdentity,
+    RoleExecutionProfile,
     WorkerProtocolError,
     WorkerResultBrokerRequest,
     build_worker_prompt,
     build_worker_result,
     build_worker_result_artifact,
+    create_candidate_broker,
     format_worker_result_diagnostic,
     parse_worker_result_accepted_artifact,
     parse_worker_result_artifact,
@@ -211,6 +218,286 @@ class _BoundReconcileRepository(Protocol):
 
 
 _COMMITTED_READ_ROLES = frozenset({"router", "judge", "finalizer"})
+
+
+def create_reconciler_candidate_check(
+    expected: ReconcilerCandidateIdentity,
+    *,
+    worktree: Path,
+    record: LedgerRecord,
+    ledger: LedgerPort,
+    gitlab: GitLabPort,
+    repository: GitRepository,
+) -> tuple[
+    Callable[[ReconcilerCandidateIdentity], bool],
+    Callable[[ReconcilerCandidateIdentity], bool],
+]:
+    """Capture genuine ownership for full launch checks and local read checks."""
+
+    def owner_is_exact() -> bool:
+        current = ledger.load_read_only(record.issue_iid)
+        return (
+            current is not None
+            and record.project_id == expected.project_id
+            and record.merge_request_iid == expected.merge_request_iid
+            and record.source_branch == expected.source_branch
+            and record.source_sha == expected.source_lease_sha
+            and (
+                current.project_id,
+                current.issue_iid,
+                current.merge_request_iid,
+                current.source_branch,
+                current.source_sha,
+                current.revision,
+                current.worktree,
+            )
+            == (
+                record.project_id,
+                record.issue_iid,
+                record.merge_request_iid,
+                record.source_branch,
+                record.source_sha,
+                record.revision,
+                record.worktree,
+            )
+        )
+
+    def local_check(supplied: ReconcilerCandidateIdentity) -> bool:
+        if supplied != expected:
+            return False
+        try:
+            return (
+                owner_is_exact()
+                and repository.verify_reconciler_checkout(worktree, expected)
+                and owner_is_exact()
+            )
+        except (LedgerError, RepositoryError, OSError, ValueError):
+            return False
+
+    def full_check(supplied: ReconcilerCandidateIdentity) -> bool:
+        if supplied != expected:
+            return False
+        try:
+            if not owner_is_exact():
+                return False
+            project = gitlab.verify_project()
+            mr = gitlab.fetch_merge_request(expected.merge_request_iid)
+            return (
+                project.id == expected.project_id
+                and project.host == expected.host
+                and mr.iid == expected.merge_request_iid
+                and mr.state == "opened"
+                and mr.source_project_id == expected.project_id
+                and mr.target_project_id == expected.project_id
+                and mr.source_branch == expected.source_branch
+                and mr.target_branch == expected.target_branch
+                and mr.sha == expected.source_lease_sha
+                and repository.verify_reconciler_candidate(
+                    worktree, expected, origin_url=project.http_url_to_repo
+                )
+                and owner_is_exact()
+            )
+        except (LedgerError, GitLabError, RepositoryError, OSError, ValueError):
+            return False
+
+    return full_check, local_check
+
+
+def create_reconciler_candidate_gateway(
+    expected: ReconcilerCandidateIdentity,
+    *,
+    worktree: Path,
+    record: LedgerRecord,
+    check_candidate: Callable[[ReconcilerCandidateIdentity], bool],
+    repository: GitRepository,
+) -> Callable[[str, str | None, dict[str, object] | None], dict[str, object]]:
+    """Serve only checked status and committed target-to-final reads."""
+
+    def candidate_action(
+        action: str, tree: str | None, selector: dict[str, object] | None
+    ) -> dict[str, object]:
+        failure = WorkerProtocolError(
+            "candidate_broker", "candidate request is invalid"
+        )
+        if (
+            action not in {"read", "status"}
+            or tree != expected.committed_tree
+            or record.project_id != expected.project_id
+            or record.merge_request_iid != expected.merge_request_iid
+            or record.source_branch != expected.source_branch
+            or record.source_sha != expected.source_lease_sha
+            or not check_candidate(expected)
+        ):
+            raise failure
+        identity: dict[str, object] = {
+            "candidate_tree": expected.committed_tree,
+            "commit_sha": expected.final_sha,
+            "committed_tree": expected.committed_tree,
+        }
+        try:
+            if action == "status" and selector is None:
+                result = identity | {"state": "inspection-ready"}
+            elif action == "read" and selector == {"mode": "changed_paths"}:
+                result = (
+                    dict(
+                        repository.changed_candidate_paths(
+                            worktree,
+                            expected.committed_tree,
+                            base_sha=expected.target_sha,
+                            candidate_sha=expected.final_sha,
+                        )
+                    )
+                    | identity
+                    | {"base_sha": expected.target_sha}
+                )
+            elif (
+                action == "read"
+                and selector is not None
+                and (
+                    set(selector) == {"path", "side", "offset", "length"}
+                    or (
+                        set(selector) == {"mode", "path", "side", "offset", "length"}
+                        and selector["mode"] == "range"
+                    )
+                )
+            ):
+                path, side = selector["path"], selector["side"]
+                offset, length = selector["offset"], selector["length"]
+                if (
+                    not isinstance(path, str)
+                    or not isinstance(side, str)
+                    or type(offset) is not int
+                    or type(length) is not int
+                ):
+                    raise failure
+                result = (
+                    dict(
+                        repository.read_candidate_range(
+                            worktree,
+                            expected.committed_tree,
+                            base_sha=expected.target_sha,
+                            candidate_sha=expected.final_sha,
+                            path=path,
+                            side=side,
+                            offset=offset,
+                            length=length,
+                        )
+                    )
+                    | identity
+                    | {"base_sha": expected.target_sha}
+                )
+            else:
+                raise failure
+        except (RepositoryError, OSError, ValueError):
+            raise failure from None
+        if not check_candidate(expected):
+            raise WorkerProtocolError("candidate_broker", "identity changed")
+        return result
+
+    return candidate_action
+
+
+@contextmanager
+def create_reconciler_candidate_session(
+    expected: ReconcilerCandidateIdentity,
+    *,
+    worktree: Path,
+    record: LedgerRecord,
+    ledger: LedgerPort,
+    gitlab: GitLabPort,
+    repository: GitRepository,
+    timeout_seconds: int,
+    nonce_factory: Callable[[], str],
+    temporary_directory: Path | None = None,
+    clock: Callable[[], float] = monotonic,
+    broker_factory: CandidateBrokerFactory = create_candidate_broker,
+) -> Iterator[tuple[CandidateReviewBroker, RoleExecutionProfile]]:
+    """Yield one verified committed-inspection broker and captured role profile."""
+    full_check, local_check = create_reconciler_candidate_check(
+        expected,
+        worktree=worktree,
+        record=record,
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=repository,
+    )
+    if record.source_sha is None or not full_check(expected):
+        raise WorkerProtocolError("candidate_broker", "identity changed")
+    nonce = nonce_factory()
+    if (
+        type(timeout_seconds) is not int
+        or timeout_seconds <= 0
+        or re.fullmatch(r"[0-9a-f]{32}", nonce) is None
+    ):
+        raise WorkerProtocolError("candidate_broker", "candidate request is invalid")
+    request = WorkerResultBrokerRequest(
+        nonce=nonce,
+        project_id=record.project_id,
+        issue_iid=record.issue_iid,
+        ledger_revision=record.revision,
+        expected_state=record.state,
+        expected_phase=record.phase,
+        source_branch=record.source_branch,
+        source_sha=record.source_sha,
+    )
+    gateway = create_reconciler_candidate_gateway(
+        expected,
+        worktree=worktree,
+        record=record,
+        check_candidate=local_check,
+        repository=repository,
+    )
+    broker = broker_factory(
+        gateway,
+        request=request,
+        timeout_seconds=timeout_seconds,
+        temporary_directory=temporary_directory,
+        clock=clock,
+        inspection_identity=expected,
+        inspection_check=local_check,
+    )
+    if not isinstance(broker, CandidateBrokerSession) or not broker.matches_inspection(
+        expected, request, local_check, gateway
+    ):
+        raise WorkerProtocolError("candidate_broker", "identity changed")
+    active = True
+
+    def profile_check(profile: RoleExecutionProfile) -> bool:
+        return (
+            active
+            and profile.role == expected.role
+            and profile.candidate_socket == broker.socket_path
+            and profile.nonce == request.nonce
+            and profile.issue_iid == record.issue_iid
+            and profile.candidate_tree == expected.committed_tree
+            and profile.committed_identity == expected
+            and profile.committed_check is full_check
+            and profile.inspection_profile_check is profile_check
+            and profile.inspection_checkout == worktree
+            and broker.matches_inspection(expected, request, local_check, gateway)
+            and broker.inspection_active
+            and full_check(expected)
+            and broker.inspection_active
+        )
+
+    try:
+        profile = RoleExecutionProfile(
+            role=expected.role,
+            candidate_socket=broker.socket_path,
+            nonce=request.nonce,
+            issue_iid=record.issue_iid,
+            candidate_tree=expected.committed_tree,
+            committed_identity=expected,
+            committed_check=full_check,
+            inspection_profile_check=profile_check,
+            inspection_checkout=worktree,
+        )
+        if not profile_check(profile):
+            raise WorkerProtocolError("candidate_broker", "identity changed")
+        yield broker, profile
+    finally:
+        active = False
+        broker.close_and_capture()
 
 
 def read_committed_candidate(

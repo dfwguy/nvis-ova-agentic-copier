@@ -90,6 +90,7 @@ class ActorBinding:
     candidate_socket: Path
     nonce: str
     candidate_command: tuple[str, ...]
+    committed_identity: str | None = None
 
 
 @dataclass(frozen=True)
@@ -111,6 +112,7 @@ class ActorHostPorts:
     run_command: CommandRunner
     clock: Callable[[], float]
     frontend_factory: ActorFrontendFactory
+    check_candidate: Callable[[], bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -433,6 +435,7 @@ def build_actor_permission_plan(
                     binding.executable,
                     binding.candidate_command,
                     binding.nonce,
+                    binding.committed_identity,
                 ),
                 "protected": protected_identity,
                 "filesystem": filesystem,
@@ -635,6 +638,8 @@ def run_actor_session(
             )
         ):
             raise ActorHostError("actor_plan_invalid")
+        if ports.check_candidate is not None and not ports.check_candidate():
+            raise ActorHostError("actor_identity_changed")
         _audit(plan, spec, ports)
         if ports.clock() >= spec.deadline:
             raise ActorHostError("actor_timeout")
@@ -653,6 +658,8 @@ def run_actor_session(
             }
             config = session.request("config/read", parameters)
             validate_actor_provenance(plan, config, {})
+            if ports.check_candidate is not None and not ports.check_candidate():
+                raise ActorHostError("actor_identity_changed")
             thread = session.request(
                 "thread/start",
                 {
@@ -672,6 +679,8 @@ def run_actor_session(
             thread_identity = ActorThreadEvidence.model_validate_json(
                 json.dumps(dict(thread))
             ).thread.id
+            if ports.check_candidate is not None and not ports.check_candidate():
+                raise ActorHostError("actor_identity_changed")
             try:
                 response = ActorTurnEvidence.model_validate_json(
                     json.dumps(
@@ -727,6 +736,8 @@ def run_actor_session(
                     raise ActorHostError("actor_protocol_invalid") from None
                 if size > limits.max_output_bytes:
                     raise ActorHostError("actor_protocol_invalid")
+            if ports.check_candidate is not None and not ports.check_candidate():
+                raise ActorHostError("actor_identity_changed")
     except ActorHostError as error:
         return ActorResult(None, "", error.reason)
     except (OSError, RuntimeError, TypeError, ValueError):
