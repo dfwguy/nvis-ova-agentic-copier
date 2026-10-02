@@ -709,6 +709,141 @@ def cheap_gate_failure_id(result: CommandResult | None) -> str:
     return match.group(1) if match is not None else "cheap-gate"
 
 
+class _CheapGateLocation(BaseModel):
+    """Strict canonical facts from one supported concise Ruff record."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    path: str = Field(strict=True)
+    line: str = Field(strict=True)
+    column: str = Field(strict=True)
+    code: Literal["I001"]
+
+    def model_post_init(self, _context: object) -> None:
+        if not _safe_path(self.path) or any(
+            _bounded_counter(value) in {None, 0} for value in (self.line, self.column)
+        ):
+            raise ValueError("invalid cheap gate location")
+
+    def canonical_line(self) -> str:
+        """Render only the validated location and fixed rule identifier."""
+        return f"{self.path}:{self.line}:{self.column}: {self.code}"
+
+
+class _CheapGateProjection(BaseModel):
+    """Transient candidate-bound safe facts, never a tool transcript."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    candidate_tree: str = Field(strict=True)
+    check_id: Literal["ruff-check"]
+    diagnostic_lines: tuple[str, ...] = Field(min_length=1, max_length=_MAX_HOOK_LINES)
+
+    def model_post_init(self, _context: object) -> None:
+        if not _valid_tree(self.candidate_tree) or len(
+            set(self.diagnostic_lines)
+        ) != len(self.diagnostic_lines):
+            raise ValueError("invalid cheap gate projection")
+        for line in self.diagnostic_lines:
+            match = _RUFF_LINE.fullmatch(line)
+            if match is None or not _within_hook_bytes(line, _MAX_HOOK_LINE_BYTES):
+                raise ValueError("invalid cheap gate diagnostic")
+            location = _CheapGateLocation.model_validate(match.groupdict())
+            if location.canonical_line() != line:
+                raise ValueError("noncanonical cheap gate diagnostic")
+
+
+def _within_hook_bytes(value: str, limit: int) -> bool:
+    try:
+        return len(value.encode("utf-8")) <= limit
+    except UnicodeEncodeError:
+        return False
+
+
+def _ruff_summary(line: str) -> bool:
+    match = re.fullmatch(
+        r"(?:Found (?P<errors>[0-9]+) errors?\.|"
+        r"\[\*\] (?P<fixable>[0-9]+) fixable with the `--fix` option\.)",
+        line,
+    )
+    return match is not None and _bounded_counter(
+        match.group("errors") or match.group("fixable")
+    ) not in {None, 0}
+
+
+def project_cheap_gate_diagnostics(
+    output: str,
+    *,
+    check_id: str,
+    candidate_tree: str,
+    tracked_paths: tuple[str, ...],
+    snapshot_prefix: str = "",
+) -> str:
+    """Project bounded original I001 facts from verified staged regular paths."""
+    if check_id != "ruff-check" or not _within_hook_bytes(
+        output, _MAX_HOOK_FAILURE_BYTES
+    ):
+        return ""
+    members = frozenset(tracked_paths)
+    lines: list[str] = []
+    try:
+        for raw_line in output.removesuffix("\n").split("\n"):
+            if not raw_line.isprintable():
+                return ""
+            if _ruff_summary(raw_line):
+                continue
+            relative_line = (
+                raw_line.removeprefix(snapshot_prefix) if snapshot_prefix else raw_line
+            )
+            match = _RUFF_LINE.fullmatch(relative_line)
+            if match is None:
+                return ""
+            location = _CheapGateLocation.model_validate(match.groupdict())
+            if location.path not in members:
+                return ""
+            lines.append(location.canonical_line())
+        projection = _CheapGateProjection.model_validate(
+            {
+                "candidate_tree": candidate_tree,
+                "check_id": check_id,
+                "diagnostic_lines": lines,
+            }
+        ).model_dump_json()
+    except ValidationError:
+        return ""
+    return projection if _within_hook_bytes(projection, _MAX_HOOK_FAILURE_BYTES) else ""
+
+
+def cheap_gate_failure(
+    result: CommandResult | None, *, candidate_tree: str
+) -> HookFailure:
+    """Revalidate the whole safe projection or return the fixed generic detail."""
+    fallback = HookFailure(cheap_gate_failure_id(result), (_FALLBACK_HOOK_LINE,))
+    if (
+        result is None
+        or result.returncode != 1
+        or result.stderr != "ruff-check failed"
+        or not _within_hook_bytes(result.stdout, _MAX_HOOK_FAILURE_BYTES)
+    ):
+        return fallback
+    try:
+
+        def unique_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+            values: dict[str, object] = {}
+            for key, value in pairs:
+                if key in values:
+                    raise ValueError("duplicate cheap gate field")
+                values[key] = value
+            return values
+
+        projection = _CheapGateProjection.model_validate(
+            json.loads(result.stdout, object_pairs_hook=unique_pairs)
+        )
+    except (ValueError, ValidationError):
+        return fallback
+    if projection.candidate_tree != candidate_tree:
+        return fallback
+    return HookFailure(projection.check_id, projection.diagnostic_lines)
+
+
 def _valid_junit_artifacts(
     candidate_tree: str, artifacts: tuple[_PersistedJUnitArtifact, ...]
 ) -> bool:
@@ -1445,7 +1580,7 @@ def run_judge_validation(
         if dependencies.current_staged_tree() != candidate_tree:
             raise JudgeValidationError("staged tree changed during cheap gate")
         if gate_failed:
-            failure_id = cheap_gate_failure_id(gate_result)
+            failure = cheap_gate_failure(gate_result, candidate_tree=candidate_tree)
             return JudgeValidationReport(
                 candidate_tree,
                 True,
@@ -1455,10 +1590,10 @@ def run_judge_validation(
                 None,
                 (
                     "pre-commit hook missing or not executable; run uv run pre-commit install"
-                    if failure_id == "pre-commit-hook"
+                    if failure.hook_id == "pre-commit-hook"
                     else "cheap candidate gate failed"
                 ),
-                (HookFailure(failure_id, (_FALLBACK_HOOK_LINE,)),),
+                (failure,),
             )
         if dependencies.current_staged_tree() != candidate_tree:
             raise JudgeValidationError("candidate tree is not the current staged tree")

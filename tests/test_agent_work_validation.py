@@ -45,6 +45,7 @@ from agent_work.validation import (
     observe_judge_validation,
     run_judge_validation,
 )
+from tests.test_agent_work_cheap_gate import CheapGateObservation
 
 _CANDIDATE = "a" * 40
 _OTHER_CANDIDATE = "b" * 40
@@ -4635,6 +4636,398 @@ def test_observation_fails_closed_for_malformed_hook_failure_evidence() -> None:
 
         assert calls == []
         assert state.writes == []
+
+
+@pytest.mark.parametrize("valid", (True, False))
+def test_original_gate_locations_reach_judge_without_hook_cleanup_or_record(
+    tmp_path: Path, *, valid: bool
+) -> None:
+    observation = CheapGateObservation(tmp_path, _CANDIDATE)
+    if not valid:
+        observation.output += "private free text\n"
+    state = ValidationStateFake()
+    dependencies, hooks = _dependencies(state)
+    removed: list[Path] = []
+    dependencies = replace(
+        dependencies,
+        check_candidate_gate=observation.gate,
+        remove_junit_artifact=removed.append,
+    )
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+
+    assert report.state == "preflight-failure"
+    assert report.hook_failures == (
+        validation.HookFailure(
+            "ruff-check",
+            (
+                ("src/widget.py:1:1: I001", "tests/test_widget.py:7:2: I001")
+                if valid
+                else ("No safe structured diagnostic available.",)
+            ),
+        ),
+    )
+    assert observation.events == ["opened", "failed", "closed"]
+    assert hooks == removed == state.writes == []
+    assert state.records == {}
+    assert "PRIVATE_TOKEN" not in str(report)
+
+
+def _project_original_diagnostics(
+    output: str,
+    *,
+    tree: str = _CANDIDATE,
+    check_id: str = "ruff-check",
+    paths: tuple[str, ...] = ("src/widget.py",),
+) -> str:
+    return validation.project_cheap_gate_diagnostics(
+        output, check_id=check_id, candidate_tree=tree, tracked_paths=paths
+    )
+
+
+def _consume_original_diagnostics(
+    output: str,
+    *,
+    tree: str = _CANDIDATE,
+    returncode: int = 1,
+    stderr: str = "ruff-check failed",
+) -> validation.HookFailure:
+    return validation.cheap_gate_failure(
+        CommandResult(returncode, output, stderr), candidate_tree=tree
+    )
+
+
+@given(
+    stem=st.text(alphabet=ascii_letters + digits + "_-", min_size=1, max_size=40),
+    positions=st.lists(
+        st.tuples(st.integers(1, 999_999_999), st.integers(1, 999_999_999)),
+        min_size=1,
+        max_size=4,
+        unique=True,
+    ),
+    message=st.text(alphabet=ascii_letters + digits + " =:/`[]_*é", max_size=100),
+    tree=st.text(alphabet="0123456789abcdef", min_size=40, max_size=40),
+)
+def test_generated_original_projection_is_deterministic_bounded_and_round_trips(
+    stem: str, positions: list[tuple[int, int]], message: str, tree: str
+) -> None:
+    path = f"src/{stem}.py"
+    lines = tuple(f"{path}:{line}:{column}: I001" for line, column in positions)
+    output = "\n".join(f"{line} [*] {message}" for line in lines)
+    projection = _project_original_diagnostics(output, tree=tree, paths=(path,))
+    changed_message = "\n".join(f"{line} PRIVATE_TOKEN=different" for line in lines)
+
+    assert projection
+    assert projection == _project_original_diagnostics(output, tree=tree, paths=(path,))
+    assert projection == _project_original_diagnostics(
+        changed_message, tree=tree, paths=(path,)
+    )
+    payload = json.loads(projection)
+    assert payload == {
+        "candidate_tree": tree,
+        "check_id": "ruff-check",
+        "diagnostic_lines": list(lines),
+    }
+    assert len(projection.encode("utf-8")) <= 4096
+    assert len(lines) <= 4
+    assert all(len(line.encode("utf-8")) <= 256 for line in lines)
+    result = _consume_original_diagnostics(projection, tree=tree)
+    assert result == validation.HookFailure("ruff-check", lines)
+    assert result == _consume_original_diagnostics(projection, tree=tree)
+    assert _consume_original_diagnostics(
+        projection, tree="f" * 40 if tree != "f" * 40 else _CANDIDATE
+    ).diagnostic_lines == ("No safe structured diagnostic available.",)
+    assert _project_original_diagnostics(output, tree=tree, paths=()) == ""
+
+
+@given(output=st.text(max_size=5000))
+def test_generated_original_consumer_never_renders_arbitrary_output(
+    output: str,
+) -> None:
+    malformed = f"PRIVATE_TOKEN={output}"
+    result = _consume_original_diagnostics(malformed)
+    assert result == validation.HookFailure(
+        "ruff-check", ("No safe structured diagnostic available.",)
+    )
+    assert result == _consume_original_diagnostics(malformed)
+
+
+@given(
+    position=st.one_of(
+        st.integers(max_value=0), st.integers(min_value=1_000_000_000), st.booleans()
+    ),
+    column=st.booleans(),
+)
+def test_generated_original_projector_rejects_nonpositive_overflow_and_boolean_positions(
+    position: int | bool, *, column: bool
+) -> None:
+    line, offset = (1, position) if column else (position, 1)
+    assert (
+        _project_original_diagnostics(f"src/widget.py:{line}:{offset}: I001 secret")
+        == ""
+    )
+
+
+@given(suffix=st.text(max_size=100))
+def test_generated_original_failure_id_retains_fixed_identity(suffix: str) -> None:
+    assert (
+        validation.cheap_gate_failure_id(
+            CommandResult(1, suffix, f"ruff-check failed:{suffix}")
+        )
+        == "ruff-check"
+    )
+    assert (
+        validation.cheap_gate_failure_id(CommandResult(1, suffix, f"unknown:{suffix}"))
+        == "cheap-gate"
+    )
+
+
+@pytest.mark.parametrize(
+    ("output", "paths", "check_id", "tree"),
+    (
+        ("src/widget.py:1:1: I001 secret", (), "ruff-check", _CANDIDATE),
+        ("src/widget.py:1:1: I001 secret", ("src/widget.py",), "ty", _CANDIDATE),
+        ("src/widget.py:1:1: I001 secret", ("src/widget.py",), "ruff-check", "invalid"),
+        (
+            "src/widget.py:1:1: I001 secret\ncontext",
+            ("src/widget.py",),
+            "ruff-check",
+            _CANDIDATE,
+        ),
+        (
+            "src/widget.py:1:1: I001 secret\nsrc/widget.py:2:1: F401 secret",
+            ("src/widget.py",),
+            "ruff-check",
+            _CANDIDATE,
+        ),
+        (
+            "src/widget.py:01:1: I001 secret",
+            ("src/widget.py",),
+            "ruff-check",
+            _CANDIDATE,
+        ),
+        (
+            "src/widget.py:1:01: I001 secret",
+            ("src/widget.py",),
+            "ruff-check",
+            _CANDIDATE,
+        ),
+        (
+            "src/widget.py:1:1: I001 " + "é" * 2048,
+            ("src/widget.py",),
+            "ruff-check",
+            _CANDIDATE,
+        ),
+        (
+            "\n".join(f"src/widget.py:{line}:1: I001 secret" for line in range(1, 6)),
+            ("src/widget.py",),
+            "ruff-check",
+            _CANDIDATE,
+        ),
+        (
+            "src/../widget.py:1:1: I001 secret",
+            ("src/../widget.py",),
+            "ruff-check",
+            _CANDIDATE,
+        ),
+        (
+            "/private/widget.py:1:1: I001 secret",
+            ("/private/widget.py",),
+            "ruff-check",
+            _CANDIDATE,
+        ),
+        (
+            f"{'a' * 245}.py:1:1: I001 secret",
+            ("a" * 245 + ".py",),
+            "ruff-check",
+            _CANDIDATE,
+        ),
+    ),
+)
+def test_original_projector_refuses_malformed_mixed_membership_and_bounds(
+    output: str, paths: tuple[str, ...], check_id: str, tree: str
+) -> None:
+    assert (
+        _project_original_diagnostics(output, tree=tree, check_id=check_id, paths=paths)
+        == ""
+    )
+
+
+@pytest.mark.parametrize("count", (1, 4))
+def test_original_projection_admits_existing_count_and_counter_limits(
+    count: int,
+) -> None:
+    lines = tuple(
+        f"src/widget.py:999999999:{column}: I001" for column in range(1, count + 1)
+    )
+    projection = _project_original_diagnostics(
+        "\n".join(f"{line} secret" for line in lines)
+    )
+    assert _consume_original_diagnostics(projection).diagnostic_lines == lines
+
+
+def _original_envelope(**changes: object) -> str:
+    return json.dumps(
+        {
+            "candidate_tree": _CANDIDATE,
+            "check_id": "ruff-check",
+            "diagnostic_lines": ["src/widget.py:1:1: I001"],
+            **changes,
+        },
+        separators=(",", ":"),
+    )
+
+
+@given(
+    line=st.integers(1, 999_999_999),
+    damage=st.sampled_from(
+        ("tree", "check", "code", "path", "position", "count", "bytes")
+    ),
+)
+def test_generated_original_consumer_rejects_altered_safe_facts(
+    line: int, damage: str
+) -> None:
+    location = f"src/widget.py:{line}:1: I001"
+    changes: dict[str, object] = {"diagnostic_lines": [location]}
+    if damage == "tree":
+        changes["candidate_tree"] = _OTHER_CANDIDATE
+    elif damage == "check":
+        changes["check_id"] = "ty"
+    elif damage == "code":
+        changes["diagnostic_lines"] = [location.replace("I001", "F401")]
+    elif damage == "path":
+        changes["diagnostic_lines"] = [location.replace("src/", "../src/")]
+    elif damage == "position":
+        changes["diagnostic_lines"] = [f"src/widget.py:0{line}:1: I001"]
+    elif damage == "count":
+        changes["diagnostic_lines"] = [location] * 5
+    else:
+        changes["diagnostic_lines"] = [f"{'a' * 245}.py:{line}:1: I001"]
+    projection = _original_envelope(**changes)
+    failure = _consume_original_diagnostics(projection)
+    assert failure == validation.HookFailure(
+        "ruff-check", ("No safe structured diagnostic available.",)
+    )
+    assert failure == _consume_original_diagnostics(projection)
+
+
+@pytest.mark.parametrize("bytes_count", (256, 257))
+def test_original_projection_obeys_exact_canonical_line_byte_limit(
+    bytes_count: int,
+) -> None:
+    suffix = ".py:1:1: I001"
+    path = "a" * (bytes_count - len(suffix)) + ".py"
+    output = f"{path}:1:1: I001 secret"
+    projection = _project_original_diagnostics(output, paths=(path,))
+    if bytes_count == 256:
+        assert _consume_original_diagnostics(projection).diagnostic_lines == (
+            f"{path}:1:1: I001",
+        )
+    else:
+        assert projection == ""
+
+
+@pytest.mark.parametrize("bytes_count", (4096, 4097))
+def test_original_projection_obeys_exact_raw_utf8_envelope_limit(
+    bytes_count: int,
+) -> None:
+    prefix = "src/widget.py:1:1: I001 "
+    output = prefix + "a" * (bytes_count - len(prefix))
+    projection = _project_original_diagnostics(output)
+    if bytes_count == 4096:
+        assert _consume_original_diagnostics(projection).diagnostic_lines == (
+            "src/widget.py:1:1: I001",
+        )
+    else:
+        assert projection == ""
+
+
+@pytest.mark.parametrize(
+    "projection",
+    (
+        "",
+        "not-json PRIVATE_TOKEN",
+        "[]",
+        "null",
+        _original_envelope(candidate_tree=_OTHER_CANDIDATE),
+        _original_envelope(candidate_tree=True),
+        _original_envelope(check_id="ty"),
+        _original_envelope(check_id=True),
+        _original_envelope(extra="PRIVATE_TOKEN"),
+        _original_envelope(diagnostic_lines=[]),
+        _original_envelope(diagnostic_lines="src/widget.py:1:1: I001"),
+        _original_envelope(diagnostic_lines=[True]),
+        _original_envelope(diagnostic_lines=["src/widget.py:1:1: I001"] * 5),
+        _original_envelope(diagnostic_lines=["src/widget.py:1:1: I001"] * 2),
+        _original_envelope(diagnostic_lines=["src/widget.py:1:1: F401"]),
+        _original_envelope(diagnostic_lines=["src/widget.py:True:1: I001"]),
+        _original_envelope(diagnostic_lines=["src/widget.py:1:False: I001"]),
+        _original_envelope(diagnostic_lines=["src/widget.py:0:1: I001"]),
+        _original_envelope(diagnostic_lines=["src/widget.py:01:1: I001"]),
+        _original_envelope(diagnostic_lines=["src/widget.py:1:1000000000: I001"]),
+        _original_envelope(diagnostic_lines=["/private/widget.py:1:1: I001"]),
+        _original_envelope(diagnostic_lines=["src/../widget.py:1:1: I001"]),
+        _original_envelope(diagnostic_lines=["src\\widget.py:1:1: I001"]),
+        _original_envelope(diagnostic_lines=["src//widget.py:1:1: I001"]),
+        _original_envelope(diagnostic_lines=["src/widget.py:1:1: I001 PRIVATE_TOKEN"]),
+        _original_envelope(diagnostic_lines=["src/widget.py:1:1: I001\x1b"]),
+        _original_envelope(diagnostic_lines=["src/widget.py:1:1: I001\x00"]),
+        _original_envelope(diagnostic_lines=[f"{'a' * 245}.py:1:1: I001"]),
+        _original_envelope() + " " * 4096,
+        _original_envelope().replace(
+            '"check_id":', '"check_id":"ruff-check","check_id":'
+        ),
+    ),
+)
+def test_original_consumer_revalidates_entire_projection_and_judge_falls_back(
+    projection: str,
+) -> None:
+    failure = _consume_original_diagnostics(projection)
+    assert failure == validation.HookFailure(
+        "ruff-check", ("No safe structured diagnostic available.",)
+    )
+    state = ValidationStateFake()
+    dependencies, hooks = _dependencies(state)
+    removals: list[Path] = []
+    dependencies = replace(
+        dependencies,
+        check_candidate_gate=lambda _tree: CommandResult(
+            1, projection, "ruff-check failed"
+        ),
+        remove_junit_artifact=removals.append,
+    )
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    assert report.hook_failures == (failure,)
+    assert hooks == removals == state.writes == []
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stderr"),
+    (
+        (2, "ruff-check failed"),
+        (0, "ruff-check failed"),
+        (1, "ty failed"),
+        (1, "ruff-check failed: PRIVATE_TOKEN"),
+    ),
+)
+def test_original_consumer_requires_exact_failure_status_and_check_identity(
+    returncode: int, stderr: str
+) -> None:
+    assert _consume_original_diagnostics(
+        _original_envelope(), returncode=returncode, stderr=stderr
+    ).diagnostic_lines == ("No safe structured diagnostic available.",)
+
+
+def test_original_consumer_missing_result_has_fixed_fallback() -> None:
+    assert validation.cheap_gate_failure(
+        None, candidate_tree=_CANDIDATE
+    ) == validation.HookFailure(
+        "cheap-gate", ("No safe structured diagnostic available.",)
+    )
 
 
 @pytest.mark.parametrize("size", [1_048_577, 4_194_304, 4_194_305])
