@@ -5,7 +5,7 @@ summary: Set up a recoverable serial agent loop.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-29
+last_reviewed: 2026-10-02
 related:
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the commands, lifecycle, JSON, and exit contract.
@@ -39,6 +39,16 @@ Wait for clear proof.
 Keep proof.
 Stop.
 Use one clear plan.
+
+Router chooses the lane and checks capacity. It delegates work, leads fixes,
+and makes final decisions. Architect is its independent read-only design child.
+
+Before using the service or enabling its timer, check the installed worker
+prompt. If it still tells the legacy workflow Architect to combine proposals
+and own the whole workflow, stop. Return the conflict to
+Router/Main. Resume only after an independently reviewed executable migration.
+The service behavior below does not prove that migration. It does not authorize
+startup with an incompatible prompt.
 
 The installed service can process consecutive terminally handed-off issues in
 one run. It also checks for ready work after it fixes prerequisite labels.
@@ -136,8 +146,9 @@ alone proves repository policy.
 For Codex, verify that `codex exec --help` advertises both `--add-dir` and
 `--enable` before enabling `--apply`. Also confirm that
 `codex features list` reports exactly `multi_agent stable true`. The worker
-starts Codex with `--enable multi_agent` so Architect can delegate its required
-proposal and reviewer roles. It grants the prepared issue checkout's `.agents`
+starts Codex with `--enable multi_agent` for delegation. Its legacy Architect
+workflow prompt must pass the compatibility check above. It grants the
+prepared issue checkout's `.agents`
 and `template/.agents` directories through `--add-dir`. During one invocation,
 it also grants a fresh private broker directory. The producer writes its bounded
 input there. It then connects to the controller-owned socket. No controller
@@ -441,8 +452,10 @@ The timer schedules the next bounded run 20 minutes after the service goes
 inactive. That run checks for new and resumable work. It also rechecks a
 valid default-branch pipeline that was still active. A later activation may
 poll a retained exact MR observer. In a run, one worker owns the issue's full
-flow session. Its Architect, Red, Green, and
-read-only judges pass context to each other. The runner restores the saved
+flow session. Router owns that workflow; Architect supplies the reviewed design.
+Red, Green, and read-only judges pass context through the applicable route.
+The installed prompt must pass the compatibility check above. The runner
+restores the saved
 worktree and coarse `WORKFLOW` state, not a sidecar checkpoint for each role.
 The service has a 190-minute outer timeout. It includes the approved 180-minute
 worker budget and 10 minutes for wrapper checkout, GitLab, publication, and
@@ -590,8 +603,9 @@ applied run or let the timer do so. The default allows up to 16 flow attempts
 in one 10,800-second (three-hour) work budget. Each flow call gets the
 positive, ceil-rounded time left. A fresh issue tries its full fit flow. A
 restored issue resumes from its saved worktree and coarse `WORKFLOW` state. Old
-phase-ledger values finish their saved route. Internal Architect, Red, Green,
-and judge handoffs are not saved apart:
+phase-ledger values finish their saved route. Internal Router, Architect, Red,
+Green, and judge handoffs are not saved apart. The compatibility stop above
+still applies:
 
 ```bash
 export AGENT_WORK_BASE_BRANCH=agent/work-base
@@ -710,8 +724,8 @@ loop never approves, merges, or closes issues.
 
 ### Observe an automated `split_required` decomposition.
 
-When an Architect returns `result_kind=split_required`, the trusted runner
-handles the validated plan in the current segment. It searches for each exact
+When the legacy workflow Architect returns `result_kind=split_required`, the
+trusted runner handles the validated plan in the current segment. It searches for each exact
 child marker. It reuses a matching child and creates only missing children.
 Each new child has a full description that links to the parent and its
 dependencies. Once every child exists, the controller adds one parent note and
