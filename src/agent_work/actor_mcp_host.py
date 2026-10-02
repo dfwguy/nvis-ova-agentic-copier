@@ -435,7 +435,11 @@ def build_actor_permission_plan(
                     binding.executable,
                     binding.candidate_command,
                     binding.nonce,
-                    binding.committed_identity,
+                    *(
+                        (binding.committed_identity,)
+                        if binding.committed_identity is not None
+                        else ()
+                    ),
                 ),
                 "protected": protected_identity,
                 "filesystem": filesystem,
