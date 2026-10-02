@@ -1027,7 +1027,9 @@ def test_full_junit_inventory_rejects_incomplete_or_ambiguous_xml(
         parse_full_junit_inventory(artifact)
 
 
-@pytest.mark.parametrize("size", [1_048_577, 4_194_304, 4_194_305])
+@pytest.mark.parametrize(
+    "size", [1_048_577, 4_194_304, 4_194_305, 6_291_456, 33_554_432, 33_554_433]
+)
 def test_full_junit_public_parsers_apply_inclusive_xml_cap(size: int) -> None:
     from agent_work.test_timing import (
         parse_full_junit_inventory,
@@ -1036,7 +1038,7 @@ def test_full_junit_public_parsers_apply_inclusive_xml_cap(size: int) -> None:
 
     artifact = b"<testsuite tests='1'><testcase classname='tests.test_speed' name='test_existing' time='0.08'/></testsuite>"
     artifact += b" " * (size - len(artifact))
-    if size > 4_194_304:
+    if size > 33_554_432:
         for parser in (parse_full_junit_inventory, parse_full_junit_records):
             with pytest.raises(ValueError):
                 parser(artifact)
@@ -1048,7 +1050,7 @@ def test_full_junit_public_parsers_apply_inclusive_xml_cap(size: int) -> None:
 def test_full_junit_cap_has_one_public_xml_owner() -> None:
     from agent_work.test_timing import MAX_JUNIT_BYTES
 
-    assert MAX_JUNIT_BYTES == 4_194_304
+    assert MAX_JUNIT_BYTES == 33_554_432
 
 
 @settings(max_examples=20)

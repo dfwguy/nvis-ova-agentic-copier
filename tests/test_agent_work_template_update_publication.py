@@ -583,7 +583,9 @@ def test_template_update_mr_inventory_includes_closed_source_branches() -> None:
     assert any("state=all" in call for call in calls)
 
 
-@pytest.mark.parametrize("xml_size", [0, 1_048_577, 4_194_304, 4_194_305])
+@pytest.mark.parametrize(
+    "xml_size", [0, 1_048_577, 4_194_305, 6_291_456, 33_554_432, 33_554_433]
+)
 def test_template_update_default_validator_persists_exact_junit_snapshots(
     tmp_path: Path,
     xml_size: int,
@@ -668,7 +670,7 @@ def test_template_update_default_validator_persists_exact_junit_snapshots(
         ),
     )
 
-    if xml_size > 4_194_304:
+    if xml_size > 33_554_432:
         with pytest.raises(RuntimeError):
             dependencies.validate_tree(worktree, _TREE)
         return

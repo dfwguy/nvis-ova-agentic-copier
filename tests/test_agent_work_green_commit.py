@@ -704,7 +704,9 @@ def test_green_commit_over_100ms_case_is_advisory(tmp_path: Path) -> None:
     assert fake.head == GREEN
 
 
-@pytest.mark.parametrize("size", [1_048_577, 4_194_304, 4_194_305])
+@pytest.mark.parametrize(
+    "size", [1_048_577, 4_194_304, 4_194_305, 6_291_456, 33_554_432, 33_554_433]
+)
 def test_repository_green_commit_reads_complete_xml_through_inclusive_cap(
     tmp_path: Path,
     size: int,
@@ -753,7 +755,7 @@ def test_repository_green_commit_reads_complete_xml_through_inclusive_cap(
         return CommandResult(0, "", "")
 
     repository = GitRepository(config, run)
-    if size > 4_194_304:
+    if size > 33_554_432:
         with pytest.raises(RepositoryError, match="oversized"):
             repository.create_isolated_green_commit(
                 worktree=worker,

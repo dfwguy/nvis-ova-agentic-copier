@@ -985,7 +985,7 @@ def test_artifact_io_failure_persists_bounded_stage_and_actual_hook_code(
     ("artifact", "reason"),
     (
         (b"<testsuite>", "invalid_xml"),
-        (b"x" * 4_194_305, "oversized"),
+        (b"x" * 33_554_433, "oversized"),
         (b"<testsuite tests='unknown'/>", "invalid_count"),
     ),
     ids=("malformed", "oversized", "invalid-count"),
@@ -1066,7 +1066,7 @@ def test_successful_hook_with_unreadable_fixed_junit_records_unknown_timing(
     ("unavailable", "unusable", "reason"),
     (
         (None, b"<testsuite>", "invalid_xml"),
-        (None, b"x" * 4_194_305, "oversized"),
+        (None, b"x" * 33_554_433, "oversized"),
         (None, b"<testsuite tests='unknown'/>", "invalid_count"),
         (OSError("PRIVATE_TOKEN=read-secret"), b"<testsuite>", "invalid_xml"),
     ),
@@ -2125,7 +2125,7 @@ def test_real_baseline_junit_read_preserves_candidate_validation_only_when_unava
 
     def size_baseline(path: Path) -> int:
         if baseline_artifact == "oversized" and path.name == "test-results-py311.xml":
-            return 4_194_305
+            return 33_554_433
         return path.stat().st_size
 
     def write_private(path: Path, data: bytes) -> None:
@@ -2347,7 +2347,7 @@ def test_timing_failure_retains_bounded_detail_and_both_snapshot_identities() ->
     assert "/snapshots" not in str(status)
 
 
-@pytest.mark.parametrize("xml_size", [0, 1_048_577, 4_194_304])
+@pytest.mark.parametrize("xml_size", [0, 1_048_577, 4_194_305, 6_291_456, 33_554_432])
 def test_timing_retry_uses_saved_junit_without_rerunning_hook_or_preflight(
     xml_size: int,
 ) -> None:
@@ -3446,7 +3446,7 @@ def test_hook_failure_evidence_keeps_only_the_earliest_bounded_safe_entries() ->
         (b"<testsuite failures='" + (b"9" * 600) + b"' errors='1'/>"),
         b"<testsuite><broken></testsuite>",
         b"\xff\xfe\xfd",
-        b"x" * 4_194_305,
+        b"x" * 33_554_433,
         PermissionError("artifact secret path is unreadable"),
     ),
     ids=(
@@ -3640,7 +3640,7 @@ def test_legacy_terminal_failure_without_diagnostic_remains_readable() -> None:
     assert state.writes == []
 
 
-@pytest.mark.parametrize("xml_size", [0, 1_048_577, 4_194_304])
+@pytest.mark.parametrize("xml_size", [0, 1_048_577, 4_194_305, 6_291_456, 33_554_432])
 def test_successful_apply_captures_exact_supported_junit_bytes_and_status_reuses_evidence(
     tmp_path: Path,
     xml_size: int,
@@ -4130,7 +4130,7 @@ def test_pre_hook_junit_cleanup_failure_is_terminal_without_a_hook_return_code()
     "artifact",
     (
         b"<testsuite tests='1' failures='0' errors='0'>",
-        b"x" * 4_194_305,
+        b"x" * 33_554_433,
     ),
     ids=("malformed", "oversized"),
 )
@@ -5030,7 +5030,9 @@ def test_original_consumer_missing_result_has_fixed_fallback() -> None:
     )
 
 
-@pytest.mark.parametrize("size", [1_048_577, 4_194_304, 4_194_305])
+@pytest.mark.parametrize(
+    "size", [1_048_577, 4_194_304, 4_194_305, 6_291_456, 33_554_432, 33_554_433]
+)
 def test_failed_hook_large_xml_retains_safe_counts_names_digest_and_failure(
     size: int,
 ) -> None:
@@ -5049,7 +5051,7 @@ def test_failed_hook_large_xml_retains_safe_counts_names_digest_and_failure(
     assert report.returncode == 9
     assert calls == [("git", "hook", "run", "pre-commit")]
     assert "PRIVATE_TOKEN" not in str(state.records[_CANDIDATE])
-    if size > 4_194_304:
+    if size > 33_554_432:
         assert report.failed_tests == report.failed_junit_digests == ()
     else:
         assert report.diagnostic is not None
