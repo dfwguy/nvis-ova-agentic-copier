@@ -2249,6 +2249,70 @@ def _apply_legacy_dirty_hook_correction(
     return config, ledger, gitlab, repository, original, resumed
 
 
+def _worker_record_position(prompt: str) -> int:
+    """Locate emitted workflow record data without depending on its prose label."""
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", prompt):
+        candidate = prompt[match.start() :]
+        try:
+            record, _consumed = decoder.raw_decode(candidate)
+        except ValueError:
+            try:
+                record = ast.literal_eval(candidate.splitlines()[0])
+            except (ValueError, SyntaxError):
+                continue
+        if (
+            isinstance(record, dict)
+            and isinstance(record.get("state"), str)
+            and record.get("phase") == "workflow"
+        ):
+            return match.start()
+    msg = "workflow record data was not emitted"
+    raise ValueError(msg)
+
+
+@pytest.mark.parametrize("state", (RunnerState.EXECUTING, RunnerState.RETRY_WAIT))
+def test_workflow_segment_delivers_router_activation_on_initial_and_retry_launch(
+    tmp_path: Path, state: RunnerState
+) -> None:
+    config = _config(tmp_path)
+    ledger = JsonLedger(config.state_root, clock=lambda: NOW)
+    record = _record(tmp_path, state=state, phase=WorkflowPhase.WORKFLOW)
+    if state is RunnerState.RETRY_WAIT:
+        record = record.model_copy(
+            update={
+                "prior_state": RunnerState.EXECUTING,
+                "prior_phase": WorkflowPhase.WORKFLOW,
+                "retry_at": NOW,
+                "retry_count": 1,
+                "error_code": ErrorCode.WORKER_EXIT,
+            }
+        )
+    ledger.persist(record)
+    invoker = FakeInvoker(returncode=1)
+    gitlab = FakeGitLab(_issue(description="$router .agents/skills/router/SKILL.md"))
+
+    result = run_segment(
+        ledger=ledger,
+        gitlab=gitlab,
+        repository=FakeRepository(config),
+        invoke=invoker,
+        timeout_seconds=10,
+        now=NOW,
+        load_red_checkpoint=lambda *_args: None,
+    )
+
+    assert len(invoker.prompts) == 1
+    assert result is not None and result.state is RunnerState.RETRY_WAIT
+    assert result.error_code is ErrorCode.WORKER_EXIT
+    prompt = invoker.prompts[0]
+    record_position = _worker_record_position(prompt)
+    trusted_prefix, durable_data = prompt[:record_position], prompt[record_position:]
+    assert "$router .agents/skills/router/SKILL.md" in durable_data
+    assert "$router" in trusted_prefix, "trusted_router_activation_missing"
+    assert ".agents/skills/router/SKILL.md" in trusted_prefix
+
+
 def test_workflow_runtime_loads_current_base_checkpoint_into_recovery_prompt(
     tmp_path: Path,
 ) -> None:
@@ -2301,6 +2365,10 @@ def test_workflow_runtime_loads_current_base_checkpoint_into_recovery_prompt(
     assert len(invoker.prompts) == 1
     assert "retained Red checkpoint" in invoker.prompts[0]
     assert evidence.tree_oid in invoker.prompts[0]
+    prompt = invoker.prompts[0]
+    trusted_prefix = prompt[: _worker_record_position(prompt)]
+    assert "$router" in trusted_prefix, "trusted_router_activation_missing"
+    assert ".agents/skills/router/SKILL.md" in trusted_prefix
 
 
 def _red_checkpoint_request_for_segment() -> RedCheckpointRequest:
@@ -4356,6 +4424,10 @@ def test_red_and_resumed_green_prompts_use_the_active_checkout_result_builder(
             f"{request.nonce} --apply --json`"
         ) in prompt
     assert result is not None and result.state is RunnerState.PUBLISHING
+    for prompt in invoker.legacy.prompts:
+        trusted_prefix = prompt[: _worker_record_position(prompt)]
+        assert "$router" in trusted_prefix, "trusted_router_activation_missing"
+        assert ".agents/skills/router/SKILL.md" in trusted_prefix
 
 
 @pytest.mark.parametrize("returncode", (0, 23))
@@ -13184,8 +13256,6 @@ def test_capacity_refusal_uses_structured_error_and_controller_authored_wait_tim
     assert repeated.retry_at is not None
     assert repeated.retry_at == outcome.retry_at + timedelta(minutes=20)
     assert len(repeated_invoker.prompts) == 1
-    assert repeated_invoker.prompts[0].count("$architect-proposal-balanced") == 1
-    assert repeated_invoker.prompts[0].count("$architect-proposal-fast") == 2
 
     available_capacity = SingleSessionInvoker()
     resumed = run_segment(
@@ -13198,8 +13268,10 @@ def test_capacity_refusal_uses_structured_error_and_controller_authored_wait_tim
     )
     assert resumed is not None and resumed.issue_iid == outcome.issue_iid
     assert available_capacity.phases == ["workflow"]
-    assert available_capacity.prompts[0].count("$architect-proposal-balanced") == 1
-    assert available_capacity.prompts[0].count("$architect-proposal-fast") == 2
+    for prompt in (repeated_invoker.prompts[0], available_capacity.prompts[0]):
+        trusted_prefix = prompt[: _worker_record_position(prompt)]
+        assert "$router" in trusted_prefix, "trusted_router_activation_missing"
+        assert ".agents/skills/router/SKILL.md" in trusted_prefix
 
 
 @pytest.mark.parametrize("retained_evidence", ["dirty", "red"])

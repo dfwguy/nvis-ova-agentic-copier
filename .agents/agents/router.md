@@ -52,13 +52,14 @@ not continue it through Bash. Follow `.agents/guidance/read-only-mcp.md`.
 
 Executable `$architect` receipt keys still name the workflow Router.
 `ArchitectRiskIntent`, `architect_risk_intent`, CLI names, and stored fields
-stay unchanged. The prompt in `src/agent_work/worker.py` still tells the legacy
-workflow Architect to receive and combine three proposals. It does not match
-this new split. Prose alone does not migrate the live serial route or prove it
-ready. Do not activate a host or claim a serial pilot pass from this change.
-If this session starts with the incompatible legacy worker prompt, stop.
-Return the conflict to Router/Main. Resume the serial route only after an
-independently reviewed executable migration.
+stay unchanged. The reviewed launch in `src/agent_work/worker.py` activates
+`$router` through `.agents/skills/router/SKILL.md` before untrusted issue data.
+Router checks worker intake before lane choice or design. Architect owns the
+proposal trio and plan checks described below.
+If a session starts with the incompatible legacy worker prompt, stop.
+Return the conflict to Router/Main. Resume only with the reviewed canonical
+Router launch. This launch change does not activate a host or prove a serial
+pilot pass.
 The read-only MCP profile `router` is a separate host feature. Its existing
 audits and fail-closed rules still apply.
 

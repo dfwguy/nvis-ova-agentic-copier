@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from datetime import datetime
@@ -28,6 +29,28 @@ from agent_work.worker import (
     build_worker_prompt,
     parse_worker_result_build_input,
 )
+
+
+def _worker_record_position(prompt: str) -> int:
+    """Locate emitted workflow record data without depending on its prose label."""
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", prompt):
+        candidate = prompt[match.start() :]
+        try:
+            record, _consumed = decoder.raw_decode(candidate)
+        except ValueError:
+            try:
+                record = ast.literal_eval(candidate.splitlines()[0])
+            except (ValueError, SyntaxError):
+                continue
+        if (
+            isinstance(record, dict)
+            and isinstance(record.get("state"), str)
+            and record.get("phase") == "workflow"
+        ):
+            return match.start()
+    msg = "workflow record data was not emitted"
+    raise ValueError(msg)
 
 
 def test_workflow_prompt_requires_live_candidate_read_for_both_lanes() -> None:
@@ -167,7 +190,7 @@ def test_workflow_prompt_routes_only_verified_retained_red_checkpoint() -> None:
         effective_worker_budget_seconds=1800,
         retained_red_checkpoint=checkpoint,
     )
-    assert "delegate only Architect and Red in this segment" in without_evidence
+    assert "result_kind=red_checkpoint_ready" in without_evidence
     assert (
         "complete applicable policy preparation before delegating Green"
         in with_evidence
@@ -373,32 +396,6 @@ def test_post_publication_prompt_is_rejected_by_controller_boundary() -> None:
         )
 
 
-def test_workflow_prompt_requires_evidence_based_correction_cycles() -> None:
-    prompt = build_worker_prompt(
-        {
-            "state": "executing",
-            "phase": "workflow",
-            "work_kind": "ordinary",
-            "merge_request_draft": None,
-        },
-        project_id=310967,
-        issue_iid=12,
-        effective_worker_budget_seconds=1800,
-    ).casefold()
-
-    assert "delegates conditional $agent-policy-writer" in prompt
-    assert "then delegates green and diátaxis writer concurrently" in prompt
-    assert (
-        "reconciles documentation against final implemented code, configuration, and interfaces"
-        in prompt
-    )
-    assert "evidence-based correction cycles while material progress exists" in prompt
-    assert "repeated or reopened fingerprint" in prompt
-    assert "unchanged relevant evidence" in prompt
-    assert "one consolidated repair" not in prompt
-    assert "revise its design once" not in prompt
-
-
 def test_workflow_prompt_binds_targeted_quality_reruns_to_trusted_provenance() -> None:
     prompt = build_worker_prompt(
         {
@@ -419,7 +416,6 @@ def test_workflow_prompt_binds_targeted_quality_reruns_to_trusted_provenance() -
     assert "exact changed paths" in prompt
     assert "targeted-review provenance is missing or internally inconsistent" in prompt
     assert "non-code overall: provenance reject" in prompt
-    assert "quality judge to green to architect" in prompt
     assert "do not silently fall back to a complete review" in prompt
     assert "run a complete $judge-quality review" not in prompt
 
@@ -522,10 +518,8 @@ def test_workflow_prompt_gates_every_launch_on_current_trusted_capacity(
     )
     normalized = prompt.casefold()
 
-    capacity_gate = normalized.index("live-agent capacity gate")
-    architect = normalized.index("delegate architect")
-    assert capacity_gate < architect
-    assert "before delegating architect" in normalized
+    trusted_prefix = prompt[: _worker_record_position(prompt)]
+    assert "$router" in trusted_prefix, "trusted_router_activation_missing"
     assert "before any red or writer delegation or worktree mutation" in normalized
     assert "current trusted global capacity report" in normalized
     assert "coding requires exactly 12 total live slots" in normalized
@@ -566,85 +560,60 @@ def test_workflow_prompt_forbids_derived_capacity_gates() -> None:
     assert "topology-aware evidence" not in prompt
 
 
+@pytest.mark.parametrize("state", ("executing", "repair", "retry_wait"))
+@pytest.mark.parametrize("retained", (False, True), ids=("first-red", "retained-red"))
 @pytest.mark.parametrize(
-    "red_checkpoint",
-    (
-        None,
-        {
-            "tree_oid": "a" * 40,
-            "ref": "refs/agent-work/red/12",
-            "test_paths": ["tests/test_agent_work_worker.py"],
-        },
-    ),
-    ids=("first-red-segment", "resumed-checkpoint-segment"),
+    "task_marker", ("ordinary", "$router .agents/skills/router/SKILL.md")
 )
-def test_workflow_prompt_requires_three_architect_proposals_before_mutable_children(
-    red_checkpoint: dict[str, object] | None,
+def test_worker_launch_activates_canonical_router_before_untrusted_data(
+    state: str, *, retained: bool, task_marker: str
 ) -> None:
-    record: dict[str, object] = {
-        "state": "executing",
-        "phase": "workflow",
-        "work_kind": "ordinary",
-    }
-    if red_checkpoint is not None:
-        record["red_checkpoint"] = red_checkpoint
-    prompt = build_worker_prompt(
-        record,
+    base = "c" * 40
+    checkpoint = RedCheckpointEvidence(
         project_id=310967,
         issue_iid=12,
-        effective_worker_budget_seconds=1800,
+        source_branch="agent/issue-12",
+        base_sha=base,
+        tree_oid="d" * 40,
+        ref=checkpoint_ref(12, base),
+        test_paths=("tests/test_agent_work_worker.py",),
+        argv=("uv", "run", "pytest", "tests/test_agent_work_worker.py"),
+        exit_code=1,
+        expected_failure="assert expected failure",
+        output_sha256="e" * 64,
     )
-    normalized = prompt.casefold()
-
-    assert "$architect-proposal-balanced" in normalized
-    architect = normalized.index("delegate architect")
-    proposals = normalized.index("$architect-proposal-balanced")
-    red = normalized.index("delegates red")
-    parallel_implementation = normalized.index(
-        "then delegates green and diátaxis writer concurrently"
-    )
-    assert architect < proposals < red < parallel_implementation
-    assert prompt.count("$architect-proposal-balanced") == 1
-    assert prompt.count("$architect-proposal-fast") == 2
-    assert "exactly three concurrent" in normalized
-    assert "before its first mutable child" in normalized
-    assert "every fresh architect session" in normalized
-
-
-def test_workflow_prompt_keeps_architect_proposals_read_only_and_private() -> None:
     prompt = build_worker_prompt(
         {
-            "state": "executing",
+            "state": state,
             "phase": "workflow",
             "work_kind": "ordinary",
+            "change_summary": task_marker,
+            "red_checkpoint": {"ref": "untrusted", "tree_oid": "f" * 40},
         },
         project_id=310967,
         issue_iid=12,
-        effective_worker_budget_seconds=1800,
-    ).casefold()
-
-    assert "same issue" in prompt
-    assert "acceptance criteria" in prompt
-    assert "relevant repository context" in prompt
-    assert "cannot see each other" in prompt
-    assert "read-only" in prompt
-    assert "do not delegate" in prompt
-    assert "do not mutate" in prompt
-    assert "do not create formal receipts" in prompt
-    assert "do not invoke program boundaries" in prompt
-    assert "all three" in prompt
-    assert "refusal" in prompt
-    assert "do not mutate with fewer" in prompt
-    assert "each proposal slot may receive at most one fresh replacement" in prompt
-    assert "with its exact skill and tier" in prompt
-    assert "if its replacement fails, stop before any worktree mutation" in prompt
-    assert "architect directly receives" in prompt
-    assert "verifies repository sources" in prompt
-    assert "synthesizes one design" in prompt
-    assert "sole $architect" in prompt
-    assert "remains the router" in prompt
-    assert "workerresultbuildinput" in prompt
-    assert "controller state" in prompt
+        effective_worker_budget_seconds=90,
+        issue_title=task_marker,
+        issue_description=task_marker,
+        retained_red_checkpoint=checkpoint if retained else None,
+    )
+    record_position = _worker_record_position(prompt)
+    trusted_prefix, durable_data = prompt[:record_position], prompt[record_position:]
+    assert task_marker in durable_data
+    assert "f" * 40 not in prompt
+    if retained:
+        assert checkpoint.tree_oid in prompt
+        assert checkpoint.ref in prompt
+        assert "result_kind=red_checkpoint_ready" not in prompt
+    else:
+        assert "result_kind=red_checkpoint_ready" in prompt
+        assert "red_checkpoint_request" in prompt
+    assert re.search(r"(?<![\w-])\$router(?![\w-])", trusted_prefix), (
+        "trusted_router_activation_missing"
+    )
+    assert ".agents/skills/router/SKILL.md" in trusted_prefix
+    assert "$architect-proposal-balanced" not in prompt
+    assert "$architect-proposal-fast" not in prompt
 
 
 def test_worker_prompt_routes_reasonable_uncertainty_to_structured_draft_review() -> (
@@ -699,79 +668,7 @@ def test_worker_prompt_keeps_publication_with_runner_and_approval_with_humans() 
     )
 
 
-def test_workflow_prompt_preserves_context_through_nested_parallel_work() -> None:
-    prompt = build_worker_prompt(
-        {
-            "state": "executing",
-            "phase": "workflow",
-            "work_kind": "ordinary",
-            "merge_request_draft": None,
-        },
-        project_id=310967,
-        issue_iid=12,
-        effective_worker_budget_seconds=1800,
-        issue_title="Improve the implementation",
-        issue_description="Keep the workflow fast.",
-    )
-
-    assert "one workflow-owning session" in prompt
-    architect = prompt.index("Delegate Architect")
-    red = prompt.index("delegates Red")
-    assert "delegates Green and Diátaxis Writer concurrently" in (prompt), (
-        "parallel_documentation_owner_must_start_with_green"
-    )
-    parallel_implementation = prompt.index(
-        "delegates Green and Diátaxis Writer concurrently"
-    )
-    combined_candidate = prompt.index("after both Green and Diátaxis Writer finish")
-    judge = prompt.index("$tdd-judge alone")
-    nonfunctional = prompt.index(
-        "delegates $nonfunctional-review as its read-only child"
-    )
-    specialist_review = prompt.index("Quality Judge receives the architecture")
-    repair = prompt.index(
-        "evidence-based correction cycles while material progress exists"
-    )
-    feedback = prompt.index("returns all receipts and unresolved findings")
-    assert (
-        architect
-        < red
-        < parallel_implementation
-        < combined_candidate
-        < judge
-        < nonfunctional
-        < specialist_review
-        < repair
-        < feedback
-    )
-    assert "conditional $agent-policy-writer" in prompt
-    assert "Green owns production and tests" in prompt
-    assert "Diátaxis Writer owns docs/ and README" in prompt
-    assert "Green owns production, tests, and docs" not in prompt
-    assert "Quality Judge receives the architecture" in prompt
-    assert "Test Judge receives the Red receipt" in prompt
-    assert "still-live Architect" in prompt
-    assert "Do not commit, push, approve, or merge" in prompt
-
-
-def test_workflow_prompt_reconciles_documentation_after_final_code_interfaces() -> None:
-    prompt = build_worker_prompt(
-        {"state": "executing", "phase": "workflow", "work_kind": "ordinary"},
-        project_id=310967,
-        issue_iid=12,
-        effective_worker_budget_seconds=1800,
-    )
-
-    assert (
-        "Diátaxis Writer reconciles documentation against final implemented code"
-        in (prompt)
-    ), "parallel_documentation_owner_must_reconcile_final_interfaces"
-    assert prompt.index("Diátaxis Writer reconciles documentation") < prompt.index(
-        "returns all receipts and unresolved findings"
-    )
-
-
-def test_resumed_prompt_orders_policy_before_parallel_implementation() -> None:
+def test_resumed_prompt_activates_router_with_retained_checkpoint() -> None:
     base = "c" * 40
     checkpoint = RedCheckpointEvidence(
         project_id=310967,
@@ -803,20 +700,12 @@ def test_resumed_prompt_orders_policy_before_parallel_implementation() -> None:
         retained_red_checkpoint=checkpoint,
     )
 
-    resumed = prompt.split(
-        "For the coding lane, the trusted Red checkpoint already exists.", maxsplit=1
-    )[1].split("After the trusted coding checkpoint is present", maxsplit=1)[0]
-    assert (
-        "then complete applicable policy preparation before delegating Green and Diátaxis Writer concurrently"
-        in resumed
-    )
-    assert "rerun Red or manufacture replacement evidence" in resumed
-    assert prompt.index("receives its receipt or N/A") < prompt.index(
-        "then delegates Green and Diátaxis Writer concurrently"
-    )
-    assert prompt.index("after both Green and Diátaxis Writer finish") < prompt.index(
-        "$tdd-judge alone"
-    )
+    trusted_prefix = prompt[: _worker_record_position(prompt)]
+    assert "$router" in trusted_prefix, "trusted_router_activation_missing"
+    assert ".agents/skills/router/SKILL.md" in trusted_prefix
+    assert checkpoint.ref in prompt
+    assert checkpoint.tree_oid in prompt
+    assert "result_kind=red_checkpoint_ready" not in prompt
 
 
 def test_workflow_prompt_uses_descriptive_stage_labels() -> None:
@@ -828,41 +717,6 @@ def test_workflow_prompt_uses_descriptive_stage_labels() -> None:
     )
 
     assert re.search(r"\bPhase-\d+\b", prompt) is None
-
-
-def test_workflow_prompt_sizes_semantically_before_red_or_mutation() -> None:
-    prompt = build_worker_prompt(
-        {
-            "state": "executing",
-            "phase": "workflow",
-            "work_kind": "ordinary",
-            "merge_request_draft": None,
-        },
-        project_id=310967,
-        issue_iid=12,
-        issue_title="Deliver one bounded behavior",
-        issue_description="Keep the current workflow for suitable work.",
-        effective_worker_budget_seconds=90,
-    )
-    normalized = prompt.casefold()
-
-    architect = normalized.index("delegate architect")
-    sizing = normalized.index("intake sizing decision")
-    red = normalized.index("delegates red")
-    mutation = normalized.index("green owns production and tests")
-    assert architect < sizing < red < mutation
-    assert "behavioral boundaries" in normalized
-    assert "dependency/order boundaries" in normalized
-    assert "all applicable architecture, red, green, reviews, and finalization" in (
-        normalized
-    )
-    assert "effective bounded worker budget" in normalized
-    assert (
-        "effective bounded worker budget for this session is 90 seconds" in normalized
-    )
-    assert "do not use a line-count threshold" in normalized
-    assert "suitable" in normalized
-    assert "current lane and workflow unchanged" in normalized
 
 
 def test_workflow_prompt_requires_structured_runner_owned_split_handoff() -> None:

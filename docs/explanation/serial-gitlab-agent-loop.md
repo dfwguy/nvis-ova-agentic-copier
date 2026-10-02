@@ -5,7 +5,7 @@ summary: Learn why the loop uses GitLab and local state.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-09-29
+last_reviewed: 2026-10-02
 related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Configures and operates the loop.
@@ -105,21 +105,26 @@ boundaries.
 ## The work uses bounded AI sessions.
 
 The controller selects an issue and prepares its worktree, then starts one
-session. Architect owns it. Before any edit, Architect checks whether the issue
-fits one reviewable, mergeable outcome within the budget. It also gets three
-independent read-only design proposals at once and picks one design. The same
-Architect stays the router and owns the formal receipt. The proposals do not
-become controller state.
+session. The worker activates Router before reading the durable record or
+untrusted task context. Router checks whether the issue fits one reviewable,
+mergeable outcome within the budget before lane selection or design. After
+capacity admission, it delegates an independent read-only Architect.
+
+Architect keeps a Sol base design, checks it against two independent Luna
+proposals, and sends its plan through one concurrent review pass. It returns
+only the final plan, findings, and blockers. All design children stop before
+Router releases a writer. The plan does not become controller state. Legacy
+`$architect` receipt keys continue to name Router for protocol compatibility.
 
 | Lane | What runs, and when |
 | --- | --- |
-| Coding | A fresh Red-first session gets three proposals, then asks Red to create the checkpoint. A later fresh session gets three new proposals. After the accepted Red checkpoint, Architect completes any policy preparation, then Green implements code and tests while the Diátaxis Writer updates `docs/` and README in parallel. After both stop editing, Green requests controller staging and the controller-owned Green commit. The installed hook validates the candidate during that commit. Green then requests changed-path inventory and bounded ranges from the committed tree, coordinates review, and routes documentation findings to the writer before returning final validation to Architect. |
-| Documentation and agent policy | The Architect delegates the Documentation Writer as sole mutator. After the writer stops editing, the controller stages the candidate and gives Consistency Judge bounded, read-only evidence from that tree. The judge checks copied facts when applicable, and the Documentation Finalizer records the verdict. Evidence-based repair and finalization continue only while material progress exists; there is no arbitrary repair count. |
+| Coding | A fresh Red-first Router session gets a reviewed Architect plan, then asks Red to create the checkpoint. A later fresh session repeats the design gate. After the accepted Red checkpoint, Router completes any policy preparation, then Green implements code and tests while the Diátaxis Writer updates `docs/` and README in parallel. After both stop editing, Green requests controller staging and the controller-owned Green commit. The installed hook validates the candidate during that commit. Green then requests changed-path inventory and bounded ranges from the committed tree, coordinates review, and routes documentation findings to the writer before returning final validation to Router. |
+| Documentation and agent policy | Router delegates the Documentation Writer as sole mutator. After the writer stops editing, the controller stages the candidate and gives Consistency Judge bounded, read-only evidence from that tree. The judge checks copied facts when applicable, and the Documentation Finalizer records the verdict. Evidence-based repair and finalization continue only while material progress exists; there is no arbitrary repair count. |
 
 The Red-first coding session ends after the trusted checkpoint. A fresh session
 then handles policy preparation, concurrent Green and documentation work,
 review, and final validation. Content work uses one session. The controller
-does not restore an individual Architect, writer, implementer, reviewer, or
+does not restore an individual Router, Architect, writer, implementer, reviewer, or
 internal workflow stage after a crash. It rechecks Red and Green identities
 from Git and GitLab. A changed ordinary candidate creates a new Green commit
 and requires fresh receipts. Ordinary coding publication uses the verified
@@ -148,14 +153,14 @@ Judges join when their topics apply. Each active specialist sees the same
 Green SHA, tree, diff, and Judge evidence. For a pending target merge, the
 same reviewers instead use the validated joined tree and exact source and
 target identities. Green waits for every receipt and routes
-findings to their file owners. The Architect then gets the full result and
+findings to their file owners. Router then gets the full result and
 asks the Finalizer to act. Final validation uses current license evidence.
 
 ## Recovery is coarse and observable.
 
 An activation is bounded, but its evidence lasts. The ledger records the selected issue, coarse workflow state, retry data, retained worktree, branch and merge-request evidence, receipts, transition intent, and a redacted next action. GitLab labels give a simple status. The ledger holds transaction detail.
 
-After an interruption before one valid final workflow receipt, the controller reconciles observable repository state and preserves the retained worktree. It starts a fresh, complete workflow session at the coarse boundary. Its new Architect repeats the three-proposal gate before any mutable child. This also applies to a fresh Red-first segment. It repeats validation when needed. It does not restore individual agents, prompts, chain-of-thought, mailboxes, or an internal phase. An oversized issue returns as a structured split plan. The controller validates that plan, reuses marker-matched children, creates only missing children, then notes and closes the parent. A later retry reruns workflow and marker searches. It does not resume a saved decomposition.
+After an interruption before one valid final workflow receipt, the controller reconciles observable repository state and preserves the retained worktree. It starts a fresh, complete workflow session at the coarse boundary. Its new Router checks intake and admission, then delegates a fresh Architect design session before any mutable child. This also applies to a fresh Red-first segment. It repeats validation when needed. It does not restore individual agents, prompts, chain-of-thought, mailboxes, or an internal phase. An oversized issue returns as a structured split plan. The controller validates that plan, reuses marker-matched children, creates only missing children, then notes and closes the parent. A later retry reruns workflow and marker searches. It does not resume a saved decomposition.
 
 A clean blocked issue can start again after exact pre-checkpoint proof. Dirty,
 unclear, or published work keeps its reviewed recovery path.
