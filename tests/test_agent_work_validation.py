@@ -19,6 +19,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from string import ascii_letters, digits
 from typing import cast
+from xml.etree import ElementTree
 
 import pytest
 from hypothesis import given
@@ -2212,6 +2213,8 @@ def _failed_serial_timing_session(
     capture_error: Exception | None = None,
     snapshot_root: Path = Path("/snapshots"),
     xml_size: int = 0,
+    junit_bytes: bytes | None = None,
+    parse_xml: Callable[[bytes], ElementTree.Element] | None = None,
 ) -> tuple[
     ValidationStateFake,
     JudgeValidationDependencies,
@@ -2221,7 +2224,7 @@ def _failed_serial_timing_session(
     state = ValidationStateFake()
     dependencies, commands = _dependencies(state)
     snapshots: dict[Path, bytes] = {}
-    junit = b"<testsuite tests='1' failures='0' errors='0'/>"
+    junit = junit_bytes or b"<testsuite tests='1' failures='0' errors='0'/>"
     if xml_size:
         junit += b" " * (xml_size - len(junit))
 
@@ -2247,6 +2250,9 @@ def _failed_serial_timing_session(
             and not path.is_absolute()
             else snapshots.get(path)
         )
+
+    if parse_xml is not None:
+        dependencies = replace(dependencies, parse_xml=parse_xml)
 
     dependencies = replace(
         dependencies,
@@ -2773,6 +2779,8 @@ def test_persisted_serial_success_cannot_bypass_proof_without_baseline_flag(
 
 
 def test_serial_candidate_slow_ids_match_full_inventory_ids() -> None:
+    from agent_work.core.junit import parse_junit_evidence
+
     artifact = (
         b"<testsuite tests='2' failures='0' errors='0'>"
         b"<testcase classname='tests.test_speed' name='test_case[plain]' time='0.2'/>"
@@ -2780,7 +2788,9 @@ def test_serial_candidate_slow_ids_match_full_inventory_ids() -> None:
         b"</testsuite>"
     )
     cases, _selectors = parse_full_junit_records(artifact)
-    summary = validation._junit_timing_summary("py311", artifact, serial=True)
+    summary = parse_junit_evidence(
+        artifact, serial=True, parse_xml=ElementTree.fromstring
+    ).timing
 
     assert summary is not None and summary.timing_complete
     assert {case.name for case in summary.over_100ms_cases} == set(cases)
@@ -2888,6 +2898,8 @@ def test_success_junit_timing_summary_is_bounded_and_durable() -> None:
 
 def test_junit_timing_summary_retains_every_case_strictly_over_100ms() -> None:
     """Review sees a qualifying case even when it falls below the top three."""
+    from agent_work.core.junit import parse_junit_evidence
+
     artifact = (
         b"<testsuite tests='6' failures='0' errors='0'>"
         b"<testcase classname='tests.test_module' name='test_one' time='3'/>"
@@ -2899,7 +2911,9 @@ def test_junit_timing_summary_retains_every_case_strictly_over_100ms() -> None:
         b"</testsuite>"
     )
 
-    summary = validation._junit_timing_summary("py311", artifact)
+    summary = parse_junit_evidence(
+        artifact, serial=False, parse_xml=ElementTree.fromstring
+    ).timing
 
     assert summary is not None
     assert summary.timing_complete is True
@@ -2925,6 +2939,8 @@ def test_junit_timing_summary_marks_relevant_unusable_case_incomplete(
     case: bytes,
 ) -> None:
     """Omitted or unsafe timing cannot be represented as a complete review list."""
+    from agent_work.core.junit import parse_junit_evidence
+
     artifact = (
         b"<testsuite tests='2' failures='0' errors='0'>"
         b"<testcase classname='tests.test_module' name='test_known' time='1'/>"
@@ -2932,7 +2948,9 @@ def test_junit_timing_summary_marks_relevant_unusable_case_incomplete(
         + b"</testsuite>"
     )
 
-    summary = validation._junit_timing_summary("py311", artifact)
+    summary = parse_junit_evidence(
+        artifact, serial=False, parse_xml=ElementTree.fromstring
+    ).timing
 
     assert summary is not None
     assert summary.timing_complete is False
@@ -2944,6 +2962,8 @@ def test_junit_timing_summary_marks_relevant_unusable_case_incomplete(
 
 def test_junit_timing_summary_marks_case_list_overflow_incomplete() -> None:
     """A bounded report states when it cannot enumerate every qualifying test."""
+    from agent_work.core.junit import parse_junit_evidence
+
     artifact = (
         b"<testsuite tests='1025' failures='0' errors='0'>"
         + b"".join(
@@ -2953,7 +2973,9 @@ def test_junit_timing_summary_marks_case_list_overflow_incomplete() -> None:
         + b"</testsuite>"
     )
 
-    summary = validation._junit_timing_summary("py311", artifact)
+    summary = parse_junit_evidence(
+        artifact, serial=False, parse_xml=ElementTree.fromstring
+    ).timing
 
     assert summary is not None
     assert summary.timing_complete is False
@@ -2966,6 +2988,8 @@ def test_junit_timing_summary_marks_case_list_overflow_incomplete() -> None:
 
 def test_junit_timing_summary_uses_opaque_ids_for_private_parameter_values() -> None:
     """Ordinary parameter values keep timing complete without exposing inputs."""
+    from agent_work.core.junit import parse_junit_evidence
+
     artifact = (
         b"<testsuite tests='2' failures='0' errors='0'>"
         b'<testcase classname="tests.test_module" '
@@ -2975,7 +2999,9 @@ def test_junit_timing_summary_uses_opaque_ids_for_private_parameter_values() -> 
         b"</testsuite>"
     )
 
-    summary = validation._junit_timing_summary("py311", artifact)
+    summary = parse_junit_evidence(
+        artifact, serial=False, parse_xml=ElementTree.fromstring
+    ).timing
 
     assert summary is not None
     assert summary.timing_complete is True
@@ -2988,13 +3014,17 @@ def test_junit_timing_summary_uses_opaque_ids_for_private_parameter_values() -> 
 
 def test_junit_timing_summary_marks_declared_case_mismatch_incomplete() -> None:
     """A declared case without a testcase element cannot be timed completely."""
+    from agent_work.core.junit import parse_junit_evidence
+
     artifact = (
         b"<testsuite tests='2' failures='0' errors='0'>"
         b"<testcase classname='tests.test_module' name='test_present' time='0.2'/>"
         b"</testsuite>"
     )
 
-    summary = validation._junit_timing_summary("py311", artifact)
+    summary = parse_junit_evidence(
+        artifact, serial=False, parse_xml=ElementTree.fromstring
+    ).timing
 
     assert summary is not None
     assert summary.timing_complete is False
@@ -5058,3 +5088,427 @@ def test_failed_hook_large_xml_retains_safe_counts_names_digest_and_failure(
         assert "py311 failures=1 errors=0" in report.diagnostic
         assert report.failed_tests == ("tests.test_speed::test_failed",)
         assert report.failed_junit_digests == (hashlib.sha256(raw).hexdigest(),)
+
+
+@pytest.mark.parametrize("returncode", (0, 1))
+def test_validation_interprets_each_artifact_once_and_preserves_reports(
+    returncode: int,
+) -> None:
+    state = ValidationStateFake()
+    dependencies, commands = _dependencies(state, returncode=returncode)
+    raw = (
+        b"<testsuite tests='1' failures='1' errors='0'>"
+        b"<testcase classname='tests.test_speed' name='test_case' time='0.2'>"
+        b"<failure>PRIVATE_TOKEN=secret /private/path</failure></testcase></testsuite>"
+    )
+    returned = ElementTree.fromstring(
+        b"<testsuite tests='2' failures='2' errors='1'>"
+        b"<testcase classname='tests.test_speed' name='test_injected_one' time='0.3'><failure/></testcase>"
+        b"<testcase classname='tests.test_speed' name='test_injected_two' time='0.4'><error/></testcase>"
+        b"</testsuite>"
+    )
+    captures: list[tuple[tuple[str, bytes, int], ...]] = []
+    parses: list[bytes] = []
+    reads: list[Path] = []
+    removals: list[Path] = []
+
+    def parse_xml(contents: bytes) -> ElementTree.Element:
+        parses.append(contents)
+        return returned
+
+    dependencies = replace(
+        dependencies,
+        parse_xml=parse_xml,
+        read_artifact=lambda path: reads.append(path) or raw,
+        remove_junit_artifact=removals.append,
+        capture_junit_artifacts=lambda tree, artifacts: (
+            captures.append(artifacts)
+            or tuple(
+                Path("/snapshots") / tree / f"test-results-{environment}.xml"
+                for environment, _raw, _count in artifacts
+            )
+        ),
+    )
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    repeated = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    status = observe_judge_validation(
+        candidate_tree=_CANDIDATE, dependencies=dependencies
+    )
+
+    assert parses == [raw, raw]
+    assert reads == [Path("test-results-py311.xml"), Path("test-results-py314.xml")]
+    assert removals == reads + reads
+    assert commands == [("git", "hook", "run", "pre-commit")]
+    assert (
+        report.state
+        == repeated.state
+        == status.state
+        == ("terminal-success" if returncode == 0 else "terminal-failure")
+    )
+    if returncode:
+        assert report.failed_tests == (
+            "tests.test_speed::test_injected_one",
+            "tests.test_speed::test_injected_two",
+        )
+        assert (
+            report.diagnostic
+            == "git hook run pre-commit failed with exit code 1; JUnit py311 failures=2 errors=1; py314 failures=2 errors=1"
+        )
+        assert captures == []
+        assert report.failed_junit_digests == (hashlib.sha256(raw).hexdigest(),) * 2
+    else:
+        assert [item.test_count for item in report.junit_artifacts] == [2, 2]
+        assert [item.total_seconds for item in report.junit_timings] == [0.7, 0.7]
+        assert captures == [
+            tuple((environment, raw, 2) for environment in ("py311", "py314"))
+        ]
+        assert [item.sha256 for item in report.junit_artifacts] == [
+            hashlib.sha256(raw).hexdigest()
+        ] * 2
+        assert [item.path for item in report.junit_artifacts] == [
+            Path("/snapshots") / _CANDIDATE / f"test-results-{environment}.xml"
+            for environment in ("py311", "py314")
+        ]
+        for timing in report.junit_timings:
+            assert timing.timing_complete
+            assert [(case.name, case.seconds) for case in timing.slowest_cases] == [
+                ("tests.test_speed::test_injected_two", 0.4),
+                ("tests.test_speed::test_injected_one", 0.3),
+            ]
+            assert [(case.name, case.seconds) for case in timing.over_100ms_cases] == [
+                ("tests.test_speed::test_injected_one", 0.3),
+                ("tests.test_speed::test_injected_two", 0.4),
+            ]
+    assert "PRIVATE_TOKEN" not in str(state.records)
+    assert "/private/path" not in str(state.records)
+
+
+@pytest.mark.parametrize(
+    ("returned_xml", "reason"),
+    (
+        (b'<other tests="1"/>', "invalid_xml"),
+        (b'<testsuite tests="01"/>', "invalid_count"),
+    ),
+)
+def test_validation_interprets_invalid_artifact_once_for_refusal(
+    returned_xml: bytes, reason: str
+) -> None:
+    state = ValidationStateFake()
+    dependencies, commands = _dependencies(state)
+    raw = b'<testsuite tests="1" failures="0" errors="0"/>'
+    returned = ElementTree.fromstring(returned_xml)
+    parses: list[bytes] = []
+    captures: list[tuple[tuple[str, bytes, int], ...]] = []
+
+    def parse_xml(contents: bytes) -> ElementTree.Element:
+        parses.append(contents)
+        return returned
+
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE,
+        apply=True,
+        dependencies=replace(
+            dependencies,
+            parse_xml=parse_xml,
+            read_artifact=lambda _path: raw,
+            capture_junit_artifacts=lambda _tree, artifacts: (
+                captures.append(artifacts) or ()
+            ),
+        ),
+    )
+    assert parses == [raw]
+    assert captures == []
+    assert commands == [("git", "hook", "run", "pre-commit")]
+    assert report.state == "terminal-artifact-failure"
+    assert report.artifact_failure is not None
+    assert report.artifact_failure.reason == reason
+    assert report.artifact_failure.environment == "py311"
+
+
+@pytest.mark.parametrize(
+    "failure_counter",
+    ("0", "9" * 4301, "9" * 5000),
+    ids=("control", "4301-digits", "5000-digits"),
+)
+def test_saved_retry_interprets_each_verified_snapshot_once_without_hook(
+    failure_counter: str,
+) -> None:
+    returned_xml = (
+        f"<testsuite tests='4' failures='{failure_counter}' errors='0'>".encode()
+        + b"<testcase classname='tests.test_speed' name='test_one' time='0.2'/>"
+        b"<testcase classname='tests.test_speed' name='test_two' time='0.3'/>"
+        b"<testcase classname='tests.test_speed' name='test_boundary' time='0.100'/>"
+        b"<testcase classname='tests.test_speed' name='test_fast' time='0.099'/>"
+        b"</testsuite>"
+    )
+    raw = f"<testsuite tests='99' failures='{failure_counter}' errors='0'><testcase name='test_raw_only' time='9'/></testsuite>".encode()
+    returned = ElementTree.fromstring(returned_xml)
+    initial_parses: list[bytes] = []
+
+    def initial_parse_xml(contents: bytes) -> ElementTree.Element:
+        initial_parses.append(contents)
+        return returned
+
+    state, dependencies, snapshots, commands = _failed_serial_timing_session(
+        junit_bytes=raw, parse_xml=initial_parse_xml
+    )
+    assert initial_parses == [raw, raw]
+    original = json.loads(json.dumps(state.records[_CANDIDATE]))
+    retry_records: dict[str, dict[str, object]] = {}
+    parses: list[bytes] = []
+    captures: list[tuple[tuple[str, bytes, int], ...]] = []
+    transcript = _timing_transcript() | {"baseline_sha": "c" * 40}
+    runs = cast(dict[str, dict[str, dict[str, object]]], transcript["runs"])
+    for environment in ("py311", "py314"):
+        runs[environment]["candidate"].update(
+            sha256=hashlib.sha256(raw).hexdigest(), test_count=4
+        )
+
+    def parse_xml(contents: bytes) -> ElementTree.Element:
+        parses.append(contents)
+        return returned
+
+    dependencies = replace(
+        dependencies,
+        parse_xml=parse_xml,
+        is_snapshot_symlink=lambda _path: False,
+        read_timing_transcript=lambda _tree: transcript,
+        read_retry_record=retry_records.get,
+        atomic_write_retry_record=lambda tree, record: retry_records.update(
+            {tree: record}
+        ),
+        run_command=lambda _command, **_kwargs: pytest.fail("hook must not rerun"),
+        run_license_preflight=lambda _tree: pytest.fail("preflight must not rerun"),
+        capture_timing_review=lambda _tree, artifacts, _output: (
+            captures.append(artifacts) or transcript
+        ),
+    )
+    report = validation.retry_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    repeated = validation.retry_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    status = observe_judge_validation(
+        candidate_tree=_CANDIDATE, dependencies=dependencies
+    )
+
+    assert parses == list(snapshots.values()) == [raw, raw]
+    assert len(captures) == 1
+    assert captures[0] == tuple(
+        (environment, raw, 4) for environment in ("py311", "py314")
+    )
+    assert report.state == repeated.state == status.state == "terminal-success"
+    assert repeated.action == "existing_retry"
+    assert state.records[_CANDIDATE] == original
+    assert commands == [("git", "hook", "run", "pre-commit")]
+    expected_slowest = [
+        ("tests/test_speed.py::test_two", 0.3),
+        ("tests/test_speed.py::test_one", 0.2),
+        ("tests/test_speed.py::test_boundary", 0.1),
+    ]
+    expected_over = [
+        ("tests/test_speed.py::test_one", 0.2),
+        ("tests/test_speed.py::test_two", 0.3),
+    ]
+    assert [item.test_count for item in report.junit_artifacts] == [4, 4]
+    assert [item.sha256 for item in report.junit_artifacts] == [
+        hashlib.sha256(raw).hexdigest()
+    ] * 2
+    assert report.junit_timings == repeated.junit_timings == status.junit_timings
+    assert len(report.junit_timings) == 2
+    for timing in report.junit_timings:
+        assert timing.total_seconds == 0.699
+        assert timing.timing_complete
+        assert [
+            (case.name, case.seconds) for case in timing.slowest_cases
+        ] == expected_slowest
+        assert [
+            (case.name, case.seconds) for case in timing.over_100ms_cases
+        ] == expected_over
+    assert retry_records[_CANDIDATE]["junit_timings"] == [
+        {
+            "environment": environment,
+            "total_seconds": 0.699,
+            "timing_complete": True,
+            "slowest_cases": [
+                {"name": name, "seconds": seconds} for name, seconds in expected_slowest
+            ],
+            "over_100ms_cases": [
+                {"name": name, "seconds": seconds} for name, seconds in expected_over
+            ],
+        }
+        for environment in ("py311", "py314")
+    ]
+
+
+@pytest.mark.parametrize("digits", (4301, 5000))
+@pytest.mark.parametrize(
+    ("returncode", "giant_field", "terminal"),
+    (
+        (0, "failures", "terminal-success"),
+        (0, "errors", "terminal-success"),
+        (1, "tests", "terminal-failure"),
+        (0, "tests", "terminal-artifact-failure"),
+        (1, "failures", "terminal-failure"),
+    ),
+    ids=(
+        "success-giant-failures",
+        "success-giant-errors",
+        "failure-giant-tests",
+        "refuse-giant-tests",
+        "failure-invalid-failures",
+    ),
+)
+def test_validation_giant_counter_persists_terminal_and_cleans_artifacts(
+    digits: int, returncode: int, giant_field: str, terminal: str
+) -> None:
+    state = ValidationStateFake()
+    dependencies, commands = _dependencies(state, returncode=returncode)
+    counters = {"tests": "1", "failures": "1", "errors": "0"} | {
+        giant_field: "9" * digits
+    }
+    attributes = " ".join(f'{name}="{value}"' for name, value in counters.items())
+    raw = f'<testsuite {attributes}><testcase classname="tests.test_speed" name="test_failed" time="0.2"><failure>PRIVATE_TOKEN /private/path</failure></testcase></testsuite>'.encode()
+    parses: list[bytes] = []
+    reads: list[Path] = []
+    removals: list[Path] = []
+    snapshots: dict[Path, bytes] = {}
+
+    def parse_xml(contents: bytes) -> ElementTree.Element:
+        parses.append(contents)
+        return ElementTree.fromstring(contents)
+
+    def capture(
+        tree: str, artifacts: tuple[tuple[str, bytes, int], ...]
+    ) -> tuple[Path, ...]:
+        for environment, contents, count in artifacts:
+            assert count == 1
+            snapshots[Path("/snapshots") / tree / f"test-results-{environment}.xml"] = (
+                contents
+            )
+        return tuple(snapshots)
+
+    dependencies = replace(
+        dependencies,
+        parse_xml=parse_xml,
+        read_artifact=lambda path: reads.append(path) or raw,
+        remove_junit_artifact=removals.append,
+        capture_junit_artifacts=capture,
+    )
+    report = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    repeated = run_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    observed = observe_judge_validation(
+        candidate_tree=_CANDIDATE, dependencies=dependencies
+    )
+    assert report.state == repeated.state == observed.state == terminal
+    assert state.records[_CANDIDATE]["state"] == terminal
+    assert commands == [("git", "hook", "run", "pre-commit")]
+    paths = [Path("test-results-py311.xml"), Path("test-results-py314.xml")]
+    assert removals == paths + paths
+    assert (
+        reads == paths[:1]
+        if terminal == "terminal-artifact-failure"
+        else reads == paths
+    )
+    assert parses == [raw] * len(reads)
+    digest = hashlib.sha256(raw).hexdigest()
+    if terminal == "terminal-success":
+        assert [item.test_count for item in report.junit_artifacts] == [1, 1]
+        assert [item.sha256 for item in report.junit_artifacts] == [digest, digest]
+        assert snapshots == {item.path: raw for item in report.junit_artifacts}
+        assert all(item.timing_complete for item in report.junit_timings)
+    elif returncode:
+        assert report.returncode == 1
+        assert snapshots == {}
+        if giant_field == "tests":
+            assert report.failed_tests == ("tests.test_speed::test_failed",)
+            assert report.failed_junit_digests == (digest, digest)
+            assert report.diagnostic is not None
+            assert (
+                "py311 failures=1 errors=0; py314 failures=1 errors=0"
+                in report.diagnostic
+            )
+        else:
+            assert report.failed_tests == report.failed_junit_digests == ()
+    else:
+        assert snapshots == {}
+        assert report.artifact_failure is not None
+        assert report.artifact_failure.reason == "invalid_count"
+    assert "PRIVATE_TOKEN" not in str(state.records)
+    assert "/private/path" not in str(state.records)
+
+
+@pytest.mark.parametrize("digits", (4301, 5000))
+def test_saved_retry_giant_failure_counter_recovers_verified_raw_snapshots(
+    digits: int,
+) -> None:
+    raw = (
+        f'<testsuite tests="1" failures="{"9" * digits}" errors="0">'
+        '<testcase classname="tests.test_speed" name="test_case" time="0.2"/>'
+        "</testsuite>"
+    ).encode()
+    initial_parses: list[bytes] = []
+
+    def initial_parse_xml(contents: bytes) -> ElementTree.Element:
+        initial_parses.append(contents)
+        return ElementTree.fromstring(contents)
+
+    state, dependencies, snapshots, commands = _failed_serial_timing_session(
+        junit_bytes=raw, parse_xml=initial_parse_xml
+    )
+    assert initial_parses == [raw, raw]
+    original = json.loads(json.dumps(state.records[_CANDIDATE]))
+    retry_records: dict[str, dict[str, object]] = {}
+    parses: list[bytes] = []
+    captures: list[tuple[tuple[str, bytes, int], ...]] = []
+    transcript = _timing_transcript() | {"baseline_sha": "c" * 40}
+    runs = cast(dict[str, dict[str, dict[str, object]]], transcript["runs"])
+    for environment in ("py311", "py314"):
+        runs[environment]["candidate"]["sha256"] = hashlib.sha256(raw).hexdigest()
+
+    def parse_xml(contents: bytes) -> ElementTree.Element:
+        parses.append(contents)
+        return ElementTree.fromstring(contents)
+
+    dependencies = replace(
+        dependencies,
+        parse_xml=parse_xml,
+        is_snapshot_symlink=lambda _path: False,
+        read_timing_transcript=lambda _tree: transcript,
+        read_retry_record=retry_records.get,
+        atomic_write_retry_record=lambda tree, record: retry_records.update(
+            {tree: record}
+        ),
+        run_command=lambda _command, **_kwargs: pytest.fail("hook must not rerun"),
+        run_license_preflight=lambda _tree: pytest.fail("preflight must not rerun"),
+        capture_timing_review=lambda _tree, artifacts, _output: (
+            captures.append(artifacts) or transcript
+        ),
+    )
+    report = validation.retry_judge_validation(
+        candidate_tree=_CANDIDATE, apply=True, dependencies=dependencies
+    )
+    observed = observe_judge_validation(
+        candidate_tree=_CANDIDATE, dependencies=dependencies
+    )
+    assert report.state == observed.state == "terminal-success"
+    assert retry_records[_CANDIDATE]["state"] == "terminal-success"
+    assert state.records[_CANDIDATE] == original
+    assert commands == [("git", "hook", "run", "pre-commit")]
+    assert parses == list(snapshots.values()) == [raw, raw]
+    assert captures == [tuple((env, raw, 1) for env in ("py311", "py314"))]
+    assert [item.sha256 for item in report.junit_artifacts] == [
+        hashlib.sha256(raw).hexdigest()
+    ] * 2
+    assert [item.test_count for item in report.junit_artifacts] == [1, 1]
+    assert [item.total_seconds for item in report.junit_timings] == [0.2, 0.2]
+    assert all(item.timing_complete for item in report.junit_timings)
