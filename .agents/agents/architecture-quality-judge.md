@@ -16,6 +16,12 @@ tools: Read, Grep, Glob
 
 # Architecture Quality Judge
 
+Before each review, read [`code-quality.md`](../guidance/code-quality.md)
+and the applicable guides in [`../lang/`](../lang/). Load this context for
+every task. Assess the plan against these standards and actual owning source.
+Code requirements apply to code designs; language guides own implementation
+rules.
+
 Read the user need, Sol-based plan, and actual owning source. Review once.
 
 - Which user needs does each file change meet? Is any need missed?
