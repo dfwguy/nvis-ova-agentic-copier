@@ -851,6 +851,31 @@ until both audits and the live tool probe pass and the controller is wired to
 the replacement. These profiles do not change human approval or merge
 authority. The candidate-preview pilot stays advisory.
 
+#### Read-only actor host
+
+Non-preview read-only profiles use the maintained streaming Codex app-server
+adapter. `AgentInvoker` and `build_runtime_dependencies` accept trusted
+`actor_transport_limits` and `actor_frontend_factory` inputs. The default
+factory is `create_stdio_actor_frontend`; missing limits close this route
+before launch. `ActorTransportLimits` requires explicit `max_frame_bytes`,
+`max_total_bytes`, `max_output_bytes`, and `cleanup_timeout_seconds`. These
+values have no defaults. Test fixture values do not approve live host limits.
+
+| Boundary | Required evidence or behavior |
+| --- | --- |
+| Permission plan | A host-owned plan binds the role, issue, candidate tree, checkout, isolated home, and protected path identities. It denies private auth and controller paths, disables network and execution tools, and names only the role's candidate MCP tools. |
+| Before the prompt | Both independent feature and five-field privacy audits pass. The same app-server session returns complete effective security configuration and provenance, then the exact active thread permission profile. Configuration is checked again after thread creation; protected path identities are rechecked before the turn. A matching profile name alone is insufficient. |
+| Streaming | The adapter handles partial nonblocking reads and writes under one invocation deadline and the supplied frame, total, and output limits. It drains both output streams. It refuses unknown protocol data and approval requests without granting access. |
+| Completion | Only the expected thread and turn with completed status and no error can succeed. Owned pipes and the child process must close and be reaped before private-home cleanup. Cleanup failure prevents success. |
+| Failure | Fixed safe reasons replace raw stderr, private configuration, and protocol errors. Missing or failed evidence stops the invocation without an exec or shell fallback. |
+
+This is a closed-by-default foundation for issue #355. It has a real
+adapter and runtime caller. It does not prove OS enforcement or that child
+processes stay confined. Live host support and the actual tool inventory still need proof.
+It does not activate a role, transport, profile, or timer, or complete the
+wider migration. Ordinary writable invocations and candidate-preview retain
+their existing routes and authority.
+
 For coding and content results, the serial worker uses private `candidate`
 commands in addition to its applicable checkpoint and worker-result
 boundaries. Each live request includes a nonce. A `stage` request has no model

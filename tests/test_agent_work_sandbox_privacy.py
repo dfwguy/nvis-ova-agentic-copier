@@ -17,41 +17,17 @@ import json
 import os
 import socket
 import sys
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
-from typing import Protocol, cast
+from typing import cast
 from unittest.mock import patch
 
 import pytest
 
-from agent_work.ports import CommandRunner
 from agent_work.repository import CommandResult
-from agent_work.worker import AgentInvoker, RoleExecutionProfile
-
-
-class _SandboxInvokerConstructor(Protocol):
-    """Declare the approved future constructor contract without untyped values."""
-
-    def __call__(
-        self,
-        run_command: CommandRunner,
-        *,
-        environment: Mapping[str, str],
-        temporary_directory: Path | None = None,
-        controller_state_root: Path | None = None,
-        read_only_host_audit: Callable[
-            [tuple[str, ...], Mapping[str, str]], Mapping[str, bool]
-        ]
-        | None = None,
-        read_only_sandbox_audit: Callable[
-            [tuple[str, ...], Mapping[str, str]], Mapping[str, bool]
-        ]
-        | None = None,
-    ) -> AgentInvoker:
-        """Construct the invoker with the architect-approved audit seams."""
-        ...
-
+from agent_work.worker import RoleExecutionProfile
+from tests.test_agent_work_actor_mcp_host import InvokerTranscript, actor_invoker
 
 SAFE_FEATURES = dict.fromkeys(("shell_tool", "unified_exec", "code_mode_host"), False)
 SAFE_PRIVACY = dict.fromkeys(
@@ -76,10 +52,11 @@ def _profile(tmp_path: Path) -> RoleExecutionProfile:
     )
 
 
-def _config(command: tuple[str, ...]) -> set[str]:
-    return {
-        command[index + 1] for index, token in enumerate(command[:-1]) if token == "-c"
-    }
+def _config(command: tuple[str, ...]) -> tuple[str, ...]:
+    prefix = command[: command.index("--")] if "--" in command else command
+    return tuple(
+        prefix[index + 1] for index, token in enumerate(prefix[:-1]) if token == "-c"
+    )
 
 
 @pytest.mark.parametrize("role", ["router", "judge", "finalizer", "supervisor-inspect"])
@@ -93,6 +70,7 @@ def test_privacy_probe_and_role_share_isolated_home_and_sandbox(
     state_root = tmp_path / "private-state"
     state_root.mkdir()
     launches: list[tuple[tuple[str, ...], Mapping[str, str]]] = []
+    processes: list[InvokerTranscript] = []
     probes: list[tuple[tuple[str, ...], Mapping[str, str]]] = []
 
     def audit_privacy(
@@ -109,8 +87,7 @@ def test_privacy_probe_and_role_share_isolated_home_and_sandbox(
         return SAFE_PRIVACY
 
     def run_command(command: tuple[str, ...], **kwargs: object) -> CommandResult:
-        launches.append((command, cast(Mapping[str, str], kwargs["environment"])))
-        return CommandResult(0, "review complete", "")
+        pytest.fail("Legacy executable launch must not be used")
 
     profile = RoleExecutionProfile.read_only(
         role=role,
@@ -119,7 +96,7 @@ def test_privacy_probe_and_role_share_isolated_home_and_sandbox(
         issue_iid=351,
         candidate_tree="b" * 40,
     )
-    result = cast(_SandboxInvokerConstructor, AgentInvoker)(
+    result = actor_invoker(
         run_command,
         environment={
             "AGENT_WORK_AGENT": "codex",
@@ -131,7 +108,13 @@ def test_privacy_probe_and_role_share_isolated_home_and_sandbox(
         controller_state_root=state_root,
         read_only_host_audit=lambda _command, _environment: SAFE_FEATURES,
         read_only_sandbox_audit=audit_privacy,
+        processes=processes,
     ).invoke(tmp_path, "Inspect candidate.", 10, role_profile=profile)
+    launches.extend(
+        (spec.argv, dict(spec.environment))
+        for process in processes
+        for spec in process.specs
+    )
     assert result.returncode == 0
     assert len(probes) == len(launches) == 1
     probe, probe_environment = probes[0]
@@ -147,19 +130,26 @@ def test_privacy_probe_and_role_share_isolated_home_and_sandbox(
     assert probe[separator + 1 : separator + 4] == (sys.executable, "-I", "-c")
     assert probe_environment["CODEX_HOME"] == launch_environment["CODEX_HOME"]
     assert "GITLAB_TOKEN" not in probe_environment
-    assert launch[launch.index("--ask-for-approval") + 1] == "never"
-    assert launch.index("--ask-for-approval") < launch.index("exec")
+    assert launch[:4] == ("/codex", "app-server", "--stdio", "--strict-config")
     assert 'approval_policy="never"' in _config(probe)
-    assert 'sandbox_mode="read-only"' in _config(probe)
-    assert launch[launch.index("--sandbox") + 1] == "read-only"
+    assert not any(
+        value.startswith("sandbox_mode=")
+        for value in set(_config(probe)) | set(_config(launch))
+    )
+    assert probe[probe.index("--permission-profile") + 1] == next(
+        json.loads(value.partition("=")[2])
+        for value in _config(launch)
+        if value.startswith("default_permissions=")
+    )
     for feature in SAFE_FEATURES:
-        assert f"features.{feature}=false" in _config(probe) & _config(launch)
+        assert f"features.{feature}=false" in set(_config(probe)) & set(_config(launch))
     assert any(
         probe[index + 1] == str(tmp_path)
         for index, token in enumerate(probe[:-1])
         if token in {"-C", "--cd"}
     )
-    assert "--ignore-user-config" in launch
+    assert "--ignore-user-config" not in launch
+    assert _config(probe) == _config(launch)
 
 
 @pytest.mark.parametrize(
@@ -192,7 +182,7 @@ def test_role_never_launches_with_incomplete_or_nonboolean_privacy(
         launches.append(command)
         return CommandResult(0, "unexpected launch", "")
 
-    result = cast(_SandboxInvokerConstructor, AgentInvoker)(
+    result = actor_invoker(
         run_command,
         environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
         temporary_directory=tmp_path,
@@ -224,7 +214,7 @@ def test_privacy_success_cannot_override_unsafe_effective_host_features(
         launches.append(command)
         return CommandResult(0, "unexpected launch", "")
 
-    result = cast(_SandboxInvokerConstructor, AgentInvoker)(
+    result = actor_invoker(
         run_command,
         environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
         temporary_directory=tmp_path,
@@ -263,7 +253,7 @@ def test_default_sandbox_audit_denies_malformed_or_failed_probe(
         launches.append(command)
         return CommandResult(0, "unexpected launch", "")
 
-    result = cast(_SandboxInvokerConstructor, AgentInvoker)(
+    result = actor_invoker(
         run_command,
         environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
         temporary_directory=tmp_path,
@@ -287,6 +277,7 @@ def test_emitted_probe_checks_known_state_file_even_when_directory_listing_denie
     (source_home / "auth.json").write_text("{}")
     (source_home / "auth.json").chmod(0o600)
     launches: list[tuple[str, ...]] = []
+    processes: list[InvokerTranscript] = []
     state_reads: list[str] = []
     directory_reads: list[str] = []
 
@@ -325,11 +316,7 @@ def test_emitted_probe_checks_known_state_file_even_when_directory_listing_denie
         if command[:2] != ("/codex", "sandbox"):
             launches.append(command)
             return CommandResult(0, "review complete", "")
-        python_index = next(
-            index
-            for index, token in enumerate(command)
-            if Path(token).name.startswith("python")
-        )
+        python_index = command.index("--") + 1
         script_index = command.index("-c", python_index) + 1
         buffer = io.StringIO()
         with (
@@ -345,7 +332,7 @@ def test_emitted_probe_checks_known_state_file_even_when_directory_listing_denie
             exec(compile(command[script_index], "sandbox-probe", "exec"), {})  # noqa: S102 - Execute only the emitted repository probe under fake system boundaries.
         return CommandResult(0, buffer.getvalue(), "")
 
-    result = cast(_SandboxInvokerConstructor, AgentInvoker)(
+    result = actor_invoker(
         run_command,
         environment={
             "AGENT_WORK_AGENT": "codex",
@@ -355,10 +342,29 @@ def test_emitted_probe_checks_known_state_file_even_when_directory_listing_denie
         temporary_directory=tmp_path,
         controller_state_root=state_root,
         read_only_host_audit=lambda _command, _environment: SAFE_FEATURES,
+        processes=processes,
     ).invoke(tmp_path, "Inspect candidate.", 10, role_profile=_profile(tmp_path))
     assert str(state_root) in directory_reads
     assert str(state_root / "project.lock") in state_reads
-    assert len(launches) == (1 if private_access == "denied" else 0)
+    assert launches == []
+    assert len(processes[0].specs) == (1 if private_access == "denied" else 0)
+    turns = [
+        message
+        for message in processes[0].requests
+        if message["method"] == "turn/start"
+    ]
+    assert len(turns) == (1 if private_access == "denied" else 0)
+    if private_access == "denied":
+        assert (
+            cast(dict[str, object], turns[0]["params"])["threadId"] == "thread-fixture"
+        )
+        assert processes[0].waits > 0
+        assert all(
+            stream is not None and stream.closed
+            for stream in (processes[0].stdin, processes[0].stdout, processes[0].stderr)
+        )
+    for process in processes:
+        process.dispose()
     assert (result.returncode == 0) is (private_access == "denied")
 
 
@@ -377,7 +383,7 @@ def test_missing_state_root_denies_role_before_any_audit_or_launch(
         calls.append(command)
         return SAFE_PRIVACY
 
-    result = cast(_SandboxInvokerConstructor, AgentInvoker)(
+    result = actor_invoker(
         run_command,
         environment={"AGENT_WORK_AGENT": "codex", "AGENT_WORK_AGENT_PATH": "/codex"},
         temporary_directory=tmp_path,
@@ -483,7 +489,7 @@ def test_emitted_probe_rejects_each_unsafe_operation_or_nonpermission_failure(
         evidence.append(json.loads(output))
         return CommandResult(0, output, "")
 
-    result = cast(_SandboxInvokerConstructor, AgentInvoker)(
+    result = actor_invoker(
         run_command,
         environment={
             "AGENT_WORK_AGENT": "codex",
