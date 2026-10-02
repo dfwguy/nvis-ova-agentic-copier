@@ -14,9 +14,9 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+from base64 import b64encode
 from collections.abc import Callable
 from contextlib import suppress
-from hashlib import sha256
 from pathlib import Path
 from typing import Any, cast
 
@@ -27,6 +27,7 @@ from agent_work.candidate_boundary import GIT_READ_MAX_CHUNK_BYTES
 from agent_work.domain import RunnerState, WorkflowPhase
 from agent_work.mcp_server import create_candidate_mcp_server
 from agent_work.worker import (
+    CandidateOperation,
     WorkerProtocolError,
     WorkerResultBrokerClientRequest,
     WorkerResultBrokerRequest,
@@ -70,17 +71,13 @@ def test_candidate_mcp_exposes_four_stateless_operation_schemas() -> None:
     assert set(schemas) == TOOLS
     assert schemas["candidate_status"]["properties"] == {}
     assert schemas["candidate_changed_paths"]["properties"] == {}
-    assert set(schemas["candidate_read"]["properties"]) == {
-        "path",
-        "side",
-        "offset",
-        "length",
-    }
-    assert set(schemas["candidate_read"]["required"]) == {
-        "path",
-        "side",
-        "offset",
-        "length",
+    read_schema = schemas["candidate_read"]
+    assert "reads" in read_schema["properties"]
+    assert {"path", "side", "offset", "length"} <= set(read_schema["properties"])
+    variants = read_schema["oneOf"]
+    assert {frozenset(variant["required"]) for variant in variants} == {
+        frozenset({"reads"}),
+        frozenset({"path", "side", "offset", "length"}),
     }
     assert set(schemas["candidate_submit_review"]["properties"]) == {
         "verdict",
@@ -335,6 +332,11 @@ def test_candidate_mcp_stdio_serves_live_broker_without_exposing_private_inputs(
     )
     calls: list[tuple[str, str | None, dict[str, object] | None]] = []
 
+    reads: list[dict[str, object]] = [
+        {"path": path, "side": "new", "offset": 0, "length": 3}
+        for path in ("docs/a.md", "template/docs/a.md")
+    ]
+
     def candidate_action(
         action: str, tree: str | None, selector: dict[str, object] | None
     ) -> dict[str, object]:
@@ -343,24 +345,35 @@ def test_candidate_mcp_stdio_serves_live_broker_without_exposing_private_inputs(
             return {"candidate_tree": TREE, "state": "staged"}
         if action == "status":
             return {"candidate_tree": TREE, "state": "terminal-success"}
-        assert action == "read" and selector == {"mode": "changed_paths"}
+        assert action == "read"
+        if selector != {"mode": "changed_paths"}:
+            assert selector in reads
+            assert isinstance(selector, dict)
+            return {
+                "candidate_tree": TREE,
+                "base_sha": BASE,
+                "base_tree": "c" * 40,
+                **selector,
+                "oid": "d" * 40,
+                "size": 3,
+                "data_base64": b64encode(b"abc").decode("ascii"),
+            }
         return {
             "candidate_tree": TREE,
             "base_sha": BASE,
             "base_tree": "c" * 40,
-            "changed_paths": ["docs/a.md"],
+            "changed_paths": [item["path"] for item in reads],
             "files": [
                 {
-                    "path": "docs/a.md",
+                    "path": item["path"],
                     "old_mode": None,
                     "old_oid": None,
                     "old_size": None,
-                    "old_sha256": None,
                     "new_mode": "100644",
                     "new_oid": "d" * 40,
-                    "new_size": 0,
-                    "new_sha256": sha256(b"").hexdigest(),
+                    "new_size": 3,
                 }
+                for item in reads
             ],
         }
 
@@ -418,15 +431,36 @@ def test_candidate_mcp_stdio_serves_live_broker_without_exposing_private_inputs(
                 assert status.is_error is False
                 assert status.structured_content["state"] == "terminal-success"
                 assert inventory.is_error is False
-                assert inventory.structured_content["changed_paths"] == ["docs/a.md"]
+                assert inventory.structured_content["changed_paths"] == [
+                    "docs/a.md",
+                    "template/docs/a.md",
+                ]
                 assert invalid_identity.is_error is True
                 assert invalid_range.is_error is True
+                grouped = await client.call_tool("candidate_read", {"reads": reads})
+                assert grouped.is_error is False, (
+                    "stdio grouped candidate_read must accept independent equal-byte ranges"
+                )
+                assert grouped.structured_content["contents"] == [
+                    {"data_base64": "YWJj"}
+                ]
+                assert [
+                    binding["path"]
+                    for binding in grouped.structured_content["bindings"]
+                ] == [item["path"] for item in reads]
+                rendered = json.dumps(grouped.model_dump())
+                assert all(
+                    key not in rendered
+                    for key in (request.nonce, "nonce", "issue_iid", "project_id")
+                )
 
         asyncio.run(asyncio.wait_for(check_stdio(), timeout=10))
         assert calls == [
             ("stage", None, None),
             ("status", TREE, None),
             ("read", TREE, {"mode": "changed_paths"}),
+            ("read", TREE, {"mode": "changed_paths"}),
+            *(("read", TREE, item) for item in reads),
         ]
     finally:
         captured = session.close_and_capture()
@@ -559,3 +593,83 @@ def test_candidate_mcp_dependency_parses_in_root_and_template(
     for content in ((project_root / "pyproject.toml").read_text(), rendered_template):
         dependencies = tomllib.loads(content)["project"]["dependencies"]
         assert dependencies.count("mcp>=2,<3") == 1
+
+
+@pytest.mark.integration
+def test_candidate_mcp_live_broker_refusal_keeps_fixed_error_and_cleans_socket(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    request = WorkerResultBrokerRequest(
+        nonce="0123456789abcdef" * 2,
+        project_id=310967,
+        issue_iid=81,
+        ledger_revision=7,
+        expected_state=RunnerState.EXECUTING,
+        expected_phase=WorkflowPhase.WORKFLOW,
+        source_branch="agent/issue-81",
+        source_sha=BASE,
+    )
+    client_request = WorkerResultBrokerClientRequest(
+        nonce=request.nonce, issue_iid=request.issue_iid
+    )
+    selector: dict[str, object] = {
+        "path": "docs/a.md",
+        "side": "new",
+        "offset": 0,
+        "length": 3,
+    }
+    calls: list[tuple[str, str | None, dict[str, object] | None]] = []
+
+    def candidate_action(
+        action: str, tree: str | None, selection: dict[str, object] | None
+    ) -> dict[str, object]:
+        calls.append((action, tree, selection))
+        if action == "stage":
+            return {"candidate_tree": TREE, "state": "staged"}
+        assert action == "read" and selection == selector
+        raise WorkerProtocolError(
+            "candidate_broker", f"request is not permitted: {PRIVATE_NONCE}"
+        )
+
+    session = create_candidate_broker(
+        candidate_action,
+        request=request,
+        timeout_seconds=10,
+        temporary_directory=tmp_path_factory.mktemp("mf"),
+    )
+    socket_root = session.socket_path.parent
+
+    def gateway(
+        action: CandidateOperation, tree: str, selection: dict[str, object] | None
+    ) -> dict[str, object]:
+        return request_candidate_validation(
+            session.socket_path,
+            client_request,
+            action=action,
+            candidate_tree=tree,
+            selector=selection,
+        )
+
+    try:
+        request_candidate_validation(
+            session.socket_path, client_request, action="stage"
+        )
+
+        async def call(client: Any) -> Any:
+            return await client.call_tool("candidate_read", selector)
+
+        result = _client_round_trip(create_candidate_mcp_server(gateway, TREE), call)
+        assert result.is_error is True
+        assert result.structured_content is None
+        assert [item.model_dump()["text"] for item in result.content] == [
+            "candidate_broker: read failed"
+        ]
+        rendered = json.dumps(result.model_dump())
+        assert PRIVATE_NONCE not in rendered and request.nonce not in rendered
+        assert calls == [("stage", None, None), ("read", TREE, selector)]
+    finally:
+        with pytest.raises(
+            WorkerProtocolError, match="candidate_broker: malformed request"
+        ):
+            session.close_and_capture()
+    assert not socket_root.exists()
