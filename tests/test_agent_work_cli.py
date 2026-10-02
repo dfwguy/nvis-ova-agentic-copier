@@ -1947,7 +1947,7 @@ def test_saved_validation_snapshot_reader_is_nofollow_nonblocking_and_bounded(
     elif kind == "fifo":
         os.mkfifo(path)
     else:
-        path.write_bytes(b"x" * 4_194_306)
+        path.write_bytes(b"x" * 33_554_434)
 
     outcomes: list[bytes | None | BaseException] = []
     reader_name = "_read_saved_validation_snapshot"
@@ -1967,7 +1967,7 @@ def test_saved_validation_snapshot_reader_is_nofollow_nonblocking_and_bounded(
         assert outcomes == [b"<testsuite tests='1'/>"]
     elif kind == "oversized":
         assert isinstance(outcomes[0], bytes)
-        assert len(outcomes[0]) == 4_194_305
+        assert len(outcomes[0]) == 33_554_433
     else:
         assert isinstance(outcomes[0], OSError)
 
@@ -3464,7 +3464,9 @@ def test_upstream_finding_preview_maps_sanitized_reader_failure_to_one_and_hides
     assert "matching_iid" not in output[0]
 
 
-@pytest.mark.parametrize("size", [1_048_577, 4_194_304, 4_194_305, 4_194_306])
+@pytest.mark.parametrize(
+    "size", [1_048_577, 4_194_305, 6_291_456, 33_554_432, 33_554_433, 33_554_434]
+)
 def test_xml_live_and_saved_readers_preserve_inclusive_cap_and_overflow_sentinel(
     tmp_path: Path, size: int
 ) -> None:
@@ -3479,7 +3481,7 @@ def test_xml_live_and_saved_readers_preserve_inclusive_cap_and_overflow_sentinel
     raw = b"<testsuite tests='1' failures='0' errors='0'/>"
     raw += b" " * (size - len(raw))
     path.write_bytes(raw)
-    expected = raw[:4_194_305]
+    expected = raw[:33_554_433]
     import hashlib
 
     for reader in (_read_validation_artifact, _read_saved_validation_snapshot):

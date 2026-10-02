@@ -685,7 +685,9 @@ def test_content_completion_can_be_ready_without_junit_but_coding_requires_it(
     assert _apply(coding).state is template_update.TemplateUpdateState.NEEDS_RECOVERY
 
 
-@pytest.mark.parametrize("xml_size", [0, 1_048_577, 4_194_304, 4_194_305])
+@pytest.mark.parametrize(
+    "xml_size", [0, 1_048_577, 4_194_305, 6_291_456, 33_554_432, 33_554_433]
+)
 def test_coding_completion_with_current_two_version_junit_evidence_is_ready(
     tmp_path: Path,
     xml_size: int,
@@ -722,7 +724,7 @@ def test_coding_completion_with_current_two_version_junit_evidence_is_ready(
 
     report = _apply(harness)
 
-    if xml_size > 4_194_304:
+    if xml_size > 33_554_432:
         assert report.state is template_update.TemplateUpdateState.NEEDS_RECOVERY
         assert report.completion is None
         return
@@ -893,7 +895,9 @@ def test_root_and_template_template_update_modules_remain_byte_identical() -> No
     ).read_bytes()
 
 
-@pytest.mark.parametrize("size", [1_048_577, 4_194_304, 4_194_305, 4_194_306])
+@pytest.mark.parametrize(
+    "size", [1_048_577, 4_194_305, 6_291_456, 33_554_432, 33_554_433, 33_554_434]
+)
 def test_default_completion_artifact_reader_preserves_cap_and_stops_at_sentinel(
     tmp_path: Path, size: int
 ) -> None:
@@ -913,6 +917,6 @@ def test_default_completion_artifact_reader_preserves_cap_and_stops_at_sentinel(
         ),
     )
     actual = dependencies.read_artifact(path)
-    assert actual is not None and len(actual) == min(size, 4_194_305)
-    assert sha256(actual).hexdigest() == sha256(raw[:4_194_305]).hexdigest()
+    assert actual is not None and len(actual) == min(size, 33_554_433)
+    assert sha256(actual).hexdigest() == sha256(raw[:33_554_433]).hexdigest()
     assert dependencies.read_artifact(tmp_path / "missing.xml") is None

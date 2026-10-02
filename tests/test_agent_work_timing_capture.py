@@ -202,7 +202,9 @@ def test_prepared_fingerprint_compares_installed_versions_without_source_path(
     assert first == second
 
 
-@pytest.mark.parametrize("xml_size", [0, 1_048_577, 4_194_304, 4_194_305])
+@pytest.mark.parametrize(
+    "xml_size", [0, 1_048_577, 4_194_305, 6_291_456, 33_554_432, 33_554_433]
+)
 def test_clear_capture_binds_both_full_versions_and_replays_private_transcript(
     tmp_path: Path,
     xml_size: int,
@@ -272,7 +274,7 @@ def test_clear_capture_binds_both_full_versions_and_replays_private_transcript(
         raise AssertionError(f"unexpected timing capture command: {command}")
 
     dependencies = _dependencies(tmp_path, run)
-    if xml_size > 4_194_304:
+    if xml_size > 33_554_432:
         with pytest.raises(TimingCaptureError):
             capture_serial_timing_review(
                 baseline_sha=BASE_SHA,
@@ -1023,14 +1025,14 @@ def test_capture_bounded_reader_checks_stat_then_actual_bytes_before_parsing(
             if reader_case == "phase_overflow" and path.suffix == ".json":
                 return stat_hint
             return (
-                4_194_305
+                33_554_433
                 if reader_case == "stat_refusal"
                 else (stat_hint if reader_case == "lying_stat" else path.stat().st_size)
             )
 
         def read(path: Path, limit: int) -> bytes:
             assert path in stats
-            assert limit == (1_048_576 if path.suffix == ".json" else 4_194_304)
+            assert limit == (1_048_576 if path.suffix == ".json" else 33_554_432)
             reads.append((path, limit))
             if reader_case == "overflow":
                 path.write_bytes(artifact + b" " * (limit + 1 - len(artifact)))
@@ -1052,7 +1054,7 @@ def test_capture_bounded_reader_checks_stat_then_actual_bytes_before_parsing(
             if reader_case == "legacy_nonbytes":
                 return cast(bytes, "PRIVATE_TOKEN=invalid-type")
             if reader_case == "legacy_overflow":
-                return artifact + b" " * (4_194_305 - len(artifact))
+                return artifact + b" " * (33_554_433 - len(artifact))
             return path.read_bytes()
 
         dependencies = cast(
