@@ -24,7 +24,15 @@ from pathlib import Path
 from time import monotonic
 from typing import BinaryIO, Literal, Protocol, cast
 
-from pydantic import BaseModel, ConfigDict, StrictInt, StrictStr, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 
 ActorReason = Literal[
     "actor_limits_unavailable",
@@ -173,14 +181,37 @@ class _TurnStartedParameters(BaseModel):
     turn: dict[str, object]
 
 
-class _ThreadStarted(BaseModel):
+class _TimestampedNotification(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
+    emittedAtMs: StrictInt | None = Field(default=None, ge=0)
+
+    @field_validator("emittedAtMs", mode="before")
+    @classmethod
+    def _present_timestamp(cls, value: object) -> object:
+        if value is None:
+            raise ValueError("invalid notification timestamp")
+        return value
+
+
+class _RemoteControlStatusParameters(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    status: Literal["disabled"]
+    environmentId: None
+    installationId: StrictStr = Field(min_length=1)
+    serverName: StrictStr = Field(min_length=1)
+
+
+class _RemoteControlStatusChanged(_TimestampedNotification):
+    method: Literal["remoteControl/status/changed"]
+    params: _RemoteControlStatusParameters
+
+
+class _ThreadStarted(_TimestampedNotification):
     method: Literal["thread/started"]
     params: _ThreadStartedParameters
 
 
-class _TurnStarted(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
+class _TurnStarted(_TimestampedNotification):
     method: Literal["turn/started"]
     params: _TurnStartedParameters
 
@@ -207,6 +238,9 @@ class _Session:
         self.limits = limits
         self.ports = ports
         self.identifier = 0
+        self.startup_phase: Literal["awaiting_initialize", "open", "closed"] = (
+            "awaiting_initialize"
+        )
         self.buffer = bytearray()
         self.events: deque[dict[str, object]] = deque()
         self.total = 0
@@ -291,6 +325,11 @@ class _Session:
                         raise ActorHostError("actor_protocol_invalid") from None
                     if not isinstance(value, dict):
                         raise ActorHostError("actor_protocol_invalid")
+                    if value.get("method") == "remoteControl/status/changed":
+                        try:
+                            _RemoteControlStatusChanged.model_validate(value)
+                        except ValueError:
+                            raise ActorHostError("actor_protocol_invalid") from None
                     self.events.append(value)
                 if len(self.buffer) > self.limits.max_frame_bytes:
                     raise ActorHostError("actor_protocol_invalid")
@@ -298,7 +337,15 @@ class _Session:
             raise ActorHostError("actor_frontend_unavailable")
         return bool(write_ready)
 
+    def _check_pending_remote_notifications(self) -> None:
+        if self.startup_phase != "open" and any(
+            event.get("method") == "remoteControl/status/changed"
+            for event in self.events
+        ):
+            raise ActorHostError("actor_protocol_invalid")
+
     def _send(self, message: Mapping[str, object]) -> None:
+        self._check_pending_remote_notifications()
         try:
             payload = (
                 json.dumps(dict(message), ensure_ascii=True, allow_nan=False).encode()
@@ -312,6 +359,7 @@ class _Session:
         while offset < len(payload):
             if not self._pump(writable=True):
                 continue
+            self._check_pending_remote_notifications()
             try:
                 written = self.ports.write_bytes(self.input_fd, payload[offset:])
             except BlockingIOError:
@@ -326,6 +374,12 @@ class _Session:
     ) -> Mapping[str, object]:
         if method not in {"initialize", "config/read", "thread/start", "turn/start"}:
             raise ActorHostError("actor_protocol_invalid")
+        if (
+            method in {"thread/start", "turn/start"}
+            or (method == "initialize" and self.identifier != 0)
+            or (method == "config/read" and self.startup_phase == "awaiting_initialize")
+        ):
+            self.startup_phase = "closed"
         self.identifier += 1
         try:
             self._send(
@@ -366,6 +420,14 @@ class _Session:
                     or acknowledgment.params.turn != response.result.get("turn")
                 ):
                     raise ActorHostError("actor_protocol_invalid")
+                if (
+                    method == "initialize"
+                    and self.startup_phase == "awaiting_initialize"
+                ):
+                    self.startup_phase = "open"
+                elif method == "config/read":
+                    self.startup_phase = "closed"
+                self._check_pending_remote_notifications()
                 return response.result
         except (OSError, subprocess.SubprocessError):
             raise ActorHostError("actor_frontend_unavailable") from None
@@ -378,9 +440,15 @@ class _Session:
 
     def next_event(self) -> Mapping[str, object]:
         try:
-            while not self.events:
-                self._pump()
-            return self.events.popleft()
+            while True:
+                while not self.events:
+                    self._pump()
+                event = self.events.popleft()
+                if event.get("method") != "remoteControl/status/changed":
+                    return event
+                if self.startup_phase != "open":
+                    raise ActorHostError("actor_protocol_invalid")
+                self._remaining()
         except (OSError, subprocess.SubprocessError):
             raise ActorHostError("actor_frontend_unavailable") from None
 
