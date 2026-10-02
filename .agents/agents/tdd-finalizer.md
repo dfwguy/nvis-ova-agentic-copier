@@ -27,6 +27,29 @@ commit or receipt proof remains a block. Do not run Bash or widen that
 session to finish a check. The normal Finalizer route is unchanged. Follow
 `.agents/guidance/read-only-mcp.md`.
 
+## Rebase finalization mode
+
+When Reconciler invokes you, check the final rebased SHA/tree, its full-hook
+and timing proof, and all applicable independent end-result review verdicts.
+Check original feature intent, captured target, and the final target-to-rebased
+diff. Require a clean index/worktree, no conflict markers, no merge or rebase
+in progress, and captured target ancestry. Check supplied fresh source/target
+ref and same-MR identity proof locally; do not fetch or call GitLab.
+
+Require reviews and validation to name the current final SHA/tree. Repairs or
+ref drift invalidate affected proof and return to Reconciler. Recheck changed
+Markdown readability when applicable. Do not require a Red checkpoint or proof that the commit has a Red
+checkpoint as its only parent. Do not require ordered merge parents. Do not commit, compact, or run another
+hook. The legacy merge verifier does not verify a rebased tip. Main publishes
+that reviewed tip to the same MR under an exact source lease; fresh full CI
+and human approval/merge remain required. Unsupported host-issued MCP sessions
+stop without a shell fallback.
+
+## New-feature validation
+
+The list below applies to normal feature TDD and serial coding. Existing-MR
+repair uses the separate rebase mode above.
+
 ## Validation
 
 Use the full list. Check each item. Keep each proof. Stop on a gap.
@@ -76,7 +99,7 @@ recovery records.
    expected read is a block, not N/A. When Temporality Judge applies, check
    its tree and read proof the same way. An interactive review result must
    approve the final staged tree and name its base and tree OID. In
-   reconciliation, it also names source, target, and joined-tree proof.
+   rebase review, it names original source, captured target, and final SHA/tree.
    Check the writer's final docs and README receipt. Check the Diátaxis and
    README Judge verdicts against the staged
    tree. Check that both writers stopped before the applicable staging
@@ -112,29 +135,9 @@ recovery records.
    Check the changed-file readability result for changed Markdown. If none
    changed, record N/A. An interactive actionable finding starts a fresh branch
    and TDD cycle. A serial repair needs a new tree and fresh applicable receipts.
-5. In coding reconciliation, require the captured old source SHA, exact target
-   SHA, mechanically re-proved retained Red-to-source provenance, and fresh
-   three-way reconciliation evidence. Require Main's freshly fetched exact
-   source and target ref proof; check that supplied proof and local identities
-   only. Do not fetch or call GitLab. Main invokes
-   `agent-work reconcile-commit commit --apply` for the exact Judge-approved
-   staged tree from the pending merge state. It consumes `MERGE_HEAD` and
-   creates one ordered two-parent
-   commit with old source first and exact target second. Invoke
-   `agent-work reconcile-commit verify` with the worktree, clanker branch ref,
-   captured source SHA, exact target SHA, retained Red ref and SHA, and Judge
-   tree.
-   Require its read-only proof of cleared merge state, clean index and worktree,
-   exact parent order, tree, unchanged Red ref, and unchanged supplied local
-   identities. Separately compare the commit message with the reviewed message
-   file. Do no passing-head commit or ordinary compaction.
-   Any drift invalidates every receipt and returns to exact selection and
-   preparation.
-6. Main may publish the verified normal interactive Green tip or, for a pending
-   coding merge, the verified ordered two-parent reconciliation commit through
+5. Main may publish the verified normal interactive Green tip through
    `$git-flow`. Never push a Red ref. A serial-worker Finalizer never commits;
-   its trusted runner publishes the same verified Green SHA without a second
-   commit.
+   its trusted runner publishes the verified Green SHA without a second commit.
 
 ## Verdict
 

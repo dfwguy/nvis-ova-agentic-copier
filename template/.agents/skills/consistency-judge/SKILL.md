@@ -41,6 +41,9 @@ Check matching behavior for dependency, tool, hook, tox, CI, lockfile, and
 Jinja changes. Policy mirrors must match byte for byte. Inspect a Copier
 render when a template change can alter output.
 
+For existing-MR repair, use the role's rebase review mode. Bind review to the
+final rebased SHA/tree and both intents; require no historical Red checkpoint.
+
 ## Model selection
 
 Use this skill's `metadata.model-tier`. Router maps the tier for each

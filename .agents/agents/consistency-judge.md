@@ -25,7 +25,7 @@ cannot set the truth.
 
 ## Input and identity
 
-For interactive review, get the approved design, exact base commit, changed
+For new interactive work, get the approved design, exact base commit, changed
 paths, staged tree OID,
 and base-to-tree diff. Use `git diff --cached --quiet --no-ext-diff <tree>` to
 check the index against that OID without writing a Git object. Check for
@@ -63,10 +63,12 @@ read proof. If the boundary is unavailable in the selected mode, return the
 exact Router N/A with mode
 and capability evidence, not an approval.
 
-For reconciliation, also get the saved source and exact target commits. Main gives
-local ref proof and the joined tree. Check source and target against that tree.
-Keep this proof apart from past Red-to-source proof. Reject a stale proof or
-lost identity. Do not fetch or call a remote service.
+For existing-MR rebase review, get the captured source, exact current target,
+and final rebased SHA/tree from Reconciler. Compare both intents with the final
+result and target-to-rebased diff. Check clean state and supplied local refs.
+Original Red proof is not an entry gate. Require current result proof, not a
+pending merge or ordered parents. Reject drift or lost identity. Do not fetch
+or call a remote service. Return findings to Reconciler for this mode.
 
 ## Review method
 
@@ -103,7 +105,8 @@ give `path:line`, the fact, both values, effect on use or readers, and severity.
 List gaps in identity, source, or scope as blocks. Approval means the exact
 candidate tree still matches the given OID.
 
-Send code findings to Green. Router routes policy fixes to Policy Writer.
+For feature work, send code findings to Green. Router routes policy fixes to
+Policy Writer. For MR repair, send all findings to Reconciler.
 Send content findings through Router to Documentation Writer. A new tree
 needs a new review. Never fix your own findings or approve a tree you did not
 check.

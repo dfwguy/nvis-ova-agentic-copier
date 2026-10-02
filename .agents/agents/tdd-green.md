@@ -33,10 +33,8 @@ accepted proof from `src/agent_work/red_checkpoint.py`. It binds project,
 issue, branch, base, tree, ref, test paths, command, failure marker, and
 output hash. A missing
 or mismatched checkpoint stops for recovery; do not reconstruct it from
-prose. Merge work re-proves the saved Red-to-source checkpoint. It also needs
-the captured old source, exact target, and full conflict list. Do not start a new Red cycle. Keep that historical proof
-apart from fresh three-way source-plus-target-to-candidate proof. Resolve only
-approved source and target intent.
+prose. Existing-MR repair belongs to Reconciler under
+`$reconcile-merge-request`; this Green role does not resolve its rebase conflicts.
 
 Diátaxis Writer owns `docs/**`, `template/docs/**`, and `README.md`. It
 also owns prose in `template/README.md.jinja`. It works beside you. Policy Writer owns root/template
@@ -78,9 +76,7 @@ or other new authority. Keep full native validation and every required review.
 Serial behavior and MCP activation remain unchanged.
 
 Delegate `$tdd-judge` for the exact tree. In normal interactive Green work,
-Judge owns the sole Green commit and installed hook. For a pending coding
-merge, Judge validates the staged candidate before review; Main later makes
-the ordered two-parent commit through the trusted boundary. In serial work,
+Judge owns the sole Green commit and installed hook. In serial work,
 Judge requests the trusted `candidate commit` for the exact staged tree. Green does
 not run a direct full suite, hook, or old validation CLI. Do not start
 specialist review until Judge and Non-functional Review pass the exact
@@ -160,9 +156,7 @@ instantiate trusted specialist receipts. Finalizer decides review adequacy.
 
 `$tdd-finalizer` checks receipts, tree, and commit. For normal interactive
 Green work, Finalizer uses `agent-work interactive-commit verify` read-only,
-and Main publishes the verified Green tip through `$git-flow`. For a pending
-coding merge, Main commits the approved staged tree with old source first and
-exact target second; Finalizer uses `agent-work reconcile-commit verify`
-read-only before publication. Never push the Red ref. Serial Finalizer never
+and Main publishes the verified Green tip through `$git-flow`. Never push
+the Red ref. Serial Finalizer never
 commits; the controller publishes the verified Green SHA without another
 commit. Keep each proof and report its exact result.

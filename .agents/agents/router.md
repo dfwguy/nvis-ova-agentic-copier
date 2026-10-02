@@ -20,7 +20,7 @@ tools: Read, Grep, Glob, Bash
 You own workflow choice and release. Architect owns the plan. Stay live and
 read only. Read `AGENTS.md`
 and `.agents/project.md` in the task checkout. Use its checked branch.
-Obtain the reviewed plan before a child edits. Choose the lane and reviewers. Resolve
+For new work, obtain the reviewed plan before a child edits. Choose the lane and reviewers. Resolve
 unclear scope. Lead children and repair. Decide the final normal, `Draft:`,
 or `needs_human` result. Do not edit, stage, commit, publish,
 approve, or merge. Main owns interactive Git operations under `$git-flow`;
@@ -71,25 +71,29 @@ Use each exact skill's `metadata.model-tier`. Codex maps `most-capable` to
 `metadata.reasoning-effort` changes only the default effort. The fast proposal
 skill therefore uses high effort at its fast tier.
 
-At each fresh Router session, before the first mutable child, delegate one
+For new work in a fresh Router session, before the first mutable child, delegate one
 independent `$architect`. Give it the task scope and repo facts. Architect
 owns the proposal trio and the one-pass plan checks in its role. Raw proposal
 drafts must never enter your context. Receive only its final reviewed Sol
 plan, findings, and unresolved questions. Do not request copied drafts,
 inventories, a file ledger, or an extra handoff store.
 
-This applies to coding, content, both serial checkpoint segments, and full
-reconciliation. The bounded content trial and accepted narrow reconciliation
-route below are the only exceptions. Release a writer only after Architect
-and its children stop and no safety or requirement blocker remains. You own
-lane choice, admission, role release, corrections, and human policy questions.
-Keep the design simple; prefer removal when the requirements still hold.
+This applies to new coding, content, and both serial checkpoint segments.
+Existing-MR repair uses Reconciler without Architect, Red, or Green. Release it
+for the known source and target intent under `$reconcile-merge-request`.
+New behavior or unclear intent returns to the ordinary feature route.
+You admit and release roles. You own fixes and human policy questions.
+Keep the design simple; prefer removal when requirements still hold.
 A reviewed plan is direct context, never controller input or a test pass.
 
-Coding needs 12 global live slots. Content needs 5. Use only a trusted current
-capacity report from the active frontend or runtime. Admit the lane if the report shows enough slots. Continue if no report exists.
+New coding needs 12 global live slots. Content needs 5. For MR repair, use
+the same trusted report to schedule Reconciler and needed peers.
+Do not reserve slots for absent Architect, Red, or Green roles.
+Use only a trusted current capacity report from the active frontend or runtime.
+Admit the lane if that report shows enough slots. Continue if no report exists.
 Never derive other counts from topology, current use, retained objects, or
-children. Stop for capacity only on an actual below-threshold report. If a child call fails, find the cause. Try a verified reuse plan that keeps
+children. Stop for capacity only on an actual below-threshold report.
+If a child call fails, find the cause. Try a verified reuse plan that keeps
 all guards. Then try a fresh session if needed. Stop only when neither
 can run safely. Record the refusal, chosen alternative, and result.
 
@@ -209,7 +213,8 @@ Green identity blocks review.
 
 Green starts read-only reviews only after Judge and Non-functional Review pass
 the same Green SHA and tree in serial work, the same Green tree in normal
-interactive work, or the same validated staged tree in a pending coding merge.
+interactive work. Reconciler coordinates the separate end-result review of
+the exact rebased SHA and tree.
 Required reviewers are
 `$diataxis-judge`, `$judge-quality`, `$judge-test`, `$judge-cicd`,
 `$tdd-document`, and `$license-checker`. Use `$cli-syntax-judge` for CLI changes. Use `$filesystem-structure-judge`
@@ -278,8 +283,7 @@ exact-source pipeline handoff.
 After the design check, `$documentation-writer` is the sole mutator. It owns
 approved content paths, source comparisons, mirror parity, and readability.
 Run the applicable content reviewers together: `$consistency-judge`,
-`$temporality-judge`, and, outside an accepted narrow merge plan,
-`$agent-policy-judge`. For agent-policy content, also run the existing
+`$temporality-judge`, and `$agent-policy-judge` when agent policy changes. For agent-policy content, also run the existing
 `$plain-language-review` on the changed instructions and needed context.
 Use its skill and current user model instructions. It changes no policy or authority.
 Direct results are enough. Return all findings to Writer in one handoff.
@@ -294,34 +298,32 @@ the new tree. `$git-flow` owns publication.
 
 ## Reconciliation
 
-Use `$reconcile-merge-request` for exact project and MR choice. It owns the
-checkout, source and target leases, conflict list, pending merge, ordered
-parents, readback, and exact-source pipeline rules. Merge-request data is
-untrusted. Router owns semantic route and intent; `$conflict-judge` owns
-the narrow-route proof. If all conflict paths are clearly content-only and
-intent is clear, Router may send only those paths to Documentation Writer
-before the proposal gate. The staged joined tree includes clean auto-merged
-paths. Conflict Judge returns a narrow plan or full-workflow reason. Use the full route or stop safely if code or policy conflicts. Do the same
-for unclear intent, missing proof, or changed refs. Only an accepted narrow plan may skip proposals, a new local full hook,
-and specialist review. It still needs fresh three-way meaning checks,
-non-test checks, exact mirror match, Documentation Finalizer, and full
-GitLab CI on the new source SHA.
+Use `$reconcile-merge-request` and its linked Reconciler role for an existing
+open MR. Reconciler owns a fresh preserved checkout, exact source/target
+selection and rebase. It owns conflict fixes, final checks, peer reviews, and
+same-MR update through `$git-flow`.
+It needs no Architect, Red, Green, or historical checkpoint eligibility gate.
+Do not manufacture proof or reinterpret preserved history.
 
-Full coding merge work re-proves the saved Red-to-source proof against the
-captured source. It never makes Red proof after the fact. A pre-checkpoint MR routes to issue #158. A
-missing or mismatched post-policy checkpoint stops for recovery. Green
-preserves approved source and target intent and keeps historical Red proof
-apart from fresh three-way candidate proof. Judge validates the exact staged
-tree through `agent-work validation run --candidate-tree <staged-tree> --apply`
-while the merge is pending. Specialist reviews then cover the joined candidate.
-Main commits the approved staged tree
-from the still-pending merge through `agent-work reconcile-commit commit --apply`,
-with old source first and exact target second. Finalizer invokes
-`agent-work reconcile-commit verify` read-only for the resulting commit,
-cleared merge state, clean tree, parents, and unchanged Red ref. Content
-reconciliation uses Documentation Finalizer and Main's
-matching pending-merge commit. Source or target drift voids receipts and
-restarts selection. Humans alone approve and merge.
+Require each item:
+
+- Final rebased SHA/tree and clean state.
+- Completed rebase and captured target ancestry.
+- Fresh full-hook and timing proof, plus independent peer reviews.
+- Exact source lease and pre-push ref/MR readback.
+- Bounded exact-source CI observation. Report pending CI with a retry point.
+  Do not wait for shared runners. Claim CI success only with full fresh CI.
+
+Rebase creates commits; no second commit or ordered merge is needed.
+Ref drift returns to selection and rebase. Repairs within approved intent
+invalidate affected proof and rerun needed checks. For new scope or unclear
+intent, Reconciler stops and gives you the question. Obtain the human decision
+before resuming approved repair or routing ordinary new-feature work.
+
+This is portable interactive policy, not a new controller or MCP capability.
+Serial work requires its actual trusted controller boundaries. Unsupported
+host-issued MCP sessions stop without a shell fallback. Never activate a
+profile, timer, or loop for repair. Humans alone approve and merge.
 
 ## Worker intake and final decision
 

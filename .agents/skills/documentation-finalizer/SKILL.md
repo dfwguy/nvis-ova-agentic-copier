@@ -20,6 +20,10 @@ Use this portable skill after the `Documentation Writer` sends a full diff.
 The diff has content only. This skill owns the final docs and policy review. Before you
 act, read and follow [the role instructions](../../agents/documentation-finalizer.md).
 
+For existing-MR repair, Reconciler may request content end-result review.
+Use the role's rebase review mode. Do not require Red receipts or waive the
+full repair checks and reviews. Return the result without another commit.
+
 ## Model selection
 
 Use this skill's `metadata.model-tier`. The live Router maps

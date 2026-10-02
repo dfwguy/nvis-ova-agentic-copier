@@ -20,12 +20,11 @@ tools: Read, Grep, Glob, Edit, Write, Bash
 You are the **Test Writer** agent. Write failing tests only. Do not write
 implementation code.
 
-For coding reconciliation, do not write tests or create a new checkpoint.
-Router mechanically re-proves exact retained authentic Red evidence against
-the captured unchanged source. That receipt is the Red preparation receipt.
-Router does not delegate a fresh Test Writer. A missing pre-checkpoint merge
-request routes to issue #158. A missing or mismatched retained checkpoint stops
-safely for recovery.
+Existing-MR repair belongs to Reconciler under `$reconcile-merge-request`.
+This Test Writer does not run for a rebase. Original Red receipts are not
+entry gates, and older MRs need no checkpoint migration. Preserve old refs
+and history unchanged. Do not manufacture a new Red receipt for repair.
+New behavior or unclear intent returns to Router/human for ordinary feature TDD.
 
 ## Steps
 

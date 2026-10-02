@@ -163,12 +163,12 @@ Its installed hook runs the full suite once. Finalizer checks the committed
 tree and retained Red ancestry read-only. Main publishes only the verified
 Green tip, never the Red ref. A human squash merge does not replace these checks.
 
-When a coding branch needs a merge with its target, the merge stays open while
-Judge checks the exact staged tree and reviewers inspect it.
-Main then uses the trusted [reconciliation commit command](../reference/serial-gitlab-agent-loop.md#coding-reconciliation-commit)
-to make one normal commit with the saved source and target as ordered parents.
-Its installed hook runs the full suite. Finalizer checks the commit and Red
-ancestry without edits before publication.
+For an open MR, Reconciler rebases the source onto the target. It checks the
+end result and updates the same MR. This repair does not start feature TDD.
+Read the [reconcile-merge-request skill](../../.agents/skills/reconcile-merge-request/SKILL.md)
+and [Reconciler role](../../.agents/agents/reconciler.md) for the rules and owners.
+The [ordered-merge API](../reference/serial-gitlab-agent-loop.md#coding-reconciliation-commit)
+remains available for explicit legacy use.
 
 In a serial workflow, the AI worker cannot commit. While the Red producer is
 still live, it calls the trusted broker boundary. The boundary sets the coding
@@ -211,7 +211,8 @@ without rerunning the hook. A failed request returns to the live worker for
 correction. It can stage a new tree and request a new candidate commit.
 Content work retains staged-tree validation and status.
 
-If the target branch advances after Green, reconciliation uses the reviewed
+In the implemented serial controller, if the target advances after Green,
+reconciliation uses the reviewed
 combined tree. The controller checks the saved Red and Green commits and the
 pending target. It then validates the staged tree. After review,
 the trusted publication boundary makes an ordered two-parent commit with
@@ -233,7 +234,7 @@ fresh reviews. Earlier receipts no longer apply.
 The separate result broker accepts final workflow intent. After worker exit,
 the controller checks the commit and tree again. It also checks changed paths
 and identity before publication. Ordinary coding publishes the Green commit.
-A reviewed pending reconciliation publishes its ordered two-parent commit.
+A reviewed serial pending reconciliation publishes its ordered two-parent commit.
 The normal ledger transition records that authorization. See
 the [candidate command reference](../reference/serial-gitlab-agent-loop.md#candidate-stage-commit-read-validate-and-status).
 
@@ -640,10 +641,9 @@ or authority boundary, cross-module rule, or scope not proved safe.
 The receipt marks prior sections that still have support. It also marks the
 scope checked again against the current tree. In serial coding, the reviewer
 uses the Green SHA and tree. In normal interactive work, Judge requests one
-Green commit. For a pending coding merge, Main makes the reviewed two-parent
-reconciliation commit after validation and review. Finalizer checks either
-commit without edits. In serial work, Finalizer does not commit. The trusted
-controller made Green before review and pushes that SHA.
+Green commit. For an open MR, use the linked Reconciler rules above.
+In serial work, Finalizer does not commit. The trusted controller made Green
+before review. It pushes that SHA.
 
 The controller, not the reviewer, measures review time. The receipt starts with
 compact, token-neutral scope metadata. A later cost study can compare complete

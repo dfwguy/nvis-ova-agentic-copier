@@ -16,17 +16,13 @@ metadata:
 
 # Test Judge
 
-Use this skill for the test review stage. Read and follow [the role
-instructions](../../agents/judge-test.md) before acting. That file is
-role-reference material. This directory is the shared skill entry point for
-Claude Code, Codex, and Pi. Verify the accepted checkpoint and ordinary
-Red-to-Green Git diff supplied by Green.
-
-For reconciliation, verify two proofs. Verify mechanically re-proved retained
-historical Red-to-source provenance. Verify fresh three-way
-source-plus-target-to-candidate evidence. Keep the proofs separate. Check both.
-Keep both proof sets in view. Read both sets. Check the source. Check the
-target. Check the new tree. Do not mix the two proof sets.
+Use this skill to review tests. Read and follow
+[the role](../../agents/judge-test.md) before acting. It works with Claude Code,
+Codex, and Pi.
+For feature work, check the accepted Red checkpoint and Red-to-Green diff.
+For MR repair, read the source intent, target changes, and final rebased diff.
+Check the final SHA/tree and fresh test proof. Do not require old Red receipts
+or create a checkpoint. Return the result to Reconciler.
 
 ## Model selection
 

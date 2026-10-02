@@ -20,14 +20,26 @@ Use this portable skill for non-functional review. Before you act, read and
 follow [the role instructions](../../agents/nonfunctional-review.md). That file
 defines the role. This skill works with Claude Code, Codex, and Pi.
 
+## Rebase review mode
+
+Reconciler invokes this review for existing-MR repair. Use the captured original
+feature intent and target changes. Review the target-to-final committed diff
+at the final rebased SHA and tree. Do not use an empty worktree-to-HEAD diff.
+Require no Architect, Red checkpoint, or Green stage for this mode.
+Return all findings to Reconciler. It owns repairs and renewed proof.
+The feature and serial rules below keep their existing scope.
+
+
 ## Model selection
 
 Use this skill's `metadata.model-tier`. The live Router maps it to a
 model. Each frontend uses its own configured map. Do not name a provider model
 in this skill.
 
-The TDD Judge delegates this review after the Green commit's one hook
-run. In interactive work, use the exact staged tree and its available immutable
+For features, TDD Judge delegates after the Green commit's one hook run.
+For rebase repair, Judge supplies the final rebased SHA/tree and its native
+JUnit snapshots, digests, and counts. Use the target-to-final diff to identify
+new or modified tests. Keep all existing timing gates. In interactive work, use the exact staged tree and its available immutable
 candidate JUnit snapshots, digests, and counts. A new or modified test strictly
 above 1.000 seconds is the ordinary hard block; exactly 1.000 is allowed.
 Send 0.100-second suggestions to a separate follow-up. Absent paired proof

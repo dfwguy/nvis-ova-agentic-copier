@@ -10,7 +10,9 @@
 # Test-Driven Development
 
 This is the TDD discipline for coding work in this repo. It applies to all
-languages. `AGENTS.md` defines the route. Docs and agent-policy work use other
+languages for new work. Existing MR rebases use
+`$reconcile-merge-request` and Reconciler, without Architect, Red, or Green.
+`AGENTS.md` defines the route. Docs and agent-policy work use other
 guidance. Do not load this file for content-only work.
 
 ## Always
@@ -141,8 +143,7 @@ present JUnit data blocks review. A failed hook still fails.
 Judge returns its Non-functional Reviewer result. Both must pass for the
 exact candidate before all applicable specialist reviews run together when
 slots allow. Wait for every result. Specialist reviews
-start after the normal Green commit, pending-merge validation, or serial Green
-commit. Serial specialists review the Green SHA and tree. Test Judge checks
+start after the normal Green commit or serial Green commit. Serial specialists review the Green SHA and tree. Test Judge checks
 the Red-to-Green Git diff. During
 finalization, Finalizer checks that diff, checkpoint, and validation proof.
 For normal interactive Green work, it invokes
@@ -163,47 +164,23 @@ original scope; do not relax hooks, configuration, security, or identity.
 After editors stop, Main restages the complete candidate. Discard prior
 candidate proof and approvals. Require a fresh full Judge native hook,
 Non-functional Review, and all applicable reviews. Test edits or any existing
-Green commit require a fresh branch and TDD cycle. Never append a correction
+Green commit require a fresh branch and TDD cycle. Never append a fix
 commit. Serial workers still cannot commit. The
 trusted controller creates each serial Green candidate commit before review;
 after a correction, it creates a new one and invalidates stale receipts.
 Recovery derives the current Red and Green identities from Git and GitLab
 evidence, not a session summary. Publication uses the verified Green SHA.
 
-## Reconciliation of completed coding work
+## Existing merge requests
 
-Reconciliation recovers completed post-policy source work. It is not a new TDD
-cycle. Router mechanically re-proves the exact retained authentic Red
-checkpoint against the unchanged captured source. Never create Red evidence
-retrospectively. A pre-checkpoint merge request routes to issue #158. A missing
-or mismatched post-policy checkpoint stops safely for recovery. The re-proved
-retained receipt is the Red preparation receipt. Router does not delegate a
-fresh Test Writer. TDD Red does not manufacture evidence.
-
-Router prepares the pending target merge and conflict manifest. It freshly
-routes the joined diff. Green resolves coding conflicts by preserving approved
-source and target intent. Fresh validation and reviews cover the combined
-candidate. While the merge is pending, Judge invokes
-`agent-work validation run --candidate-tree <staged-tree> --apply` for read-only
-validation of the exact staged candidate before specialist review. It does not
-create a Green commit or consume `MERGE_HEAD`. Judge and Finalizer keep
-historical Red-to-source proof apart from fresh three-way merge proof. Main
-supplies freshly
-fetched exact source and target ref proof before finalization. Finalizer checks
-it and local identities. It makes no remote or GitLab calls. Main invokes
-`agent-work reconcile-commit commit --apply` for the exact Judge-approved
-staged tree from the still-pending merge state. Its installed hook runs during
-the commit, which consumes `MERGE_HEAD`.
-Captured old source is first. Exact target is second. Finalizer invokes
-`agent-work reconcile-commit verify` read-only for the resulting commit and
-checks clean state, exact parents, tree, and unchanged Red ref. It separately
-compares the commit message with the reviewed message file. Any
-source or target ref drift invalidates receipts. Restart exact selection and
-preparation. Main
-fetches and rechecks both refs just before publishing with exact old-source
-`--force-with-lease` and same-merge-request readback. Humans alone approve and
-merge. Keep the readback. The factory timer is irrelevant to reconciliation.
-Keep each proof. Check each result. Keep the tree. Keep the refs. Check the state.
+Reconciler rebases an existing MR onto the exact current target. It keeps
+source and target intent. It runs the required final checks and full hook once.
+It gets independent reviews of that result. Rebase already creates
+commits; no extra validation commit is needed. This is not a new TDD cycle.
+Original Red receipts are not entry gates. Keep old refs and history unchanged.
+Fixes within approved intent need fresh checks of changed proof. They need no
+new feature checkpoint. Return new behavior or unclear intent to Router/human.
+Use the normal feature route for new work.
 
 Documentation and README findings return through Router to the Diátaxis
 Writer. Policy findings return through Router to the Agent Policy Writer.

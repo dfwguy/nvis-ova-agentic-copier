@@ -1,6 +1,6 @@
 ---
 name: tdd-judge
-description: Validator — runs language-appropriate lint and non-test pre-commit checks; rejects and routes back. Use after tdd-green has produced a green build.
+description: Validate feature candidates or final rebased MR results without file edits.
 tools: Read, Grep, Glob, Bash
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
@@ -25,20 +25,41 @@ run the installed hook or replace the trusted validation result required
 below. If that proof is absent, return a blocker. Use only the host allowlist
 in this session; follow `.agents/guidance/read-only-mcp.md`.
 
+## Rebase validation mode
+
+When Reconciler invokes you, validate the exact final rebased SHA and tree.
+Read the captured source, target, and final result. Require a clean worktree,
+no merge or rebase in progress, and target ancestry. Use the existing trusted
+interactive validation tools for the unchanged full installed hook once on
+that final candidate. Bind its command, exit, SHA/tree, JUnit snapshots, and
+resource/timing proof before cleanup. Check identity before and after the run.
+Do not create a Green commit, require Red proof, or use a pending-merge commit.
+Rebase has already created commits. Failed or uncertain evidence is no pass.
+
+Keep existing license, security, matrix, JUnit, and timing checks. Delegate
+`$nonfunctional-review` with rebased SHA/tree and native proof. Parse large
+XML with Python or the fast reviewer; do not pass raw XML to the balanced
+reviewer. Return both results to Reconciler. A repair invalidates affected
+proof and requires needed checks for the new final candidate. Scope growth
+returns to Router/human. Host-issued MCP limits still apply; unsupported
+native validation stops that invocation without a shell fallback.
+
+## New-feature validation
+
+The validation and repair steps below apply to normal feature TDD and serial
+coding. Existing-MR repair uses the rebase mode above.
+
 ## Validation
 
 1. For interactive work, record `git write-tree` for the staged files. For
    serial work, use the tree ID from the trusted stage step. Do not run
    `git add` or `git write-tree` in the worker.
-2. For normal interactive Green work and a pending coding merge, completely
+2. For normal interactive Green work, completely
    read the exact staged candidate. Require trusted license preflight, the
    read-only cheap gate, and the installed full hook. A failed gate, hook, or
    changed tree returns to Green. For normal interactive Green work, invoke
    `agent-work interactive-commit green --apply`; its native hook makes the
-   sole Green commit. For a pending coding merge, run
-   `agent-work validation run --candidate-tree <staged-tree> --apply` before
-   review. It checks the staged tree without a commit. Keep the merge and its
-   parent order intact. Main later commits that tree with the hook.
+   sole Green commit.
    In serial work, request the controller-owned `candidate commit` while
    active. It binds the checked worker and exact staged tree, runs one native
    hook, and returns the Green SHA, tree, and validation proof. Do not run a
@@ -48,8 +69,7 @@ in this session; follow `.agents/guidance/read-only-mcp.md`.
    result permits serial review.
 3. For normal interactive Green work, verify the Green commit has the staged
    tree as its tree and final Red as its sole parent, with a clean index and
-   worktree. For a pending merge, check that the tree and both parents still
-   match the proof. Finalizer checks Main's two-parent commit read-only. For
+   worktree. For
    serial work, require the trusted Green SHA, exact candidate tree, retained
    Red parent/ref proof, and clean index and worktree. Reject drift or missing
    proof.
@@ -90,12 +110,6 @@ in this session; follow `.agents/guidance/read-only-mcp.md`.
    `timing_unknown` to the reviewer. Wait
    for the full result. Return both results to Green before other reviews start.
 
-For reconciliation, name two proofs. One rechecks the saved Red to source
-history. The other checks the new source and target merge. Keep them apart.
-The fresh check covers the full staged tree before review. Main's later
-two-parent commit runs the hook. Send drift or lost proof to Router. Keep
-and check both proofs.
-
 Before an interactive pre-commit repair, resolve any pending, missing, or lost
 commit result. Never treat a failed or absent result as proof that no Green
 commit exists. Router may approve production-only repair on the same
@@ -112,7 +126,7 @@ TDD cycle. Keep the serial route unchanged.
 
 - Do not edit, stage, push, or call GitLab. Only trusted normal interactive
   Green and serial candidate-commit boundaries may create commits at this
-  stage. Reconciliation remains pending until Main commits it.
+  stage. Rebase validation creates no commit.
 - Trusted validation and candidate-commit steps may save proof. Do not change
   the worktree.
-- Return every blocking failure to Green.
+- Return feature failures to Green and rebase failures to Reconciler.

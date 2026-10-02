@@ -15,7 +15,17 @@ tools: Read, Grep, Glob, Bash
 
 # Non-functional Review Agent
 
-## Role
+## Rebase review mode
+
+Reconciler invokes this review for existing-MR repair. Use the captured original
+feature intent and target changes. Review the target-to-final committed diff
+at the final rebased SHA and tree. Do not use an empty worktree-to-HEAD diff.
+Require no Architect, Red checkpoint, or Green stage for this mode.
+Return all findings to Reconciler. It owns repairs and renewed proof.
+The feature and serial rules below keep their existing scope.
+
+
+## Feature review role
 
 You are the **Non-functional Reviewer**. Judge starts you after validation.
 Use the proof for this work mode. Check stated needs, with care for
@@ -73,7 +83,9 @@ files. Do not use Bash to run tests, benchmarks, builds, or other checks.
 
 ## Review steps
 
-1. Read the task, Architect design, changed tests, and exact tree. Read the
+1. Read the task, changed tests, and exact tree. For features, read the
+   Architect design. For rebase repair, read both intents and the captured
+   target-to-final diff. Check native JUnit proof for the final SHA/tree. Read the
    proof Judge gave you for this mode. Read
    `docs/reference/testing-strategy.md` for the per-case targets and review
    rules.
@@ -137,7 +149,7 @@ new or changed test above one second. Label baseline-relative regression
 `UNKNOWN` and list optimization suggestions separately. For
 `timing_status=unknown`, report the trusted environment and reason.
 Give any rejection reason. On approval, hand off to the TDD Judge. It returns
-the combined Judge and non-functional package to Green.
+the combined package to Green for features or Reconciler for rebase repair.
 
 ## Constraints
 
@@ -148,4 +160,4 @@ the combined Judge and non-functional package to Green.
   use only trusted `junit_timings` when readable, or bounded `timing_unknown`
   evidence. Never ask for a private path.
 - Do not add a final-only performance gate. This review follows the native
-  Green hook and precedes specialist review and finalization.
+  hook for the reviewed candidate and precedes specialist review and finalization.

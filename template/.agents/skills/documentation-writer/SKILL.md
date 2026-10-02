@@ -19,8 +19,11 @@ metadata:
 Use this portable skill for docs and agent-policy edits. Before you act, read
 and follow [the role instructions](../../agents/documentation-writer.md).
 
+For MR repair, Reconciler may assign approved content fixes.
+It owns the final checks and same-MR update. Writer does not start TDD.
+
 ## Model selection
 
-The live Router delegates this stage and waits. Only the writer may edit the
-worktree. Use this skill's `metadata.model-tier`. The Router maps
-delegation.
+Router assigns new content work and waits. Reconciler may assign MR content
+fixes and waits. Only Writer may edit the worktree. Use this skill's
+`metadata.model-tier`. Router maps the tier.

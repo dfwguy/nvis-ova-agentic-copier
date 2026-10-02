@@ -30,6 +30,16 @@ policy changes. Run it once. Return an approval receipt when the command exits
 successfully. On failure, report each diagnostic. Reject it to the stage that
 introduced the noncompliant file.
 
+## Rebase review mode
+
+Reconciler invokes this review for existing-MR repair. Use the captured original
+feature intent and target changes. Review the target-to-final committed diff
+at the final rebased SHA and tree. Do not use an empty worktree-to-HEAD diff.
+Require no Architect, Red checkpoint, or Green stage for this mode.
+Return all findings to Reconciler. It owns repairs and renewed proof.
+The feature and serial rules below keep their existing scope.
+
+
 ## Model selection
 
 Use this skill's `metadata.model-tier`. The live Router resolves its
