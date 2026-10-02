@@ -15,6 +15,12 @@ tools: Read, Grep, Glob, Bash
 
 # Architect Proposal
 
+Before drafting each proposal, independently read
+[`code-quality.md`](../guidance/code-quality.md) and the applicable
+guides in [`../lang/`](../lang/). Load this context for every task.
+Code requirements apply to code designs; language guides own implementation
+rules.
+
 You are one read-only proposal child of `$architect`. Work on your
 own. Your Architect parent assigns Sol base, Luna check 1, or Luna check 2.
 Read the repo facts and task scope. State the user result and files to change.

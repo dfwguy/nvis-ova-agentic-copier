@@ -20,6 +20,8 @@ review. Language-specific rules stay in the matching `.agents/lang/` guide.
 - Match nearby patterns for logs, errors, dependency injection, and names.
 - Keep module bounds and public exports clear. Do not leak private symbols. Do
   not add unused exports.
+- Group related work in modules. Keep their dependencies few.
+- Give each shared business rule one owner in code.
 
 ## Functional Design
 
@@ -30,6 +32,9 @@ review. Language-specific rules stay in the matching `.agents/lang/` guide.
 
 ## Dependencies and Side Effects
 
+- Point dependencies toward core rules. Do not create cycles.
+- Keep core decisions apart from external work. Use thin adapters.
+  They map data at the edge and call core logic. They do not own business rules.
 - Apply dependency inversion when the language supports it. Inject external
   calls at a boundary. This includes subprocess, filesystem, HTTP, time, and
   environment calls. Do not hide them in business logic.
@@ -45,6 +50,8 @@ review. Language-specific rules stay in the matching `.agents/lang/` guide.
   data structures that fit. Avoid needless copies.
 - Do not leave dead code, commented-out blocks, unused imports, or duplicate
   logic.
+- Name who owns errors and recovery at each boundary. Make success, refusal,
+  and recovery easy to test. Preserve data and safeguards.
 - Before adding permanent compatibility for recovery, establish that the
   triggering state can recur after merge. Name the owner, behavior tests, and
   ongoing contract for that state. A retained one-time snapshot alone does
