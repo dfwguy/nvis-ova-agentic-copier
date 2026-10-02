@@ -443,14 +443,17 @@ def build_actor_permission_plan(
     ).hexdigest()
     profile_id = "agent-work-" + fingerprint
     tools = ROLE_TOOLS[binding.role]
+    filesystem_table = ", ".join(
+        json.dumps(path, ensure_ascii=False).replace(chr(127), "\\u007f")
+        + "="
+        + json.dumps(value)
+        for path, value in filesystem.items()
+    )
     assignments = [
         "default_permissions=" + json.dumps(profile_id),
         'approval_policy="never"',
         *(f"features.{key}=false" for key in FEATURES),
-        *(
-            f"permissions.{profile_id}.filesystem.{json.dumps(path, ensure_ascii=False)}={json.dumps(value)}"
-            for path, value in filesystem.items()
-        ),
+        f"permissions.{profile_id}.filesystem={{{filesystem_table}}}",
         f"permissions.{profile_id}.network.enabled=false",
         "mcp_servers.candidate.command=" + json.dumps(binding.candidate_command[0]),
         "mcp_servers.candidate.args=" + json.dumps(binding.candidate_command[1:]),

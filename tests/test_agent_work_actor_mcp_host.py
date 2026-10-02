@@ -932,3 +932,459 @@ def test_invalid_explicit_host_limits_never_become_authority(fault: str) -> None
         else:
             replace(valid, cleanup_timeout_seconds=float("inf"))
     assert str(caught.value) == "actor_limits_invalid"
+
+
+def _permission_fixture() -> tuple[
+    worker.actor_mcp_host.ActorBinding,
+    tuple[worker.actor_mcp_host.ProtectedPathSnapshot, ...],
+]:
+    root = Path("/synthetic.issue418")
+    binding = worker.actor_mcp_host.ActorBinding(
+        role="judge",
+        issue_iid=418,
+        candidate_tree="b" * 40,
+        checkout=root / "checkout",
+        scoped_home=root / "scoped",
+        trusted_checkout=root / "trusted",
+        source_home=root / "source",
+        controller_state_root=root / "state",
+        executable="/fixture/codex",
+        candidate_socket=root / "candidate.sock",
+        nonce="synthetic-nonce",
+        candidate_command=(
+            "/fixture/uv",
+            "run",
+            "--project",
+            str(root / "trusted"),
+            "--frozen",
+            "python",
+            "-I",
+            "-m",
+            "agent_work.mcp_server",
+        ),
+    )
+    protected = tuple(
+        worker.actor_mcp_host.ProtectedPathSnapshot(
+            lexical_path=path,
+            canonical_path=path,
+            device=None,
+            inode=None,
+            mode=None,
+            symlink_target=None,
+            present=False,
+        )
+        for path in (
+            binding.scoped_home / "auth.json",
+            binding.source_home / "auth.json",
+            binding.controller_state_root,
+        )
+    )
+    return binding, protected
+
+
+def _assert_filesystem_table(plan: worker.actor_mcp_host.ActorPermissionPlan) -> None:
+    assignments = plan.configuration_tokens[1::2]
+    key = f"permissions.{plan.profile_id}.filesystem"
+    filesystem_assignments = [value for value in assignments if value.startswith(key)]
+    assert len(filesystem_assignments) == 1
+    assignment_key, value = filesystem_assignments[0].split("=", 1)
+    assert assignment_key == key
+    assert value.startswith("{") and value.endswith("}")
+    expected = cast(
+        dict[str, object], security(plan.binding, plan.protected_paths)["permissions"]
+    )
+    assert tomllib.loads("filesystem=" + value)["filesystem"] == expected["filesystem"]
+    config = tomllib.loads("\n".join(assignments))
+    permission = config["permissions"][plan.profile_id]
+    assert permission == {key: expected[key] for key in ("filesystem", "network")}
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "dotted.path",
+        "with space",
+        'quote"path',
+        "back\\slash",
+        "BMP-é",
+        "nonBMP-😀",
+        "DEL-\x7f",
+    ],
+)
+def test_permission_cli_filesystem_table_round_trips_protected_aliases(
+    suffix: str,
+) -> None:
+    binding, protected = _permission_fixture()
+    alias = worker.actor_mcp_host.ProtectedPathSnapshot(
+        lexical_path=Path("/synthetic.issue418") / suffix,
+        canonical_path=Path("/canonical.issue418") / suffix,
+        device=7,
+        inode=11,
+        mode=0o120600,
+        symlink_target=str(Path("/canonical.issue418") / suffix),
+        present=True,
+    )
+    plan = worker.actor_mcp_host.build_actor_permission_plan(
+        binding, (*protected, alias)
+    )
+    _assert_filesystem_table(plan)
+
+
+@settings(max_examples=12)
+@given(suffix=st.text(alphabet='abcXYZ. "\\é中😀\x7f', min_size=1, max_size=16))
+def test_permission_cli_generated_valid_paths_keep_exact_filesystem_map(
+    suffix: str,
+) -> None:
+    binding, protected = _permission_fixture()
+    absent = replace(
+        protected[0],
+        lexical_path=Path("/generated") / ("path-" + suffix),
+        canonical_path=Path("/resolved") / ("path-" + suffix),
+    )
+    plan = worker.actor_mcp_host.build_actor_permission_plan(
+        binding, (*protected, absent)
+    )
+    _assert_filesystem_table(plan)
+
+
+@pytest.mark.parametrize(
+    "character", ["\x00", "\t", "\n", "\x1f", chr(0xD800), chr(0xDFFF)]
+)
+@pytest.mark.parametrize("path_field", ["lexical_path", "canonical_path"])
+def test_permission_cli_invalid_paths_refuse_without_broadening_valid_plan(
+    character: str,
+    path_field: str,
+) -> None:
+    binding, protected = _permission_fixture()
+    extra = replace(
+        protected[0],
+        lexical_path=Path("/invalid-lexical/extra"),
+        canonical_path=Path("/invalid-canonical/extra"),
+    )
+    invalid = replace(extra, **{path_field: Path("/invalid") / ("path-" + character)})
+    with pytest.raises(
+        worker.actor_frontend.ActorHostError, match="^actor_plan_invalid$"
+    ):
+        worker.actor_mcp_host.build_actor_permission_plan(
+            binding, (*protected, invalid)
+        )
+    _assert_filesystem_table(
+        worker.actor_mcp_host.build_actor_permission_plan(binding, protected)
+    )
+
+
+def test_permission_cli_serialization_preserves_fixed_fingerprint_and_detects_drift() -> (
+    None
+):
+    binding, protected = _permission_fixture()
+    plan = worker.actor_mcp_host.build_actor_permission_plan(binding, protected)
+    assert (
+        plan.fingerprint
+        == "6831b65045908225be47025247f10f799f9f89c2c6fbd0023ab4403aa76e3c73"
+    )
+    assert plan.profile_id == "agent-work-" + plan.fingerprint
+    for changed_binding in (
+        replace(binding, role="router"),
+        replace(binding, issue_iid=419),
+        replace(binding, candidate_tree="c" * 40),
+    ):
+        assert (
+            worker.actor_mcp_host.build_actor_permission_plan(
+                changed_binding, protected
+            ).fingerprint
+            != plan.fingerprint
+        )
+    changed_metadata = replace(
+        protected[0], present=True, device=7, inode=11, mode=0o100600
+    )
+    assert (
+        worker.actor_mcp_host.build_actor_permission_plan(
+            binding, (changed_metadata, *protected[1:])
+        ).fingerprint
+        != plan.fingerprint
+    )
+    _assert_filesystem_table(plan)
+
+
+class _ProvenanceTranscript(TranscriptProcess):
+    """Inject provenance faults only at the raw external response producer."""
+
+    def __init__(self, root: Path, *, phase: str = "", fault: str = "") -> None:
+        super().__init__(root, phase=phase, fault=fault)
+        self.user_config_path = root / "user-config.toml"
+        self.config_payloads: list[dict[str, object]] = []
+
+    def emit(self, value: dict[str, object]) -> None:
+        result = value.get("result")
+        if (
+            isinstance(result, dict)
+            and "origins" in result
+            and self.fault.startswith("provenance:")
+        ):
+            phase = "config/read" if self.config_reads == 1 else "recheck"
+            if self.phase == phase:
+                result = cast(dict[str, object], result)
+                if self.fault == "provenance:origin":
+                    origins = cast(dict[str, dict[str, object]], result["origins"])
+                    origins["permissions"] = {
+                        **origins["permissions"],
+                        "name": {
+                            "type": "user",
+                            "file": str(self.user_config_path),
+                            "profile": None,
+                        },
+                    }
+                else:
+                    layers = cast(list[dict[str, object]], result["layers"])
+                    layers[0]["disabledReason"] = "PRIVATE_LAYER"
+        if isinstance(result, dict) and "origins" in result:
+            self.config_payloads.append(cast(dict[str, object], result))
+        super().emit(value)
+
+
+class _PermissionAuditFixture(_ActorFixture):
+    """Exercise real host gates with injected command and descriptor producers."""
+
+    def __init__(self, root: Path, *, fault: str = "", phase: str = "") -> None:
+        super().__init__(root)
+        self.process.dispose()
+        self.process = _ProvenanceTranscript(root / "process", phase=phase, fault=fault)
+        self.process.security = security(self.binding, self.protected)
+        self.audit_fault = fault
+
+    def run_command(self, command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        result = super().run_command(command, **kwargs)
+        if command[-2:] == ("features", "list"):
+            if self.audit_fault == "feature_exit":
+                return CommandResult(1, result.stdout, "PRIVATE_FEATURE")
+            if self.audit_fault.startswith("feature:"):
+                feature = self.audit_fault.removeprefix("feature:")
+                return CommandResult(
+                    0,
+                    result.stdout.replace(
+                        feature + " stable false", feature + " stable true"
+                    ),
+                    "PRIVATE_FEATURE",
+                )
+        elif self.audit_fault == "sandbox_exit":
+            return CommandResult(1, result.stdout, "PRIVATE_SANDBOX")
+        elif self.audit_fault.startswith("privacy:"):
+            flag = self.audit_fault.removeprefix("privacy:")
+            return CommandResult(
+                0, json.dumps({**SAFE_PRIVACY, flag: False}), "PRIVATE_SANDBOX"
+            )
+        return result
+
+
+@pytest.mark.parametrize("phase", ["config/read", "recheck"])
+def test_schema_valid_user_origin_reaches_semantic_guard_on_both_reads(
+    tmp_path: Path, phase: str
+) -> None:
+    control = _PermissionAuditFixture(tmp_path / "control")
+    subject = _PermissionAuditFixture(
+        tmp_path / "subject", fault="provenance:origin", phase=phase
+    )
+    try:
+        assert isinstance(control.process, _ProvenanceTranscript)
+        assert isinstance(subject.process, _ProvenanceTranscript)
+        control_result = control.run()
+        assert (
+            control_result.returncode,
+            control_result.stdout,
+            control_result.stderr,
+        ) == (
+            0,
+            "review complete",
+            "",
+        )
+        assert control.process.config_reads == 2
+        for payload in control.process.config_payloads:
+            worker.actor_mcp_host.ActorConfigReadEvidence.model_validate_json(
+                json.dumps(payload)
+            )
+            worker.actor_mcp_host.validate_actor_provenance(control.plan, payload, {})
+        result = subject.run()
+        assert (result.returncode, result.stdout, result.stderr) == (
+            None,
+            "",
+            "actor_config_unverified",
+        )
+        assert subject.process.config_reads == (1 if phase == "config/read" else 2)
+        payload = subject.process.config_payloads[-1]
+        evidence = worker.actor_mcp_host.ActorConfigReadEvidence.model_validate_json(
+            json.dumps(payload)
+        )
+        assert evidence.origins["permissions"].name.type == "user"
+        assert all(
+            origin.name.type == "sessionFlags"
+            for key, origin in evidence.origins.items()
+            if key != "permissions"
+        )
+        assert evidence.layers[0].name.type == "sessionFlags"
+        assert evidence.layers[0].disabledReason is None
+        assert evidence.layers[0].config == evidence.config.model_dump(mode="json")
+        with pytest.raises(
+            worker.actor_frontend.ActorHostError, match="^actor_config_unverified$"
+        ):
+            worker.actor_mcp_host.validate_actor_provenance(subject.plan, payload, {})
+        for fixture in (control, subject):
+            assert len(fixture.commands) == 2
+            assert (
+                fixture.process.specs[0].argv[4:] == fixture.plan.configuration_tokens
+            )
+            assert fixture.process.waits > 0
+            assert all(
+                stream is not None and stream.closed
+                for stream in (
+                    fixture.process.stdin,
+                    fixture.process.stdout,
+                    fixture.process.stderr,
+                )
+            )
+        assert [message["method"] for message in control.process.requests] == [
+            "initialize",
+            "initialized",
+            "config/read",
+            "thread/start",
+            "config/read",
+            "turn/start",
+        ]
+        assert all(
+            message["method"] != "turn/start" for message in subject.process.requests
+        )
+    finally:
+        control.dispose()
+        subject.dispose()
+
+
+@pytest.mark.parametrize(
+    ("fault", "phase", "reason"),
+    [
+        ("", "", ""),
+        ("feature_exit", "", "actor_features_unavailable"),
+        *[
+            (f"feature:{feature}", "", "actor_features_unavailable")
+            for feature in SAFE_FEATURES
+        ],
+        ("sandbox_exit", "", "actor_privacy_unavailable"),
+        *[
+            (f"privacy:{flag}", "", "actor_privacy_unavailable")
+            for flag in SAFE_PRIVACY
+        ],
+        *[
+            (f"provenance:{fault}", phase, "actor_config_unverified")
+            for fault in ("origin", "layer")
+            for phase in ("config/read", "recheck")
+        ],
+    ],
+)
+def test_permission_cli_public_session_preserves_audits_provenance_and_cleanup(
+    tmp_path: Path,
+    fault: str,
+    phase: str,
+    reason: str,
+) -> None:
+    control = _PermissionAuditFixture(tmp_path / "control")
+    subject = _PermissionAuditFixture(tmp_path / "subject", fault=fault, phase=phase)
+    try:
+        control_result = control.run()
+        assert (
+            control_result.returncode,
+            control_result.stdout,
+            control_result.stderr,
+        ) == (0, "review complete", "")
+        methods = [message["method"] for message in control.process.requests]
+        assert methods == [
+            "initialize",
+            "initialized",
+            "config/read",
+            "thread/start",
+            "config/read",
+            "turn/start",
+        ]
+        assert len(control.commands) == 2
+        assert control.process.specs[0].argv[4:] == control.plan.configuration_tokens
+        assert control.process.waits > 0
+        assert all(
+            stream is not None and stream.closed
+            for stream in (
+                control.process.stdin,
+                control.process.stdout,
+                control.process.stderr,
+            )
+        )
+        result = subject.run()
+        if reason:
+            assert (result.returncode, result.stdout, result.stderr) == (
+                None,
+                "",
+                reason,
+            )
+            assert all(
+                message["method"] != "turn/start"
+                for message in subject.process.requests
+            )
+            if reason in ("actor_features_unavailable", "actor_privacy_unavailable"):
+                assert subject.process.specs == []
+                assert subject.process.requests == []
+                assert len(subject.commands) == (
+                    1 if reason == "actor_features_unavailable" else 2
+                )
+            else:
+                assert subject.process.waits > 0
+                assert subject.process.config_reads == (
+                    1 if phase == "config/read" else 2
+                )
+                assert all(
+                    stream is not None and stream.closed
+                    for stream in (
+                        subject.process.stdin,
+                        subject.process.stdout,
+                        subject.process.stderr,
+                    )
+                )
+        else:
+            assert (result.returncode, result.stdout, result.stderr) == (
+                0,
+                "review complete",
+                "",
+            )
+            assert (
+                subject.process.specs[0].argv[4:] == subject.plan.configuration_tokens
+            )
+            assert subject.process.waits > 0
+        _assert_filesystem_table(control.plan)
+    finally:
+        control.dispose()
+        subject.dispose()
+
+
+@settings(max_examples=12)
+@given(
+    codepoint=st.one_of(
+        st.integers(min_value=0, max_value=31),
+        st.integers(min_value=0xD800, max_value=0xDFFF),
+    )
+)
+def test_permission_cli_generated_forbidden_characters_refuse_before_valid_control(
+    codepoint: int,
+) -> None:
+    binding, protected = _permission_fixture()
+    extra = replace(
+        protected[0],
+        lexical_path=Path("/generated-invalid-lexical/extra"),
+        canonical_path=Path("/generated-invalid-canonical/extra"),
+    )
+    for path_field in ("lexical_path", "canonical_path"):
+        invalid = replace(
+            extra, **{path_field: Path("/invalid") / ("path-" + chr(codepoint))}
+        )
+        with pytest.raises(
+            worker.actor_frontend.ActorHostError, match="^actor_plan_invalid$"
+        ):
+            worker.actor_mcp_host.build_actor_permission_plan(
+                binding, (*protected, invalid)
+            )
+    _assert_filesystem_table(
+        worker.actor_mcp_host.build_actor_permission_plan(binding, protected)
+    )
