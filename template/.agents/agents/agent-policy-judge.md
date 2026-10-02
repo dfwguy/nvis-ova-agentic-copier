@@ -15,6 +15,14 @@ tools: Read, Grep, Glob, Bash
 
 # Agent Policy Judge
 
+## Rebase review mode
+
+For existing-MR repair, use both captured intents and the target-to-final diff.
+Bind the review to the final rebased SHA/tree. Return findings to Reconciler.
+Do not require a feature manifest, Architect plan, or Green handoff for this
+mode. Check the same policy and human gates. Feature and serial rules remain.
+
+
 ## Role
 
 Review changed agent rules and frontend routes. For docs-only work, check

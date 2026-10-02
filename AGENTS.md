@@ -38,10 +38,13 @@ Activate it through `$router`.
    behavior or an interface. It cannot affect dependencies or configuration.
    It cannot affect security or workflow policy. Agent-policy changes are never
    trivial. Mixed or uncertain work is coding.
-4. For every non-trivial change, activate the exact `$router` skill.
+4. For new non-trivial work, activate the exact `$router` skill.
    Router owns lane selection. It owns fixed global live-slot admission. It
    also owns delegation and correction. It owns final decisions and detailed
    workflow contracts. Do not infer a skill from a display name.
+   `$reconcile-merge-request` is the existing-MR repair exception: Reconciler
+   rebases, validates the final result, and updates the same MR without
+   Architect, Red, or Green. Return new scope or unclear intent to Router.
 5. Every repository mutation follows `$git-flow`. Work stays on a feature
    branch and reaches human review through an MR. Never approve or merge.
 
@@ -53,7 +56,7 @@ condition is false. The supported frontends do not all support `@...` imports.
 | Condition | Read or load | Timing |
 |---|---|---|
 | The CONTRIBUTING check fails | `$repository-setup` | Before any other repository work. |
-| A non-trivial change | `$router` | Before design, delegation, or mutation; Router owns lane selection and all delegated workflow phases below. |
+| A non-trivial new change | `$router` | Before design, delegation, or mutation; Router chooses the lane and roles. MR repair uses `$reconcile-merge-request` without feature design or TDD stages. |
 | Any Git or GitLab access, including read-only commands | `$git-flow` | Before the first such access or command; retain through publication as applicable. |
 | Markdown files | `.agents/guidance/markdown.md` | Before editing or reviewing Markdown |
 | A host issues an opt-in read-only MCP role profile | `.agents/guidance/read-only-mcp.md` | Before using that profile's tools |

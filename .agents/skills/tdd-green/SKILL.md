@@ -21,6 +21,8 @@ read and follow [the role instructions](../../agents/tdd-green.md). That file is
 role-reference material. This directory is the shared skill entry point for
 Claude Code, Codex, and Pi.
 
+Existing-MR rebases use `$reconcile-merge-request` and Reconciler, not Green.
+
 ## Model selection
 
 Use this skill's `metadata.model-tier`. The live Router resolves the

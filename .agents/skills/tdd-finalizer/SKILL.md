@@ -20,8 +20,8 @@ Use this portable skill for finalization. Read and follow [the role
 instructions](../../agents/tdd-finalizer.md) before acting. That file defines
 the role. This skill works with Claude Code, Codex, and Pi.
 Use the Judge handoff. Check each item. Keep the staged tree the same. Give a
-clear receipt. Require the accepted Red checkpoint. Require Test Judge's
-approval of the final Red-to-Green Git diff.
+clear receipt. Normal feature TDD requires the accepted Red checkpoint and
+Test Judge approval of the final Red-to-Green Git diff.
 
 During normal interactive Green finalization, invoke
 `agent-work interactive-commit verify`
@@ -32,14 +32,10 @@ controller-owned Green SHA, exact committed tree, retained Red proof, clean
 state, and opaque validation evidence instead of private JUnit paths. Do not
 add a check or change the validated commit.
 
-For coding reconciliation, Main invokes
-`agent-work reconcile-commit commit --apply` on the Judge-approved staged tree
-and pending merge state. Captured old source is first and exact target is
-second. Main supplies freshly fetched
-ref proof. Finalizer checks it locally without remote or GitLab calls, then
-invokes `agent-work reconcile-commit verify` read-only for the resulting commit,
-clean state, exact parents and tree, and unchanged Red ref. It separately
-compares the commit message with the reviewed message file.
+For existing-MR repair, use the role's rebase mode. Check the final rebased
+SHA/tree, clean state, target ancestry, current native proof and independent
+end-result reviews. Require no Red checkpoint or ordered merge. Do not create
+a commit or run another hook. Return the read-only verdict to Reconciler.
 
 ## Model selection
 

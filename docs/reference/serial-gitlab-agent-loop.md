@@ -348,6 +348,12 @@ permission.
 
 ### Coding reconciliation commit
 
+This is the explicit legacy ordered-merge API. It remains available to callers
+that prepare its pending merge and required proof. Default interactive MR repair
+uses Reconciler and rebase instead. The serial-controller descriptions in this
+reference describe implemented behavior; they do not provide a serial rebase
+capability.
+
 After review, the branch still points to the saved source commit. The merge
 remains pending. `reconcile-commit commit` checks the branch, source and target
 commits, Red ref, staged Judge tree, and worktree. It rejects changed values,

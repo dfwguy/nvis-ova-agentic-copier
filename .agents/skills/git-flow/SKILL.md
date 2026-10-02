@@ -19,24 +19,24 @@ metadata:
 Every change must use a feature branch. Open or update an MR. A publication
 failure blocks completion.
 
-All work uses one flow. This includes full TDD work and trivial edits. Branch
+New work uses one flow. This includes full TDD work and trivial edits. Branch
 from `main`, do the work, commit, push, then use `glab` to open or update an
 MR. Publication hands work to a human reviewer. Waiting for a merge is not
 part of the active run. It does not block unrelated work. **There is no
 direct-to-`main` path.** Setup protects `main`. GitLab rejects pushes to it and
 requires approval to merge. Even a one-line typo fix needs an MR. For
 normal interactive Green work, Judge asks the trusted boundary to make one
-Green commit. Finalizer checks it without edits. For a pending coding merge,
-Judge checks the staged tree before review. Main makes the ordered two-parent
-commit through the trusted boundary. Finalizer checks it without edits. This
-main-thread skill
-owns only the push and MR update. Content or trivial work keeps its normal
+Green commit. Finalizer checks it without edits.
+MR repair uses Reconciler's rebase route. Validate and review the
+final rebased SHA, then publish that SHA to the same MR with an explicit source
+lease. Rebase already creates commits; do not make a second validation commit.
+This main-thread skill owns push and MR readback.
+Content or trivial work keeps its normal
 main-thread commit. **Do not spawn a subagent for the main-thread publication
 steps below.** They are short, local-only, or one remote command.
 
-Judge owns the normal interactive Green commit and its hook. A pending
-coding merge keeps its staged tree through review; Main's trusted two-parent
-commit runs the hook. In serial coding, Judge requests the controller-owned
+Judge owns the normal interactive Green commit and its hook. In serial
+coding, Judge requests the controller-owned
 candidate commit before review, and the runner publishes that same verified
 Green SHA. Content work keeps its own controller path. Only test-only Red
 commits use `--no-verify`. Finalizer checks the resulting commit without
@@ -116,6 +116,11 @@ route/credential or GitLab API config. This blocks completion. A working
 > branch name.
 
 ### Session boundary
+
+Existing-MR repair uses a fresh preserved checkout from the exact selected
+source SHA under `$reconcile-merge-request`. It rebases onto the current target
+and retains old checkouts and refs. Do not reuse a cancelled pending merge.
+The ordinary feature-branch steps below do not replace that selection.
 
 At session start, inspect the current branch before using it for work. A serial
 work-item runner task belongs to its required `agent/issue-<IID>` branch. Stay
@@ -281,8 +286,11 @@ commands are local-only and sandbox-safe.
   the main agent may edit and commit on the feature branch without TDD
   subagents. Pre-commit hooks still run at commit time. Quality gates remain.
 
-Both paths make a local feature-branch commit. **Both then go to Step 3 (push +
-MR).** The trivial path skips TDD subagents, not the MR.
+New feature paths make a local feature-branch commit and then go to Step 3.
+Existing-MR rebase repair follows `$reconcile-merge-request`: publish the
+checked rebased tip with its exact source lease. Do not add a commit.
+Use the lease route for that repair. The trivial path skips TDD subagents,
+not the MR.
 
 ## Step 3: Publish (push + MR)
 
@@ -363,6 +371,15 @@ preflight. Get one user approval for each remote-touching command.
    unsafe/unvalidated content or ambiguous publication authority.
 
 3b. **MR exists — push, then preserve or update its draft handoff**:
+
+   For a rebased repair, Reconciler supplies the exact validated SHA/tree,
+   current source and target proof. Check the same MR identity. Require no pending
+   auto-merge. Use the explicit source-branch `--force-with-lease` bound to its
+   captured old source SHA. Recheck both refs before push. Verify the same MR
+   and new remote SHA afterward, then require fresh full CI. Do not create a
+   replacement MR or another commit. The ordinary feature update example below
+   applies when history has not been rebased.
+
    ```bash
    source_branch="$(git rev-parse --abbrev-ref HEAD)"
    selected_mr_json="$(glab api --hostname "$GITLAB_HOST" \

@@ -48,11 +48,9 @@ validation proof. Do not request controller-private snapshot paths. Delegate
 `$nonfunctional-review` with this source-bound evidence. Return the joined
 handoff to Green before specialist review.
 
-For reconciliation, distinguish retained Red-to-source provenance from fresh
-three-way merge proof for the joined tree. While the merge is pending, run
-`agent-work validation run --candidate-tree <staged-tree> --apply`. It checks
-the staged tree without a commit. Main later commits the approved two-parent
-merge. Finalizer verifies it read-only.
+For existing-MR repair, use the role's rebase mode. Validate the final SHA/tree
+with the unchanged full hook; create no commit and require no Red checkpoint.
+Return native and timing results to Reconciler.
 
 ## Model selection
 

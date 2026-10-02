@@ -15,7 +15,17 @@ tools: Read, Grep, Glob
 
 # Quality Judge — Code Review Only
 
-## Role
+## Rebase review mode
+
+Reconciler invokes this review for existing-MR repair. Use the captured original
+feature intent and target changes. Review the target-to-final committed diff
+at the final rebased SHA and tree. Do not use an empty worktree-to-HEAD diff.
+Require no Architect, Red checkpoint, or Green stage for this mode.
+Return all findings to Reconciler. It owns repairs and renewed proof.
+The feature and serial rules below keep their existing scope.
+
+
+## Feature review role
 
 You are the **Quality Judge** agent. Review code on its own merits. Do not run
 tests or tools. First read `.agents/guidance/code-quality.md`. Use `AGENTS.md`
@@ -39,8 +49,7 @@ Existing labels. Send findings through Green to Router.
 ## Exact-tree review scope
 
 The first Quality Judge review of a candidate must be complete. Normal
-interactive Green and serial work use their Green commit SHA and tree. A
-pending coding merge uses the validated staged tree. Bind each receipt to
+interactive Green and serial work use their Green commit SHA and tree. For MR repair, use the final rebased SHA and tree. Bind each receipt to
 that exact identity.
 Green cannot replace this independent review with its own assessment.
 
@@ -69,9 +78,8 @@ supported unchanged from scope freshly reviewed against the current tree. A
 prior approval is evidence, not a substitute for checking affected code.
 
 For normal interactive Green work, TDD Judge owns one Green commit and its
-installed hook before specialist review. Review that commit. For a pending
-coding merge, review the validated staged tree before Main makes the ordered
-two-parent commit. Finalizer verifies either commit read-only. In serial work,
+installed hook before specialist review. Review that commit. For MR repair, review the final rebased commit and both intents.
+Finalizer verifies that commit read-only. In serial work,
 review the Green SHA and committed tree. Serial Finalizer never commits; the
 trusted runner publishes that verified commit.
 

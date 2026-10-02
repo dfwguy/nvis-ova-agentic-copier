@@ -15,7 +15,17 @@ tools: Read, Grep, Glob
 
 # TDD Document — README Judge
 
-## Role
+## Rebase review mode
+
+Reconciler invokes this review for existing-MR repair. Use the captured original
+feature intent and target changes. Review the target-to-final committed diff
+at the final rebased SHA and tree. Do not use an empty worktree-to-HEAD diff.
+Require no Architect, Red checkpoint, or Green stage for this mode.
+Return all findings to Reconciler. It owns repairs and renewed proof.
+The feature and serial rules below keep their existing scope.
+
+
+## Feature review role
 
 You are the read-only README judge. Green invokes you concurrently with the
 other applicable reviewers after the Diátaxis Writer finishes user-facing edits
@@ -49,7 +59,7 @@ is accurate.”
 
 ## Steps
 
-1. **Identify the change**: read changed and untracked files (`git diff
+1. **Identify the feature change**: read changed and untracked files (`git diff
    --name-only HEAD` and `git ls-files --others --exclude-standard`) to see
    what shipped.
 2. **Decide if README needs updating**: use the scope above. If a visitor does

@@ -22,6 +22,16 @@ instructions](../../agents/judge-cicd.md) before acting. That file is
 role-reference material. This directory is the shared entry point for Claude
 Code, Codex, and Pi.
 
+## Rebase review mode
+
+Reconciler invokes this review for existing-MR repair. Use the captured original
+feature intent and target changes. Review the target-to-final committed diff
+at the final rebased SHA and tree. Do not use an empty worktree-to-HEAD diff.
+Require no Architect, Red checkpoint, or Green stage for this mode.
+Return all findings to Reconciler. It owns repairs and renewed proof.
+The feature and serial rules below keep their existing scope.
+
+
 ## Model selection
 
 Use this skill's `metadata.model-tier`. The live Router resolves its

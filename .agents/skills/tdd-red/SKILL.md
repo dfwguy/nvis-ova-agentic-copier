@@ -20,9 +20,9 @@ Use this portable skill for test writing. Read and follow
 [the role instructions](../../agents/tdd-red.md) before acting. That file
 defines the role. This skill works with Claude Code, Codex, and Pi.
 
-Reconciliation reuses and mechanically re-proves an exact retained authentic
-Red checkpoint as the Red preparation receipt; it never delegates a fresh Test
-Writer or writes Red evidence retrospectively.
+Existing-MR repair uses Reconciler and `$reconcile-merge-request`, not Red.
+It needs no old checkpoint or original Red receipt to enter that route.
+Preserve old refs and history; never create proof after the fact.
 
 ## Model selection
 
