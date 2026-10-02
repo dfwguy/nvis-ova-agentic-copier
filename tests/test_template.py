@@ -9,13 +9,16 @@
 # its affiliates is strictly prohibited.
 """Tests for the copier template."""
 
+import importlib.util
 import json
 import os
 import shutil
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree
 
 import copier
 import pytest
@@ -3181,6 +3184,8 @@ esac""",
     "relative_path",
     (
         "src/agent_work/__init__.py",
+        "src/agent_work/core/__init__.py",
+        "src/agent_work/core/junit.py",
         "src/agent_work/candidate_boundary.py",
         "src/agent_work/classification.py",
         "src/agent_work/credential_rotation.py",
@@ -3373,3 +3378,37 @@ def test_template_executable_mirrors_match_root(
         assert (project_root / relative_path).read_bytes() == (
             template_dir / relative_path
         ).read_bytes()
+
+
+@pytest.mark.parametrize(
+    ("raw", "count", "reason"),
+    (
+        (b'<testsuite tests="2" failures="1" errors="0"/>', 2, None),
+        (b'<testsuite tests="-1"/>', None, "invalid_count"),
+        (b"<testsuite>", None, "invalid_xml"),
+    ),
+)
+def test_generated_core_public_parser_import_and_behavior(
+    generated_project: Path, raw: bytes, count: int | None, reason: str | None
+) -> None:
+    package = "_generated_agent_work_core_contract"
+    location = generated_project / "src/agent_work/__init__.py"
+    spec = importlib.util.spec_from_file_location(
+        package, location, submodule_search_locations=[str(location.parent)]
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[package] = module
+    try:
+        spec.loader.exec_module(module)
+        junit = importlib.import_module(f"{package}.core.junit")
+        facts = junit.parse_junit_evidence(
+            raw, serial=False, parse_xml=ElementTree.fromstring
+        )
+        assert facts.test_count == count
+        assert facts.unusable_reason == reason
+        assert facts.failure_counts == ((1, 0) if count is not None else None)
+    finally:
+        for name in tuple(sys.modules):
+            if name == package or name.startswith(f"{package}."):
+                del sys.modules[name]
