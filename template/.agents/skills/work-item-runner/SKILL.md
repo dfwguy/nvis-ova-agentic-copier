@@ -65,12 +65,11 @@ that design child's context. Router receives the final reviewed Sol plan and
 unresolved blockers. Mixed or uncertain work uses coding. Activate exact
 skill IDs; do not infer skills from display names.
 
-The executable worker prompt still tells the legacy workflow Architect to
-receive and combine proposals. It is incompatible with this split; this prose
-does not migrate or activate the live serial route.
+Require the reviewed canonical worker launch to activate `$router` through
+`.agents/skills/router/SKILL.md` before untrusted issue data.
 If this session starts with the incompatible legacy worker prompt, stop.
-Return the conflict to Router/Main. Resume the serial route only after an
-independently reviewed executable migration.
+Return the conflict to Router/Main. Resume the serial route only after
+independent review confirms the executable canonical Router launch.
 Existing executable
 `$architect` receipt keys still identify the workflow Router. Keep those wire
 keys, controller records, required fields, and checks unchanged. Do not claim

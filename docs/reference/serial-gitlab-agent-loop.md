@@ -5,7 +5,7 @@ summary: Look up loop commands, states, data, and limits.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-10-01
+last_reviewed: 2026-10-02
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to prepare capacity evidence before a worker launch.
@@ -428,7 +428,7 @@ policy and native-hook refusals above still apply.
 
 #### Optional Architect risk intent
 
-The live Architect may include `architect_risk_intent` in
+Router may include Architect's advisory `architect_risk_intent` in
 `red_checkpoint_request`. It records concrete state or protocol risks.
 Green can use them for later planning. The same typed value appears in the
 controller-owned `RedCheckpointEvidence` after acceptance. It is nested in the Red request,
@@ -1848,14 +1848,14 @@ Use this note to review the shown work.
 | First rollout | Has no sidecar checkpoint for each role or workflow stage. |
 | Legacy phase-ledger value | Finishes its recorded route. |
 | New work | Uses `WORKFLOW`. |
-| Approved design | Architect gives it to Red first. After the accepted Red checkpoint, the conditional Agent-policy Writer completes portable policy work or returns N/A. Green and the Diátaxis Writer then run concurrently. |
+| Approved design | Router gives Architect's reviewed plan to Red first. After the accepted Red checkpoint, the conditional Agent-policy Writer completes portable policy work or returns N/A. Green and the Diátaxis Writer then run concurrently. |
 | Writer scope | Red changes only `tests/`. Green changes code and tests. The Diátaxis Writer changes only `docs/`, `README.md`, and their declared portable `template/` mirrors. The Agent-policy Writer changes only `AGENTS.md`, `.agents/**`, and their declared portable `template/` mirrors. |
-| Before validation | Architect waits for every applicable receipt, or the exact not-applicable record. Green and the Diátaxis Writer must both stop editing. Ordinary serial coding requests controller staging and the Green commit through the private candidate socket. A pending target merge validates its joined staged tree before the ordered two-parent commit. In interactive work, Main stages the combined work and records its tree ID. |
+| Before validation | Router waits for every applicable receipt, or the exact not-applicable record. Green and the Diátaxis Writer must both stop editing. Ordinary serial coding requests controller staging and the Green commit through the private candidate socket. A pending target merge validates its joined staged tree before the ordered two-parent commit. In interactive work, Main stages the combined work and records its tree ID. |
 | Green | Implements code and tests, checks the final interface with the writer, and consolidates review feedback. It never changes docs, README, or agent-policy paths or their mirrors. |
 | Before specialist review | Ordinary serial coding requires the verified Green SHA and committed tree. A pending target merge instead uses the validated joined tree and exact source and target identities. Each applicable specialist, including `$license-checker`, reviews that same candidate. Consistency Judge uses controller-owned reads when copied facts changed. |
 | Findings | Green combines all initial findings. |
-| Policy correction | Goes through the still-live Architect to the Agent-policy Writer. Green cannot fix policy. |
-| Final decision | Before Architect makes it, every changed candidate follows the new Judge, applicable review, and Finalizer sequence. |
+| Policy correction | Goes through the still-live Router to the Agent-policy Writer. Green cannot fix policy. |
+| Final decision | Before Router makes it, every changed candidate follows the new Judge, applicable review, and Finalizer sequence. |
 
 For content work, the Documentation Writer is the sole editor. After it stops,
 the controller stages and reads the candidate. Consistency Judge uses that
@@ -2073,14 +2073,14 @@ worker process, are never controller state or a handoff result.
 | Trusted runner | Before changing state, freshly check the nonce, ledger, configured numeric project, revision, branch, source SHA, state, phase, accepted envelope, observed changed paths, and applicable controller-owned checkpoints. |
 | Broker result | `AgentInvoker` accepts one request, then at most one corrected request after a canonical rejection. The broker keeps an accepted result only in controller memory. |
 | Rejected request | A missing, malformed, oversized, late, deleted, raced, or extra request rejects the result. The durable diagnostic is a bounded constant that identifies the stage and category. The controller suppresses raw builder standard output and standard error. Diagnostics never retain raw exceptions, output, paths, identities, secrets, payloads, or worker data. |
-| Coding final audit | Name Architect, Red, Diátaxis Writer, the conditional Agent-policy Writer, Green, all applicable reviews including the initial `$license-checker`, and Finalizer. |
+| Coding final audit | Name Router, Architect, Red, Diátaxis Writer, the conditional Agent-policy Writer, Green, all applicable reviews including the initial `$license-checker`, and Finalizer. |
 | License receipt | Finalizer needs a current approving license receipt for the final in-scope diff. During correction, rerun the checker only if a maintained file in its checked scope changed. A violation cannot be waived or marked not applicable. |
-| Policy finding | Send it through Architect to the Agent-policy Writer, not Green. |
+| Policy finding | Send it through Router to the Agent-policy Writer, not Green. |
 | Content work | Keep its separate role set. |
 
 ### Live-agent capacity launch contract
 
-Every Architect launch has one fixed global requirement: `12` live slots for
+Every Router launch has one fixed global requirement: `12` live slots for
 coding and `5` for content. This includes terminal, normal serial,
 retained-worktree retry, and systemd launches. Check before delegation, fanout,
 or a worktree change.
@@ -2121,31 +2121,36 @@ the worker's capacity result through the broker; it does not measure the
 frontend's live slots itself.
 
 When the wait is due, the same issue starts a fresh session. It checks current
-capacity and reruns the three Architect proposals. Dirty work, a saved Red
+capacity and delegates a fresh Architect design session. Dirty work, a saved Red
 checkpoint, a changed identity, or another `needs_human` cause follows the
 existing safe recovery route.
 
-### Architect proposal gate
+### Router launch and design
 
-One Architect owns each fresh session. Before a child can edit files, it starts
-three read-only proposals at once: one `$architect-proposal-balanced` and two
-separate `$architect-proposal-fast` children with high reasoning effort. They
-work alone. Architect gets all three, checks them, and picks one design. It
-stays the router and issues the sole formal `$architect` receipt. This gate
-has no Architect Judge.
+The prompt starts with `$router` and its checked skill at
+`.agents/skills/router/SKILL.md`. This comes before the saved record or
+untrusted issue, failed-job, and feedback data. Router owns intake, lane
+choice, slot checks, writer release, fixes, and the final choice. Legacy
+`$architect` receipt and advisory keys and `architect_risk_intent` keep their
+protocol names.
 
-| Proposal property | Contract |
-| --- | --- |
-| Candidate authority | A candidate cannot delegate, edit files, or call program boundaries. |
-| Output | Candidate prose is AI-to-AI context. It is not a role receipt or controller state. |
-| Completion | Get all three before starting a child that edits. If one fails, check the cause and try one fresh child with the same skill and tier. Stop before any edit if one is still missing. |
-| Fresh session | Run the gate in each fresh session, including serial Red-first and resumed segments. Earlier prose does not grant approval. |
+Router checks intake and slots, then asks one read-only `$architect` for a
+plan through its checked skill. Architect starts one Sol base plan and two
+Luna plans at once. It keeps the Sol design and uses Luna to find gaps. Once
+the authors stop, three read-only peers check the plan once. Architect fixes
+clear findings. It sends Router the final plan, findings, and open blockers.
+Raw drafts stay with Architect. All design children stop before a writer
+starts. Safety or scope gaps block writer release.
+
+The prompt points to the Architect skill; it does not copy its steps. Each
+fresh session uses that design gate, including both coding segments and
+resumed work.
 
 ### Intake sizing contract
 
-At the start of a new coarse `workflow` session, the trusted wrapper delegates
-the live Architect. Before Red, documentation work, lane selection, or a
-worktree change, Architect makes one semantic sizing decision.
+At the start of a new coarse `workflow` session, the trusted wrapper activates
+Router. Before lane selection, design, delegation, Red, documentation work,
+or a worktree change, Router makes one semantic sizing decision.
 
 The table gives the allowed results. It sets the next step. Use it before work
 starts.
@@ -2254,7 +2259,7 @@ text.
 
 | Review field or verdict | Required handling |
 | --- | --- |
-| Rejected internal review | Architect and Green send it to its owning role in the session. |
+| Rejected internal review | Router and Green send it to its owning role in the session. |
 | Interruption | The runner resumes only at `WORKFLOW`. It does not guess or save a role-level checkpoint. |
 | Specialist context | Role receipts and `not applicable — <reason>` records coordinate the live AI discussion. They are not controller evidence and cannot authorize a program transition. |
 
@@ -2419,7 +2424,7 @@ it.
 | Outcome or condition | Durable handling |
 | --- | --- |
 | First workflow attempt plus at most three retries | Bounded; `retry-wait` records its deadline. Exhaustion becomes `agent::blocked`, never `agent::failed`. |
-| Clean, broker-bound pre-selection `agent_capacity_unavailable` | Keep the same issue in `RETRY_WAIT` until its deadline, without spending an ordinary retry. Recheck current capacity and the three proposal gates when due. |
+| Clean, broker-bound pre-selection `agent_capacity_unavailable` | Keep the same issue in `RETRY_WAIT` until its deadline, without spending an ordinary retry. Recheck current capacity and the current Architect design gate when due. |
 | Worker exit, timeout, malformed worker protocol, legacy invalid-receipt condition, or explicit `retryable` result | Immediately due and continued in the same activation. |
 | Transient GitLab or transport failure | Keeps retry timing. |
 | Repeated `worker_protocol_invalid`, or legacy `worker_receipt_invalid`, with the same error code and diagnostic in one coarse phase | Blocks immediately without another retry; retain the worktree, phase, and safe cause. |
