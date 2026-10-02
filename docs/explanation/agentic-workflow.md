@@ -29,8 +29,8 @@ related:
 # Why the agent workflow uses specialized roles
 
 This page explains the route from a change to a human-reviewed MR.
-`AGENTS.md` is the portable bootstrap. The live `$architect` router in
-`.agents/agents/architect.md` owns the workflow.
+`AGENTS.md` is the portable bootstrap. The live `$router` in
+`.agents/agents/router.md` owns the workflow.
 
 The route is clear. It names each role, check, and stop. Each role has one job.
 Each check has one clear aim.
@@ -41,9 +41,8 @@ contracts. Documentation and agent policy cover content-only changes. Shared
 name explains a role. The manifest's exact `$skill-id` is the only ID an agent
 may load or delegate.
 
-Architect checks capacity at launch. This check still runs after a serial
-wrapper passes preflight and starts Architect. Each lane has one fixed global
-limit: coding needs 12 live slots, while docs and agent-policy work needs 5.
+Router checks capacity before releasing a writer. Each lane has one fixed
+global limit. Coding needs 12 live slots. Docs and agent-policy work needs 5.
 Run the check before delegation, fan-out, or a worktree change.
 
 Only a trusted current report can show free global slots. It must come
@@ -56,22 +55,22 @@ retained-agent counts. Do not use current use, fresh handles, or parent and
 child space. These facts do not control admission or create a second capacity
 gate. A real delegation or tool refusal still stops work when no safe fix exists.
 
-Routing and capacity are separate. Main owns Architect. Architect owns
-Red, the Diátaxis Writer, Green, and Finalizer. Green owns Judge and applicable
-specialist reviewers. Judge owns Non-functional Reviewer. A conditional role
+Routing and capacity are separate. Main owns Router. Router owns
+the read-only Architect design child. It also owns Red, the Diátaxis Writer,
+Green, and Finalizer. Green owns Judge and applicable specialist reviewers. Judge owns Non-functional Reviewer. A conditional role
 leaves the route only when its condition is demonstrably false. Reuse needs an
 explicit, verified plan with the same owner and tier. The work must not
 overlap. It must preserve skill, parentage, concurrency, and receipt. Without
-that plan, Architect and Green start fresh for each issue.
+that plan, Router and Green start fresh for each issue.
 
 A retained worktree or ledger preserves work, not a prior capacity report. For
-interactive Architect admission, a current reported shortage causes a
+interactive Router admission, a current reported shortage causes a
 `needs_human` handoff. It names the lane, fixed limit, reported total, shortfall,
 and remedy. An absent global report is not a shortage at this boundary.
 
 The serial wrapper applies the same fixed global requirement before it starts
-Architect. This applies when a person invokes it, during normal serial work, on
-a retained-tree retry, and under systemd. A current trusted report below the
+the legacy workflow Architect. This applies to manual and systemd launches.
+It also applies to normal serial work and retained-tree retries. A current trusted report below the
 lane requirement returns `needs_human`. The wrapper continues when global
 capacity is unreported; it does not request or infer topology, retained-object,
 or owner-headroom counts. Repo files, task or issue text, settings, and saved
@@ -79,9 +78,9 @@ records cannot prove capacity.
 See [Configure agent capacity](../how-to/configure-agent-capacity.md).
 
 `AGENTS.md` sets authority and safety. It sets classification and conditional
-loading. It gives the route to `$architect`. Architect owns lane manifests. It
+loading. It gives the route to `$router`. Router owns lane manifests. It
 maps skill tiers to models, admits work, and delegates roles. Skills define
-procedure and model-tier metadata. Architect judges applicability, review
+procedure and model-tier metadata. Router judges applicability, review
 adequacy, corrections, and the final outcome. `$git-flow` owns publication.
 `$work-item-runner` owns the serial controller/worker exception.
 
@@ -89,8 +88,8 @@ The serial worker also uses `agent_work.workflow_router.route_workflow()` to
 suggest next roles and report missing, stale, or unresolved receipt evidence
 from typed workflow facts. For a new worker prompt, the controller passes its
 verified retained Red checkpoint when one exists. Without that checkpoint, the
-prompt's advisory input has an unknown lane and suggests Architect. These
-suggestions do not verify specialist receipts or change controller state.
+prompt's advisory input has an unknown lane and suggests the legacy workflow
+Architect. These suggestions do not verify specialist receipts or change controller state.
 
 An opt-in host can launch the router, judge, finalizer, or supervisor inspector
 in a separate read-only process with a small set of candidate MCP tools. Each
@@ -109,20 +108,32 @@ remains advisory.
 
 ## Architect considers three independent designs
 
-Each fresh session starts with one Architect. Before it starts a child that can
-edit files, it launches three read-only proposals at once: one
-`$architect-proposal-balanced` and two separate `$architect-proposal-fast`
-children with high reasoning effort. Each works alone. Architect reads all
-three, checks them, and chooses one design. It stays the router and owns the
-only formal `$architect` receipt. There is no separate Architect Judge.
+Router delegates design to a read-only `$architect` child. Architect starts
+three proposals together. One uses `$architect-proposal-balanced` for the Sol
+base. Two use `$architect-proposal-fast` for Luna checks at high reasoning
+effort. Each author works alone. It sends its raw draft only to Architect.
+Architect keeps the Sol base. It uses the Luna plans only to find gaps worth
+fixing. It makes the smallest needed fixes. It never blends designs.
 
-The proposal children cannot delegate, edit files, or call program boundaries.
-Their prose helps Architect decide. It is not controller state or a workflow
-receipt. Architect needs all three before it can start a child that edits. If
-one fails, it checks the cause and tries one fresh child with the same skill
-and tier. If a proposal is still missing, it stops before any edit. A resumed
-serial segment starts a fresh Architect session and repeats this gate. A serial
-Red-first segment also runs the gate before Red.
+After all authors stop, Architect sends its plan to three read-only reviewers
+at once: `$plain-language-review`, `$simplicity-judge`, and
+`$architecture-quality-judge`. It runs this pass once. It applies clear fixes
+itself, then checks the result once. It returns the final Sol-based plan to
+Router with review findings and open blockers. Raw drafts stay in Architect's
+context. They are never forwarded or stored for Router.
+
+Proposal authors stop before reviewers start. Architect and all its design
+children stop before Router releases a writer. A missing or invalid required
+proposal blocks release. So does an open safety or requirement gap.
+Router owns lane choice, admission, workflow roles, corrections, and final
+outcomes. Architect never edits the repository or starts a workflow mutator.
+
+The serial worker still uses legacy Architect names and receipt keys. Its
+prompt combines proposals in the workflow owner. Those keys and commands stay
+unchanged. The prompt does not match the Router and Architect split. Keep that
+serial route inactive. It needs a separate executable migration and review
+before use. This docs change proves no serial or read-only MCP readiness.
+Other serial docs updates remain separate follow-ups.
 
 ## Two lanes keep validation proportional
 
@@ -144,11 +155,13 @@ The controller supplies bounded, read-only evidence from that committed tree
 to Consistency Judge. The finalizer records the judge's verdict or exact
 not-applicable reason in its existing receipt. A skip needs a specific reason.
 
-Red keeps a verified failing-test boundary. In an ordinary interactive
-workflow, Red makes test-only commits with `--no-verify`. After Judge reads the
-exact staged tree, Judge requests the sole normal Green commit. Its installed
-hook runs the full suite once. Finalizer checks the committed tree and Red
-ancestry read-only. The branch retains Red and Green for a human squash merge.
+Red writes failing tests and returns direct failure evidence. In interactive
+work, Main stages the approved tests and invokes the trusted Red checkpoint
+commit. That boundary makes test-only commits with `--no-verify`. Judge then
+reads the exact staged candidate and requests the sole normal Green commit.
+Its installed hook runs the full suite once. Finalizer checks the committed
+tree and retained Red ancestry read-only. Main publishes only the verified
+Green tip, never the Red ref. A human squash merge does not replace these checks.
 
 When a coding branch needs a merge with its target, the merge stays open while
 Judge checks the exact staged tree and reviewers inspect it.
@@ -270,24 +283,26 @@ This also applies in the serial GitLab loop.
 
 ## Workflow topology
 
-The first two diagrams show the interactive workflow. The third shows the
-serial controller's boundary. The last two show later selection and recovery.
+The first two diagrams show the current interactive workflow. The third and
+fifth retain the legacy serial worker's Architect names. They describe the
+existing executable route, which must stay inactive until the separate
+migration. The fourth shows the controller's pipeline checks.
 They also show stops that
 need human direction. A resident parent remains live while child roles work. A
 fresh-context node is a new AI context. It is not an interrupted agent's continuation.
 
 ```mermaid
 flowchart TD
-    main["Main / $git-flow"] --> architect["Resident Architect"]
+    main["Main / $git-flow"] --> router["Resident Router"] --> architect["Read-only Architect design child"]
     subgraph proposals["Read-only design proposals: parallel work"]
-        balanced["Balanced proposal"]
-        fastone["Fast proposal, high reasoning"]
-        fasttwo["Fast proposal, high reasoning"]
+        balanced["Sol base proposal"]
+        fastone["Luna check, high reasoning"]
+        fasttwo["Luna check, high reasoning"]
     end
     architect --> balanced
     architect --> fastone
     architect --> fasttwo
-    balanced --> synthesis["Architect judges and synthesizes one design"]
+    balanced --> synthesis["Architect keeps Sol base and checks omissions"]
     fastone --> synthesis
     fasttwo --> synthesis
     red["$tdd-red"]
@@ -298,16 +313,19 @@ flowchart TD
     subgraph preparation["After accepted Red: conditional policy preparation"]
         policywriter["$agent-policy-writer (conditional)"]
     end
-    synthesis --> red
+    synthesis --> planreview["One parallel pass: plain-language, simplicity, architecture-quality review"]
+    planreview --> finalplan["Architect returns final plan; all design children stop"]
+    finalplan --> release["Router checks plan and releases workflow"]
+    release --> red
     red --> policywriter
-    architect -. owns .-> green
+    router -. owns .-> green
     policywriter --> green
     policywriter --> writer
     writer --> staged["Main stages combined tree"]
     green --> staged
     policywriter --> staged
     staged --> judge
-    subgraph validation["Validation: serial Judge evidence"]
+    subgraph validation["Validation: Judge and timing evidence"]
         judge["$tdd-judge"]
         nonfunctional["$nonfunctional-review"]
     end
@@ -345,61 +363,76 @@ flowchart TD
     policy --> reviews
     consistency --> reviews
     license --> reviews
-    reviews --> reviewoutcome{"Concrete, resolvable specialist-review findings with material progress?"}
-    reviewoutcome -- "code or test finding" --> focusedgreen["Focused $tdd-green correction"]
-    reviewoutcome -- "docs or README finding" --> docscorrection["Green → Architect → $diataxis-writer correction"]
-    reviewoutcome -- "policy-path finding" --> policycorrection["Architect serializes $agent-policy-writer correction"]
-    focusedgreen --> restage["Main waits for owners and stages combined tree"]
-    docscorrection --> restage
-    policycorrection --> restage
-    restage --> correctionjudge["Validation: fresh serial Judge and non-functional handoff"]
-    correctionjudge --> selective["Rerun only reviewers whose finding, domain, or evidence changed"]
-    selective --> reviewoutcome
-    reviewoutcome -- "no findings" --> finalizer["Finalization: $tdd-finalizer"]
-    architect -. owns .-> finalizer
-    reviewoutcome -- "no progress or human-judgment blocker" --> humanstop["Architect: human direction or draft-safety evaluation; no automatic publication"]
-    finalizer --> decision{"Architect accepts finalizer verdict?"}
+    judge -- "failure before Green commit" --> repairguard{"Router-approved production repair; HEAD is authentic Red; no Green commit; accepted tests frozen?"}
+    repairguard -- "yes" --> productionrepair["Green repairs approved production scope only"]
+    productionrepair --> restage["Owners stop; Main restages; old proof void"]
+    restage --> staged
+    repairguard -- "no approved repair or human choice" --> humanstop
+    repairguard -- "test edits or existing Green commit" --> newcycle["Router: fresh branch and TDD cycle"]
+    reviews --> reviewoutcome{"Findings on the validated Green commit?"}
+    reviewoutcome -- "repair required" --> newcycle
+    newcycle --> main
+    reviewoutcome -- "none" --> finalizer["Finalization: $tdd-finalizer"]
+    router -. owns .-> finalizer
+    reviewoutcome -- "no progress or human-judgment blocker" --> humanstop["Router: human direction or draft-safety evaluation; no automatic publication"]
+    finalizer --> decision{"Router accepts finalizer verdict?"}
     decision -- "normal approval" --> publish["Publication: Main"]
     decision -- "needs human" --> humanstop
     publish --> mr["Merge request"]
     mr --> pipeline["Bounded exact-source required-job check"]
     pipeline -- "required jobs pass" --> human["Human review, approval, and merge"]
-    pipeline -- "failure" --> repairinteractive["Diagnose and repair in approved scope"]
-    repairinteractive --> publish
+    pipeline -- "failure" --> repairinteractive["Diagnose failed jobs; route code repair to fresh branch and TDD cycle"]
+    repairinteractive --> newcycle
     pipeline -- "pending or unverifiable" --> retrycheck["Report evidence and retry point"]
 ```
 
 ```mermaid
 flowchart TD
-    docmain["Main / $git-flow"] --> docarchitect["Resident Architect"]
+    docmain["Main / $git-flow"] --> docrouter["Resident Router"] --> docarchitect["Read-only Architect design child"]
     subgraph docproposals["Three concurrent read-only design proposals"]
-        docbalanced["Balanced proposal"]
-        docfastone["Fast proposal, high reasoning"]
-        docfasttwo["Fast proposal, high reasoning"]
+        docbalanced["Sol base proposal"]
+        docfastone["Luna check, high reasoning"]
+        docfasttwo["Luna check, high reasoning"]
     end
     docarchitect --> docbalanced
     docarchitect --> docfastone
     docarchitect --> docfasttwo
-    docbalanced --> docsynthesis["Architect checks all three and chooses one design"]
+    docbalanced --> docsynthesis["Architect keeps Sol base and checks omissions"]
     docfastone --> docsynthesis
     docfasttwo --> docsynthesis
-    docsynthesis --> docwriter["$documentation-writer"]
-    docwriter --> docconsistency["$consistency-judge (conditional)"]
-    docconsistency --> docfinalizer["$documentation-finalizer"]
-    docwriter -- "exact not-applicable record" --> docfinalizer
-    docconsistency -- "finding" --> doccorrection["Live Architect routes correction"]
+    docsynthesis --> docplanreview["One parallel pass: plain-language, simplicity, architecture-quality review"]
+    docplanreview --> docfinalplan["Architect returns final plan; all design children stop"]
+    docfinalplan --> docrelease["Router checks plan and releases workflow"]
+    docrelease --> docwriter["$documentation-writer"]
+    subgraph docreviews["Applicable content reviews: parallel work"]
+        docconsistency["$consistency-judge"]
+        doctemporality["$temporality-judge"]
+        docpolicy["$agent-policy-judge outside accepted narrow merge"]
+        docplain["$plain-language-review for agent-policy content"]
+    end
+    docwriter --> docconsistency
+    docwriter --> doctemporality
+    docwriter --> docpolicy
+    docwriter --> docplain
+    docconsistency --> docresults["Collect every applicable result and exact N/A record"]
+    doctemporality --> docresults
+    docpolicy --> docresults
+    docplain --> docresults
+    docresults -- "findings" --> doccorrection["Router returns all findings to Writer together"]
     doccorrection --> docwriter
-    docfinalizer --> docprogress{"Resolvable finding and material progress?"}
+    docresults -- "reviews pass" --> docfinalizer["$documentation-finalizer: final staged content gates"]
+    docfinalizer --> docreadability["Finalizer checks staged Markdown readability last"]
+    docreadability --> docprogress{"Resolvable finding and material progress?"}
     docprogress -- "yes: evidence-led repair" --> docwriter
-    docprogress -- "no findings" --> docdecision{"Architect accepts finalizer approval?"}
-    docprogress -- "no progress, scope expansion, or human direction" --> dochuman["Architect: human direction; no automatic publication"]
+    docprogress -- "no findings" --> docdecision{"Router accepts finalizer approval?"}
+    docprogress -- "no progress, scope expansion, or human direction" --> dochuman["Router: human direction; no automatic publication"]
     docdecision -- "yes" --> docpublish["Main publication"]
     docdecision -- "no" --> dochuman
     docpublish --> docmr["Merge request"]
     docmr --> docpipeline["Bounded exact-source required-job check"]
     docpipeline -- "required jobs pass" --> dochumanreview["Human review, approval, and merge"]
     docpipeline -- "failure" --> docrepair["Diagnose and repair in approved scope"]
-    docrepair --> docpublish
+    docrepair --> docwriter
     docpipeline -- "pending or unverifiable" --> docretrycheck["Report evidence and retry point"]
 ```
 
@@ -457,22 +490,22 @@ result.
 Interactive branches conventionally use `clanker/<slug>`. The serial controller
 reserves `agent/issue-<iid>` for issue worktrees. These names identify contexts.
 They do not claim separate runtime branch enforcement. For non-trivial coding
-work, Architect names every stage. It does not group them as “final judges.” Each
+work, Router names every stage. It does not group them as “final judges.” Each
 manifest records applicability, ownership, prerequisites, receipts, and reroutes.
-Each manifest row names a semantic tier. The live Architect router owns the
+Each manifest row names a semantic tier. Router owns the
 Codex mapping. It sets each tier's current model and reasoning effort. Other
 enabled frontends use equivalent tiers. Frontier is never a fallback.
 
-Architect owns each coding workflow session. It does not launch unrelated
+Router owns each coding workflow session. It does not launch unrelated
 top-level processes. It sends the approved design to Red first. Red changes
-only `tests/` and stops at the accepted checkpoint. Architect finishes policy
+only `tests/` and stops at the accepted checkpoint. Router finishes policy
 work, if needed. It then starts Green and the Diátaxis Writer together. Green
 changes code and tests in serial work. In interactive work, Green changes
 production files while tests stay frozen. The writer
 owns `docs/`, its indexes and reciprocal links, and `README.md`, including
 declared portable mirrors. When portable policy applies, Agent-policy Writer
 changes only `AGENTS.md`, `.agents/**`, and their declared portable mirrors.
-Architect waits for each applicable receipt or exact not-applicable record.
+Router waits for each applicable receipt or exact not-applicable record.
 Green and the writer compare the final interface while both are live; the
 writer aligns the prose. Once both stop editing, Main stages their combined
 work in interactive sessions. In serial sessions, Green requests controller
@@ -482,18 +515,24 @@ Green consolidates feedback and routes documentation findings to the writer.
 Green never edits docs, README, or agent-policy paths.
 
 In the documentation and agent-policy lane,
-Architect delegates one Documentation Writer. That writer alone may edit.
-In interactive work, the writer stages the candidate and Architect runs the
-Consistency Judge when copied facts change. In serial work, the live workflow
+Router delegates one Documentation Writer. That writer alone may edit.
+In interactive work, the writer stages the candidate. Router runs the
+applicable content reviews together: Consistency Judge, Temporality Judge,
+and Agent Policy Judge outside an accepted narrow merge plan. Agent-policy
+content also needs Plain-language Review. A conditional skip needs an exact
+not-applicable record with its reason. In serial work, the live workflow
 owner asks the controller to stage the candidate and provide Consistency Judge
 a canonical changed-path inventory and independent bounded range reads from
 the exact Git trees. The judge must review every present old and new side of
 each changed path before recording a verdict. The Git evidence proves which
 bytes were returned, not that the judge understood them. The judge checks
 copied facts when applicable.
-Architect then delegates one consolidated Documentation Finalizer. Repair
-cycles need material progress. A repeated finding returns to Architect for
-human direction. Unchanged evidence also returns to Architect. Scope
+Router returns all findings to Writer together. A correction needs a fresh
+tree and fresh applicable reviews. Documentation Finalizer checks the final
+staged content. Its last gate is changed-file Markdown readability, after
+reviews and fixes, before its verdict. It runs no behavior tests or full suite.
+Repair cycles need material progress. A repeated finding returns to Router for
+human direction. Unchanged evidence also returns to Router. Scope
 expansion does too. Neither lane has a fixed
 repair count.
 
@@ -521,21 +560,35 @@ Humans decide:
 
 ### Correction route
 
-Green groups specialist-review findings before routing them. It repairs code
-and tests. Documentation and README findings go through Architect to the
-Diátaxis Writer. Policy findings go through Architect to Agent-policy Writer;
-that work runs in series with Green. Green does not edit either owner's files.
+In interactive work, accepted tests stay frozen. Router may approve a repair
+on the same branch only before the first Green commit. That repair changes
+production only. It must follow Red and the original scope. First prove that
+`HEAD` equals authentic Red and no Green commit exists. Retain the Red ref,
+base, and branch. Resolve pending or lost commit results first. Then edit.
+Keep hooks, configuration, security, and identity checks intact. Test edits
+or any existing Green commit require a fresh branch and TDD cycle. Do not
+append a correction commit.
 
-After each correction, the workflow waits for Green and the Diátaxis Writer to
-stop editing and for any policy repair to finish. Main stages their combined
-tree in interactive work; in serial work, Green requests controller staging.
-A fresh Judge checks that tree before applicable reviewers run again. Finalizer
-uses the accepted result.
+After the approved repair, all editors stop. Main restages the complete tree.
+The new candidate voids old proof and approvals. Run a fresh full native Judge
+hook, Non-functional Review, and every applicable review before handoff.
+
+In serial work, Green gathers all findings and fixes approved code and tests.
+It sends docs and README findings through Router to Diátaxis Writer. It sends
+policy findings through Router to Agent-policy Writer. Green edits neither
+owner's files. Wait for all editors to stop, then use controller staging.
+A correction after a serial Green commit needs a new candidate commit, fresh
+Judge, and Non-functional Review. Its Green SHA and tree void old receipts.
+Rerun all applicable specialists for that commit.
 
 ### Cycle ledger and stop conditions
 
-Architect calls another focused Green run only when the ledger shows real
-progress. It has no fixed attempt count. The ledger lists:
+Interactive handoffs use direct messages. Send the result, concrete failure,
+next owner, and original producer proof references when needed. No
+agent-maintained progress or correction ledger is a handoff prerequisite.
+Trusted input fields and identity checks still apply.
+
+Serial Green owns the detailed correction ledger. Each cycle records:
 
 - Cycle ID.
 - Stable finding fingerprints and classes.
@@ -547,33 +600,35 @@ progress. It has no fixed attempt count. The ledger lists:
 
 A fingerprint joins the reviewer or owner and path or scope. It also joins the
 stable summary or requested outcome. Progress closes a prior finding. Or it
-materially changes evidence without reopening it.
+changes key evidence without reopening the same finding.
 
-The loop stops for repeated or unchanged evidence. It also stops when no
-approved fix is available. Scope growth or real dispute also stops it.
+Continue only with real progress. Stop for repeated findings or unchanged
+proof. Also stop when no approved fix exists, scope grows, or a real human
+choice remains. Do not relabel a finding to claim progress.
 
 ### Reruns
 
-Initial review has all applicable reviewers. This includes License Checker.
-Rerun a reviewer only when its finding was fixed. Also rerun one whose domain
-or evidence changed. Rerun License Checker when maintained files in its checked
-scope change. Run the full test gate again only when behavior or tests change.
+A new candidate needs fresh Judge, Non-functional Review, and all applicable
+specialists, including License Checker. Old proof cannot validate new bytes.
+The serial Quality Judge focus exception below narrows its review scope;
+it never removes a required reviewer or validation gate.
 
 The first `$judge-quality` review must be complete and independent. It reviews
 the exact committed tree in serial coding work. Its receipt names the Green
 SHA and tree. Green's own check cannot
 replace it.
 
-A later rerun may focus only when Green supplies this proof:
+Only Router may approve a focused serial Quality Judge rerun. Green must
+supply this proof:
 
-- The prior and current Green SHAs and tree OIDs in serial coding work.
+- The prior and current serial Green SHAs and tree OIDs.
 - The prior complete `$judge-quality` receipt.
 - Stable fingerprints for the addressed findings.
 - The correction ledger.
 - The exact paths changed between the trees.
 
 Missing or conflicting proof returns a non-code `Overall: Provenance Reject`
-receipt. Quality Judge sends it to Green, which routes it to Architect. The
+receipt. Quality Judge sends it to Green, which routes it to Router. The
 workflow does not silently fall back to a complete review.
 
 A focused rerun checks each addressed finding and changed production file
@@ -602,16 +657,16 @@ human-judgment boundary, Finalizer may give a draft-safety verdict. It can hand
 off a clear `Draft:` MR with:
 
 - Unresolved findings.
-- The evidence and cycle ledger.
+- The evidence and, for serial work, its correction ledger.
 - Exact human decisions.
 - Tests.
 - Unchanged project-owned values.
 
 Draft safety is not merge approval. Unsafe or unvalidated work goes to a human
-without publication. So does work with unclear authority to publish. Architect
+without publication. So does work with unclear authority to publish. Router
 may accept draft safety only to publish or update that Draft proposal. Existing
 MRs keep required closing content. They get read-back after title and
-description updates. Architect router owns routing. `$git-flow` owns
+description updates. Router owns routing. `$git-flow` owns
 publication.
 
 ### Conditional judges
@@ -665,12 +720,13 @@ visible and preserves the human approval and merge boundary.
 
 | Role | Responsibility | Does not |
 | --- | --- | --- |
-| Architect | Owns the coding workflow session, design, context handoff, and final decision | Write production changes or tests |
+| Router | Owns workflow choice, admission, role release, corrections, and final decisions | Edit, stage, commit, publish, approve, or merge |
+| Architect | Router's read-only design child; keeps the Sol base, checks two Luna proposals, and runs one plan-review pass | Edit repository files, start workflow mutators, or forward raw drafts |
 | Remediator | Establishes an evidence-backed standards baseline and sequences fixes | Edit files, weaken standards, or declare skipped gates passing |
 | Test Writer | Writes failing tests and stops at Red | Touch implementation |
 | Diátaxis Writer | Coding-lane `docs/` and README owner running alongside Green after Red and policy preparation; aligns prose with the final interface | Change executable scope, tests, or agent policy |
 | Agent-policy Writer | Conditional coding-lane owner for `AGENTS.md`, `.agents/**`, and declared portable template mirrors | Change tests, docs, or production paths |
-| Documentation Writer | Architect-delegated editor confined to the content-only documentation and agent-policy lane | Change executable scope or manufacture behavior tests |
+| Documentation Writer | Router-delegated editor confined to the content-only documentation and agent-policy lane | Change executable scope or manufacture behavior tests |
 | Implementer | Green's production and test owner after Red and policy preparation; reads the diff and consolidates judge feedback | Edit docs, README, or agent-policy paths, or waive failed review evidence |
 | Non-functional Reviewer | Reviews test timing and performance evidence before final validation | Rerun tests, edit code, or wait for finalization |
 | Implementation Judge | Runs applicable Python/Bash lint and non-test checks | Fix issues |
