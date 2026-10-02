@@ -60,7 +60,7 @@ Check the snapshot identity before review and again before the verdict. Reject
 a missing, failed, rejected, or stale expected read. After any correction,
 require a new stage/read and review of its new tree. Restaging voids prior
 read proof. If the boundary is unavailable in the selected mode, return the
-exact Architect N/A with mode
+exact Router N/A with mode
 and capability evidence, not an approval.
 
 For reconciliation, also get the saved source and exact target commits. Main gives
@@ -103,8 +103,8 @@ give `path:line`, the fact, both values, effect on use or readers, and severity.
 List gaps in identity, source, or scope as blocks. Approval means the exact
 candidate tree still matches the given OID.
 
-Send code findings to Green. Architect routes policy fixes to Policy Writer.
-Send content findings through Architect to Documentation Writer. A new tree
+Send code findings to Green. Router routes policy fixes to Policy Writer.
+Send content findings through Router to Documentation Writer. A new tree
 needs a new review. Never fix your own findings or approve a tree you did not
 check.
 

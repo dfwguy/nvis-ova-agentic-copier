@@ -118,7 +118,7 @@ files. Do not use Bash to run tests, benchmarks, builds, or other checks.
    asks for assessment, not automatic rejection. Assess documented integration
    exceptions against their plan and task budget. Route code gaps to
    Implementer and test gaps to Test Writer. Report each case at or above
-   1.000 seconds and any follow-up to Architect, regardless of the verdict.
+   1.000 seconds and any follow-up to Router, regardless of the verdict.
 
 ## Output
 

@@ -43,5 +43,5 @@ compares the commit message with the reviewed message file.
 
 ## Model selection
 
-Use this skill's `metadata.model-tier`. The live Architect router maps it to a
+Use this skill's `metadata.model-tier`. The live Router maps it to a
 model. Each frontend uses its configured map. Do not name a provider model.

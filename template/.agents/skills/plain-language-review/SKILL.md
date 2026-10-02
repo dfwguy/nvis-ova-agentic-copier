@@ -1,6 +1,6 @@
 ---
 name: plain-language-review
-description: Read-only review of agent instructions for concise, junior-friendly language without changing policy.
+description: Read-only review of agent instructions and design plans for concise, junior-friendly language without changing policy.
 metadata:
   model-tier: fast
 ---
@@ -16,12 +16,12 @@ metadata:
 
 # Plain-Language Review
 
-Use this skill. It is read-only and advisory. Check agent instructions for
+Use this skill. It is read-only and advisory. Check agent instructions and design plans for
 clear, concise language that junior engineers can follow. It does not change
 policy or grant authority.
 Read and follow [the role instructions](../../agents/plain-language-review.md).
 
 ## Model selection
 
-Use this skill's `metadata.model-tier`. The live Architect router resolves its
+Use this skill's `metadata.model-tier`. The live Router resolves its
 delegation mapping.

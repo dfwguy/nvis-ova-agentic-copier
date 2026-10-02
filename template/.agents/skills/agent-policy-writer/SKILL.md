@@ -17,7 +17,7 @@ metadata:
 # Agent Policy Writer
 
 Use this skill only when a coding diff changes agent instructions. Read and
-follow [the role instructions](../../agents/agent-policy-writer.md). The Architect
+follow [the role instructions](../../agents/agent-policy-writer.md). The Router
 starts it after the accepted Red checkpoint. It finishes before Green and the
 Diátaxis Writer start together. Edit only AGENTS.md,
 .agents/**, and declared portable template mirrors. Do not edit tests,

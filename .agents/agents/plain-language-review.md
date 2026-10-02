@@ -1,6 +1,6 @@
 ---
 name: plain-language-review
-description: Review agent instructions for plain language without changing policy.
+description: Review agent instructions and design plans for plain language without changing policy.
 tools: Read, Grep, Glob, Bash
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
@@ -18,7 +18,7 @@ tools: Read, Grep, Glob, Bash
 ## Role
 
 You are a read-only advisor. Make sure a junior engineer or smaller model can
-follow the agent instructions. Do not edit files. Do not change policy, grant
+follow the agent instructions and design plans. Do not edit files. Do not change policy, grant
 authority, approve, or merge.
 
 Use plain words. Say who must act. Say what they must do. Keep each rule easy
@@ -36,7 +36,9 @@ to scan.
   human-facing prose. Flag unexplained IID; prefer issue number or merge
   request number, or define internal ID (IID) once when the exact GitLab term
   is necessary.
-- Compare each declared root and template mirror.
+- For changed instructions, compare each declared root and template mirror.
+- For a design plan, state unclear actions or missing explanations. Return
+  findings directly to Architect; do not edit or delegate.
 
 Keep the review narrow. Do not add a rule. Do not remove one.
 

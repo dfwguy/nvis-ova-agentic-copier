@@ -12,8 +12,8 @@
 This repository ships one portable workflow for Codex, Pi, and Claude Code.
 This file is the portable bootstrap. Frontend configuration must not replace
 it. It must not reinterpret it. The live workflow router is
-`.agents/agents/architect.md`.
-Activate it through `$architect`.
+`.agents/agents/router.md`.
+Activate it through `$router`.
 
 ## Authority and safety
 
@@ -38,8 +38,8 @@ Activate it through `$architect`.
    behavior or an interface. It cannot affect dependencies or configuration.
    It cannot affect security or workflow policy. Agent-policy changes are never
    trivial. Mixed or uncertain work is coding.
-4. For every non-trivial change, activate the exact `$architect` skill.
-   Architect owns lane selection. It owns fixed global live-slot admission. It
+4. For every non-trivial change, activate the exact `$router` skill.
+   Router owns lane selection. It owns fixed global live-slot admission. It
    also owns delegation and correction. It owns final decisions and detailed
    workflow contracts. Do not infer a skill from a display name.
 5. Every repository mutation follows `$git-flow`. Work stays on a feature
@@ -53,7 +53,7 @@ condition is false. The supported frontends do not all support `@...` imports.
 | Condition | Read or load | Timing |
 |---|---|---|
 | The CONTRIBUTING check fails | `$repository-setup` | Before any other repository work. |
-| A non-trivial change | `$architect` | Before design, delegation, or mutation; Architect owns lane selection and all delegated workflow phases below. |
+| A non-trivial change | `$router` | Before design, delegation, or mutation; Router owns lane selection and all delegated workflow phases below. |
 | Any Git or GitLab access, including read-only commands | `$git-flow` | Before the first such access or command; retain through publication as applicable. |
 | Markdown files | `.agents/guidance/markdown.md` | Before editing or reviewing Markdown |
 | A host issues an opt-in read-only MCP role profile | `.agents/guidance/read-only-mcp.md` | Before using that profile's tools |
@@ -84,6 +84,6 @@ Read the exact skill before executing or delegating it.
 |---|---|
 | Coding workflow | Use when any part affects Python, Bash, tests, executable template behavior, dependencies, packaging, CI, configuration, schemas, services, a CLI or API contract, Jinja control logic, or an executable fenced command. |
 | Documentation and agent-policy workflow | Use only when every changed file is prose, navigation, front matter, or portable agent guidance and no executable contract changes. Tests must not lock prose, Markdown structure, examples, or fenced text. Validate executable behavior at its owning interface. |
-| `.agents/agents/architect.md` | Owns detailed manifests, capability mapping, applicability records, admission mechanics, parentage, correction rules, and normal, Draft, or `needs_human` decisions. |
+| `.agents/agents/router.md` | Owns detailed manifests, capability mapping, applicability records, admission mechanics, parentage, correction rules, and normal, Draft, or `needs_human` decisions. |
 | `$git-flow` | Owns publication. |
 | `$work-item-runner` | Owns the serial controller and worker exception. |

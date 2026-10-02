@@ -56,6 +56,6 @@ merge. Finalizer verifies it read-only.
 
 ## Model selection
 
-Use this skill's `metadata.model-tier`. The live Architect router maps it to a
+Use this skill's `metadata.model-tier`. The live Router maps it to a
 model. Each frontend uses its configured map. Do not name a provider model in
 this skill.

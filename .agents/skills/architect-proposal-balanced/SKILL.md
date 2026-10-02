@@ -1,6 +1,6 @@
 ---
 name: architect-proposal-balanced
-description: Give Architect one read-only plan at the balanced tier.
+description: Give the owning Architect one read-only plan at the balanced tier.
 metadata:
   model-tier: balanced
 ---
@@ -17,4 +17,4 @@ metadata:
 # Architect Proposal Balanced
 
 Read and follow [the shared role](../../agents/architect-proposal.md). Work on
-your own. Send one plan straight to your live Architect parent.
+your own. Send one raw plan only to your live Architect parent, never to Router.

@@ -26,12 +26,12 @@ requests that improve it. This file holds the local context.
 The Python runner in `src/agent_work/` enforces the serial issue workflow. It
 checks state, identity, and evidence. `AGENTS.md` and the roles set shared
 rules for authority, safety, and agent routing. The live router is
-`.agents/agents/architect.md`. Humans approve and merge requests. This keeps
+`.agents/agents/router.md`. Humans approve and merge requests. This keeps
 portable instructions short.
 
 Put factory decisions, state transitions, and receipt validation in executable
 code with behavior tests when code can express them. Keep agent instructions
-for authority, role scope, handoffs, and commands. Architect and reviewers
+for authority, role scope, handoffs, and commands. Router and reviewers
 reject behavioral contracts stated only or redundantly in prose when code can
 enforce them.
 

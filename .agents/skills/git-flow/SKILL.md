@@ -223,7 +223,7 @@ report them. Let the user choose to commit, stash, or discard them. **Never
 stash or discard silently.** Then run the access preflight and these checks:
 
 1. **Coding-lane baseline tests** — after classifying the whole intended
-   change through the `$architect` router, run this only for the coding workflow:
+   change through the `$router`, run this only for the coding workflow:
    ```bash
    uv run pytest
    ```
@@ -276,7 +276,7 @@ commands are local-only and sandbox-safe.
 
 ## Step 2: Do the work
 
-- **Non-trivial change** → activate `$architect` and follow the live router.
+- **Non-trivial change** → activate `$router` and follow the live router.
 - **Trivial change** (≤ ~10 lines, no behavior surprise, no new dependencies) →
   the main agent may edit and commit on the feature branch without TDD
   subagents. Pre-commit hooks still run at commit time. Quality gates remain.

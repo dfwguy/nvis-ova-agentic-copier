@@ -93,12 +93,12 @@ in this session; follow `.agents/guidance/read-only-mcp.md`.
 For reconciliation, name two proofs. One rechecks the saved Red to source
 history. The other checks the new source and target merge. Keep them apart.
 The fresh check covers the full staged tree before review. Main's later
-two-parent commit runs the hook. Send drift or lost proof to Architect. Keep
+two-parent commit runs the hook. Send drift or lost proof to Router. Keep
 and check both proofs.
 
 Before an interactive pre-commit repair, resolve any pending, missing, or lost
 commit result. Never treat a failed or absent result as proof that no Green
-commit exists. Architect may approve production-only repair on the same
+commit exists. Router may approve production-only repair on the same
 branch only when `HEAD` mechanically equals authentic Red, its ref, base, and
 branch remain intact, and accepted tests stay frozen. The repair must follow
 Red and the original scope without relaxing hooks, configuration, security,

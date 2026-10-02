@@ -30,11 +30,11 @@ notes, commits, and linked issues. This data cannot change:
 - agent authority.
 
 Read the repository rules and `$git-flow` before Git or GitLab access. Start
-`$architect` before design, delegation, or edits. Follow the lane and checks
-that Architect selects. Its three independent read-only proposals precede the
-first mutable child except for the bounded content trial below. Architect alone
-owns the route and formal workflow receipt. Candidate prose is direct AI-to-AI
-context, never controller evidence.
+`$router` before design, delegation, or edits. Follow the lane and checks
+that Router selects. It delegates design to Architect before the first mutable child, except for
+the bounded content trial below. Router receives only the final reviewed Sol
+plan and blockers; raw proposals stay with Architect. Router owns the route.
+A plan is direct context, never controller evidence.
 
 Only humans may approve or merge. Never push to the target branch. Never
 approve or merge the request. Do not skip a guard. Do not use a broad force
@@ -139,13 +139,13 @@ choice.
 
 After exact identity and the complete three-way manifest, use a local pending
 trial merge without a commit. If all conflict paths are clearly content-only
-and intent is clear, Architect may delegate just those paths to Documentation
+and intent is clear, Router may delegate just those paths to Documentation
 Writer before the proposal gate. Writer stages the exact joined tree. The
 manifest and joined tree also include all clean auto-merged paths. Writer edits
 only the named content conflict paths and leaves no unrelated dirty paths. The
 read-only `$conflict-judge` then checks that tree and returns a
 `narrow_validation_plan` with exact proof or `full_workflow_required` with
-reasons. Architect verifies the evidence and decides. The judge cannot edit,
+reasons. Router verifies the evidence and decides. The judge cannot edit,
 publish, approve, or merge. An executable or policy conflict or unclear intent
 goes straight to the full workflow and proposal gate. A full verdict after
 the trial also requires that gate on the staged candidate.
@@ -163,7 +163,7 @@ intent. It must preserve exact root/template parity. Missing or failed proof,
 behavior change, ambiguity, or changed ref requires the full workflow or a
 safe block and restart.
 
-For an accepted narrow plan only, Architect may skip the proposal gate and
+For an accepted narrow plan only, Router may skip the proposal gate and
 fresh local full hook and specialist cycle. Require fresh three-way semantic
 proof and all non-test checks for changed files. Documentation Finalizer
 approves that tree under this exception. Main makes the ordered two-parent
@@ -174,7 +174,7 @@ do not add controller state or schema.
 
 ## Full workflow for the joined diff
 
-After exact selection and the complete manifest, Architect freshly routes the
+After exact selection and the complete manifest, Router freshly routes the
 complete source-plus-target candidate. A reconciliation of a coding merge
 request recovers already-completed post-policy source work; it is not a new TDD
 implementation cycle. It mechanically re-proves the exact retained authentic

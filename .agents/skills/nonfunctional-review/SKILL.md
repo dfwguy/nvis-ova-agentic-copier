@@ -22,7 +22,7 @@ defines the role. This skill works with Claude Code, Codex, and Pi.
 
 ## Model selection
 
-Use this skill's `metadata.model-tier`. The live Architect router maps it to a
+Use this skill's `metadata.model-tier`. The live Router maps it to a
 model. Each frontend uses its own configured map. Do not name a provider model
 in this skill.
 

@@ -44,5 +44,5 @@ Check each claim. State each result.
 
 Return `Overall: Approve` only when every item passes. Otherwise return
 `Overall: Reject`. Name every blocking file. Name every issue for Green to
-route through Architect to the Diátaxis Writer. Remain read-only.
-Include the comparison verdict in the receipt for Architect and Finalizer.
+route through Router to the Diátaxis Writer. Remain read-only.
+Include the comparison verdict in the receipt for Router and Finalizer.

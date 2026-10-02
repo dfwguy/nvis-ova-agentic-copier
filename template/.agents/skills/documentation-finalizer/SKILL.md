@@ -22,5 +22,5 @@ act, read and follow [the role instructions](../../agents/documentation-finalize
 
 ## Model selection
 
-Use this skill's `metadata.model-tier`. The live Architect router maps
+Use this skill's `metadata.model-tier`. The live Router maps
 delegation.

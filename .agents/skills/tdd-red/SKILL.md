@@ -26,8 +26,8 @@ Writer or writes Red evidence retrospectively.
 
 ## Model selection
 
-Architect runs Red first and checks its evidence. For interactive work, Main
+Router runs Red first and checks its evidence. For interactive work, Main
 creates the local Red commit and ref. For serial work, the trusted tool creates
 the tree ref. Policy work starts after that checkpoint, when needed. Green and
 the Diátaxis Writer start together after policy work. Use this skill's
-`metadata.model-tier`. The live Architect router maps the tier.
+`metadata.model-tier`. The live Router maps the tier.

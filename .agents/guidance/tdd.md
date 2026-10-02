@@ -36,18 +36,19 @@ Use explicit stages. Each stage has a distinct role:
 - **Agent Policy Writer** — when needed, edits only approved root/template
   agent-policy paths after the accepted Red checkpoint and before Green and
   the Diátaxis Writer start.
-- **Architect** — accepts and routes Red's direct evidence. It returns
-  interactive work to Main for a local Red commit. In serial work, the same
-  live workflow owner that assembles the exact boundary input invokes the
-  trusted result boundary through its identity-bound broker while active.
-  Architect stays read-only. Each fresh Architect session gets three
-  independent read-only plans at once before its first child can edit: one
-  exact `$architect-proposal-balanced` and two exact `$architect-proposal-fast`
-  children. It checks all three against repo facts and writes the only formal
-  receipt. The first and resumed serial segments each repeat this gate with
-  fresh children. A failed child gets at most one fresh replacement with the
-  same skill and tier. If that fails, stop before edits. Plans cannot enter
-  trusted boundary input.
+- **Router** — stays read-only and owns lane choice, admission, writer release,
+  corrections, and human policy questions. It accepts Red and returns
+  interactive work to Main for the local commit. Serial live producers still
+  use their identity-bound broker. Before edits, Router delegates one Architect.
+  Raw proposal drafts never enter Router's context.
+- **Architect** — owns one Sol base proposal and two independent Luna checks.
+  Authors send only to Architect, never Router. After they stop, Architect
+  keeps Sol base and fixes only justified omissions with minimal changes.
+  It then runs Plain-Language Review, Simplicity Judge, and Architecture Quality
+  Judge together once. After all stop, it resolves findings itself and makes
+  one final self-check. It returns the final plan, fixes, and open
+  blockers to Router. No author round trips or repeat plan checks. A plan
+  does not prove passing code. All children stop before writers start.
 - **Implementer** — starts after the applicable policy preparation receipt/N/A
   and exact Red checkpoint. Interactive Green writes production only and never
   edits tests. Serial Green writes production and tests.
@@ -58,8 +59,14 @@ Use explicit stages. Each stage has a distinct role:
 
 Red's evidence file has exact `argv`, `expected_failure`, and normalized changed
 `test_paths`. The bounded shell-free `argv` begins with `uv run pytest` and uses
-positional test paths or node IDs. Architect checks the receipt, then selects
+positional test paths or node IDs. Router checks the receipt, then selects
 the workflow mode.
+
+Direct messages are enough for interactive handoffs. Give the result, any
+concrete failure, and the next owner. Link original proof when needed. No
+agent progress or repair log is required. Do not rebuild receipts from prose.
+Keep the original Red fields above. Keep all trusted inputs, outputs, and
+identity checks. Serial records and recovery stay unchanged.
 
 Before a Red checkpoint, the Test Writer runs bounded type checks on changed
 Python tests. Run read-only Ruff check and format checks too. Fix errors in
@@ -131,7 +138,9 @@ file yields `timing_status=unknown` and `timing_unknown`, without times.
 A valid readable JUnit file with an overflowing bounded advisory case
 summary also yields timing `UNKNOWN`. Malformed, oversized, or invalid
 present JUnit data blocks review. A failed hook still fails.
-Judge returns its Non-functional Reviewer child receipt. Specialist reviews
+Judge returns its Non-functional Reviewer result. Both must pass for the
+exact candidate before all applicable specialist reviews run together when
+slots allow. Wait for every result. Specialist reviews
 start after the normal Green commit, pending-merge validation, or serial Green
 commit. Serial specialists review the Green SHA and tree. Test Judge checks
 the Red-to-Green Git diff. During
@@ -146,7 +155,7 @@ one from prose. No Red checkpoint ref is pushed. Correctness does not depend on
 session summaries or unverified role receipts. Before Green, restart from
 current code, retained Red commits/ref, and the exact issue or MR. An
 actionable production finding before the first interactive Green commit may
-use the same branch only with Architect approval. Mechanically prove `HEAD`
+use the same branch only with Router approval. Mechanically prove `HEAD`
 equals authentic Red, retain its ref, base, and branch, and keep accepted tests
 frozen. Resolve pending, missing, or lost commit results before editing and
 prove no Green commit exists. Repair only behavior justified by Red and the
@@ -164,14 +173,14 @@ evidence, not a session summary. Publication uses the verified Green SHA.
 ## Reconciliation of completed coding work
 
 Reconciliation recovers completed post-policy source work. It is not a new TDD
-cycle. Architect mechanically re-proves the exact retained authentic Red
+cycle. Router mechanically re-proves the exact retained authentic Red
 checkpoint against the unchanged captured source. Never create Red evidence
 retrospectively. A pre-checkpoint merge request routes to issue #158. A missing
 or mismatched post-policy checkpoint stops safely for recovery. The re-proved
-retained receipt is the Red preparation receipt. Architect does not delegate a
+retained receipt is the Red preparation receipt. Router does not delegate a
 fresh Test Writer. TDD Red does not manufacture evidence.
 
-Architect prepares the pending target merge and conflict manifest. It freshly
+Router prepares the pending target merge and conflict manifest. It freshly
 routes the joined diff. Green resolves coding conflicts by preserving approved
 source and target intent. Fresh validation and reviews cover the combined
 candidate. While the merge is pending, Judge invokes
@@ -196,8 +205,8 @@ fetches and rechecks both refs just before publishing with exact old-source
 merge. Keep the readback. The factory timer is irrelevant to reconciliation.
 Keep each proof. Check each result. Keep the tree. Keep the refs. Check the state.
 
-Documentation and README findings return through Architect to the Diátaxis
-Writer. Policy findings return through Architect to the Agent Policy Writer.
+Documentation and README findings return through Router to the Diátaxis
+Writer. Policy findings return through Router to the Agent Policy Writer.
 In serial work, Green consolidates findings and repairs production and tests. Each
 correction gets a fresh Judge before dependent review. In interactive work,
 post-Green findings use a fresh branch and TDD cycle.
