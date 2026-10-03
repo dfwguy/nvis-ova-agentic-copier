@@ -142,6 +142,37 @@ def parse_full_junit_inventory(artifact: bytes) -> dict[str, float]:
     return cases
 
 
+def validate_before_timing_records(
+    junit: bytes, phases: Mapping[str, object], test_ids: tuple[str, ...]
+) -> None:
+    """Require successful exact cases and finite phases agreeing with JUnit."""
+    cases, selectors = parse_full_junit_records(junit)
+    root = ElementTree.fromstring(junit)
+    if any(
+        element.tag.rsplit("}", 1)[-1] == "skipped"
+        or element.get("skipped", "0") not in {"0", ""}
+        for element in root.iter()
+    ):
+        raise ValueError("before timing contains skipped cases")
+    if set(selectors.values()) != set(test_ids) or set(phases) != set(test_ids):
+        raise ValueError("before timing case identities differ")
+    for name, selector in selectors.items():
+        values = phases[selector]
+        if not isinstance(values, dict) or set(values) != set(_PHASES):
+            raise ValueError("before timing phases are incomplete")
+        seconds = tuple(values.values())
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0
+            for value in seconds
+        ):
+            raise ValueError("before timing phases are invalid")
+        if abs(sum(seconds) - cases[name]) > 0.016:
+            raise ValueError("JUnit and phase durations disagree")
+
+
 @dataclass(frozen=True)
 class TimingFinding:
     """One source-bound test timing classification."""

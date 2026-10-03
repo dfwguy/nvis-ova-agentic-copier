@@ -18,20 +18,24 @@ import re
 import shutil
 import tempfile
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
-from pathlib import Path
+from contextlib import AbstractContextManager
+from dataclasses import asdict, dataclass
+from pathlib import Path, PurePosixPath
 from typing import Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from .ports import CommandRunner
 from .test_timing import (
     MAX_JUNIT_BYTES,
     FindingBudgetExhausted,
     FocusedTimingBudgetExhausted,
+    is_safe_timing_case_id,
     parse_full_junit_records,
     review_test_timings,
+    validate_before_timing_records,
 )
+from .timing_admission import TimingAdmissionBusy
 
 _ENVIRONMENTS = ("py311", "py314")
 _MAX_BYTES = 1_048_576
@@ -285,25 +289,29 @@ def _artifact(
 
 
 def _prepared_fingerprint(
-    dependencies: TimingCaptureDependencies, source: Path, environment: str
+    dependencies: TimingCaptureDependencies,
+    source: Path,
+    environment: str,
+    *,
+    strict: bool = False,
 ) -> str:
     interpreter = source / ".tox" / environment / "bin" / "python"
     output = _run(
         dependencies,
         (str(interpreter), "-c", _DISTRIBUTIONS),
         cwd=source,
+        environment=(dict(dependencies.environment) | {"PYTHONDONTWRITEBYTECODE": "1"})
+        if strict
+        else None,
         timeout=30,
     )
     try:
-        observed = json.loads(output)
+        observed = _unique_json(output) if strict else json.loads(output)
     except json.JSONDecodeError as error:
         raise TimingCaptureError("prepared environment is malformed") from error
-    interpreter_identity = (
-        observed.get("interpreter") if isinstance(observed, dict) else None
-    )
-    distributions = (
-        observed.get("distributions") if isinstance(observed, dict) else None
-    )
+    values = cast(dict[str, object], observed) if isinstance(observed, dict) else {}
+    interpreter_identity = values.get("interpreter")
+    distributions = values.get("distributions")
     if (
         not isinstance(interpreter_identity, list)
         or len(interpreter_identity) != 3
@@ -319,6 +327,10 @@ def _prepared_fingerprint(
         or distributions != sorted(distributions)
     ):
         raise TimingCaptureError("prepared environment is incomplete")
+    if strict and not cast(str, interpreter_identity[0]).startswith(
+        {"py311": "3.11", "py314": "3.14"}[environment]
+    ):
+        raise TimingCaptureError("prepared interpreter is unsupported")
     return hashlib.sha256(output.encode()).hexdigest()
 
 
@@ -848,3 +860,442 @@ def read_serial_timing_transcript(
     except (OSError, ValidationError) as error:
         raise TimingCaptureError("timing transcript is unavailable") from error
     return value.model_dump(mode="json", exclude_unset=True)
+
+
+class BeforeTimingRequest(BaseModel):
+    """Declare exact existing tests without granting permission to measure them."""
+
+    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+    project_id: int = Field(gt=0)
+    issue_iid: int = Field(gt=0)
+    source_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    source_tree: str = Field(pattern=r"^[0-9a-f]{40}$")
+    invariant: str = Field(min_length=1, max_length=4096)
+    test_ids: tuple[str, ...] = Field(min_length=1, max_length=32)
+    repair_paths: tuple[str, ...] = Field(min_length=1, max_length=32)
+
+    @model_validator(mode="after")
+    def _validate_selection(self) -> BeforeTimingRequest:
+        if (
+            not self.invariant.strip()
+            or len(set(self.test_ids)) != len(self.test_ids)
+            or not all(is_safe_timing_case_id(name) for name in self.test_ids)
+            or len(set(self.repair_paths)) != len(self.repair_paths)
+            or any(not _before_test_path(path) for path in self.repair_paths)
+        ):
+            raise ValueError("before timing selection is invalid")
+        return self
+
+
+@dataclass(frozen=True)
+class BeforeTimingScope:
+    """Immutable permission supplied separately by the native controller."""
+
+    project_id: int
+    issue_iid: int
+    source_sha: str
+    source_tree: str
+    invariant: str
+    test_ids: tuple[str, ...]
+    repair_paths: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        BeforeTimingRequest.model_validate(asdict(self))
+
+
+@dataclass(frozen=True)
+class BeforeTimingDependencies:
+    """Explicit private capture, admission, immutable publication and read ports."""
+
+    timing: TimingCaptureDependencies
+    publish_snapshot: Callable[[Path, Path], None]
+    project_admission: Callable[[], AbstractContextManager[object]]
+    read_regular_file: Callable[[Path, int], bytes]
+
+
+class _BeforeArtifact(BaseModel):
+    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+    path: str
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class _BeforeRun(BaseModel):
+    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+    environment: Literal["py311", "py314"]
+    repeat: int = Field(ge=0, le=1)
+    seed: str
+    prepared_environment: str = Field(pattern=r"^[0-9a-f]{64}$")
+    argv: tuple[str, ...]
+    junit: _BeforeArtifact
+    phases: _BeforeArtifact
+
+
+class _BeforeSnapshot(BeforeTimingRequest):
+    schema_version: Literal["before-timing-v1"]
+    source_root: str
+    capture_root: str
+    environment_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    provenance: dict[str, str]
+    runs: tuple[_BeforeRun, ...] = Field(min_length=4, max_length=4)
+
+
+def _before_test_path(path: str) -> bool:
+    parts = PurePosixPath(path).parts
+    return (
+        len(path.encode()) <= 256
+        and len(parts) >= 2
+        and parts[0] == "tests"
+        and PurePosixPath(path).as_posix() == path
+        and all(re.fullmatch(r"[A-Za-z0-9_.-]+", part) for part in parts)
+        and ".." not in parts
+        and (parts[-1] == "conftest.py" or parts[-1].startswith("test_"))
+        and path.endswith(".py")
+    )
+
+
+def _unique_json(payload: str | bytes) -> object:
+    def pairs(items: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError("duplicate timing JSON key")
+            result[key] = value
+        return result
+
+    def invalid_constant(_value: str) -> object:
+        raise ValueError("nonfinite timing JSON value")
+
+    return json.loads(payload, object_pairs_hook=pairs, parse_constant=invalid_constant)
+
+
+def _before_scope(
+    request: BeforeTimingRequest, scope: BeforeTimingScope | None
+) -> None:
+    if (
+        not isinstance(request, BeforeTimingRequest)
+        or not isinstance(scope, BeforeTimingScope)
+        or request.model_dump() != asdict(scope)
+    ):
+        raise TimingCaptureError("native before timing scope is unavailable or differs")
+
+
+def _before_read(
+    path: Path, dependencies: BeforeTimingDependencies, limit: int = _MAX_BYTES
+) -> bytes:
+    payload = dependencies.read_regular_file(path, limit)
+    if not isinstance(payload, bytes) or len(payload) > limit:
+        raise TimingCaptureError("before timing artifact is oversized or invalid")
+    return payload
+
+
+def _before_source(
+    request: BeforeTimingRequest, dependencies: BeforeTimingDependencies
+) -> dict[str, str]:
+    timing = dependencies.timing
+    source = timing.candidate_worktree
+    environment = dict(timing.environment) | {"GIT_OPTIONAL_LOCKS": "0"}
+
+    def git(*arguments: str) -> str:
+        return _run(timing, ("git", *arguments), cwd=source, environment=environment)
+
+    if (
+        git("rev-parse", "HEAD") != request.source_sha
+        or git("rev-parse", "HEAD^{tree}") != request.source_tree
+        or git("status", "--porcelain")
+        or git("ls-files", "--others", "--exclude-standard")
+    ):
+        raise TimingCaptureError("before timing source changed")
+    paths = git("ls-files").splitlines()
+    required = (
+        set(request.repair_paths)
+        | {selector.split("::", 1)[0] for selector in request.test_ids}
+        | {"pyproject.toml", "uv.lock"}
+    )
+    if not paths or len(set(paths)) != len(paths) or not required.issubset(paths):
+        raise TimingCaptureError("before timing source inventory is incomplete")
+    if any(
+        not path
+        or PurePosixPath(path).is_absolute()
+        or ".." in PurePosixPath(path).parts
+        or PurePosixPath(path).as_posix() != path
+        for path in paths
+    ):
+        raise TimingCaptureError("before timing source path is invalid")
+    return {
+        path: hashlib.sha256(_before_read(source / path, dependencies)).hexdigest()
+        for path in sorted(required)
+    }
+
+
+def _before_environment(timing: TimingCaptureDependencies) -> str:
+    if timing.environment.get("PYTEST_ADDOPTS"):
+        raise TimingCaptureError("ambient pytest options prevent seed binding")
+    return hashlib.sha256(
+        json.dumps(dict(timing.environment), sort_keys=True, allow_nan=False).encode()
+    ).hexdigest()
+
+
+def _before_command(
+    request: BeforeTimingRequest,
+    source: Path,
+    private: Path,
+    environment: str,
+    repeat: int,
+) -> tuple[str, ...]:
+    return (
+        str(source / ".tox" / environment / "bin" / "pytest"),
+        "-q",
+        "-p",
+        "agent_work_timing_phases",
+        f"--randomly-seed={int(request.source_tree[:8], 16)}",
+        f"--junitxml={private / f'focused-{environment}-{repeat}.xml'}",
+        *request.test_ids,
+    )
+
+
+def _before_destination(request: BeforeTimingRequest, root: Path) -> Path:
+    digest = hashlib.sha256(request.model_dump_json().encode()).hexdigest()
+    return root / f"{request.source_tree}.before-{digest}"
+
+
+def _before_validate(
+    snapshot: _BeforeSnapshot,
+    request: BeforeTimingRequest,
+    destination: Path,
+    dependencies: BeforeTimingDependencies,
+) -> None:
+    timing = dependencies.timing
+    source = timing.candidate_worktree
+    private = Path(snapshot.capture_root)
+    if (
+        snapshot.model_dump(include=set(BeforeTimingRequest.model_fields))
+        != request.model_dump()
+        or snapshot.source_root != str(source)
+        or destination != _before_destination(request, timing.state_root)
+        or private.parent != timing.state_root
+        or not private.name.startswith(".timing-")
+        or snapshot.environment_sha256 != _before_environment(timing)
+        or snapshot.provenance != _before_source(request, dependencies)
+        or {(run.environment, run.repeat) for run in snapshot.runs}
+        != {(env, repeat) for env in _ENVIRONMENTS for repeat in (0, 1)}
+    ):
+        raise TimingCaptureError("before timing proof bindings differ")
+    fingerprints = {
+        env: _prepared_fingerprint(timing, source, env, strict=True)
+        for env in _ENVIRONMENTS
+    }
+    for run in snapshot.runs:
+        stem = f"focused-{run.environment}-{run.repeat}"
+        if (
+            run.seed != str(int(request.source_tree[:8], 16))
+            or run.prepared_environment != fingerprints[run.environment]
+            or run.argv
+            != _before_command(request, source, private, run.environment, run.repeat)
+            or run.junit.path != str(destination / f"{stem}.xml")
+            or run.phases.path != str(destination / f"{stem}.json")
+        ):
+            raise TimingCaptureError("before timing run bindings differ")
+        artifacts = []
+        for artifact, limit in ((run.junit, MAX_JUNIT_BYTES), (run.phases, _MAX_BYTES)):
+            payload = _before_read(Path(artifact.path), dependencies, limit)
+            if hashlib.sha256(payload).hexdigest() != artifact.sha256:
+                raise TimingCaptureError("before timing artifact changed")
+            artifacts.append(payload)
+        phases = _unique_json(artifacts[1])
+        if not isinstance(phases, dict):
+            raise TimingCaptureError("before timing phases are invalid")
+        validate_before_timing_records(
+            artifacts[0], cast(dict[str, object], phases), request.test_ids
+        )
+
+
+def reload_before_timing(
+    manifest_path: Path,
+    *,
+    request: BeforeTimingRequest,
+    approved_scope: BeforeTimingScope | None,
+    dependencies: BeforeTimingDependencies,
+) -> dict[str, object]:
+    """Read a complete immutable snapshot without running tests or writing files."""
+    # Repository imports validation, which imports this module.
+    from .repository import RepositoryError
+
+    _before_scope(request, approved_scope)
+    try:
+        if manifest_path.name != "manifest.json":
+            raise TimingCaptureError("before timing manifest path is invalid")
+        payload = _before_read(manifest_path, dependencies, _MAX_TRANSCRIPT_BYTES)
+        _unique_json(payload)
+        snapshot = _BeforeSnapshot.model_validate_json(payload)
+        _before_validate(snapshot, request, manifest_path.parent, dependencies)
+        return {"manifest_path": str(manifest_path)}
+    except (OSError, ValueError, TimingCaptureError, RepositoryError):
+        raise TimingCaptureError("before timing evidence is unavailable") from None
+
+
+def capture_before_timing(
+    request: BeforeTimingRequest,
+    *,
+    approved_scope: BeforeTimingScope | None,
+    dependencies: BeforeTimingDependencies,
+) -> dict[str, object]:
+    """Measure approved existing tests, publish exclusively, then reload proof."""
+    # Delay this import until the repository/validation modules have loaded.
+    from .repository import RepositoryError
+
+    _before_scope(request, approved_scope)
+    timing = dependencies.timing
+    private: Path | None = None
+    destination = _before_destination(request, timing.state_root)
+    try:
+        with dependencies.project_admission():
+            environment_digest = _before_environment(timing)
+            provenance = _before_source(request, dependencies)
+            if timing.exists(destination):
+                raise TimingCaptureError("before timing snapshot already exists")
+            fingerprints = {
+                env: _prepared_fingerprint(
+                    timing, timing.candidate_worktree, env, strict=True
+                )
+                for env in _ENVIRONMENTS
+            }
+            timing.make_directory(timing.state_root)
+            private = timing.make_temporary(timing.state_root)
+            # Duplicate reports/collection must remain visible, not overwritten.
+            phase_plugin = _PLUGIN.replace(
+                "_reports.setdefault(report.nodeid, {})[report.when] = report.duration",
+                "phases = _reports.setdefault(report.nodeid, {})\n"
+                "        if report.when in phases:\n"
+                '            phases["duplicate_report"] = True\n'
+                "        phases[report.when] = report.duration",
+            )
+            collect_plugin = _COLLECT_PLUGIN.replace(
+                'Path(os.environ["AGENT_TIMING_OUTPUT"]).write_text(json.dumps(items))',
+                "if len(items) != len(session.items):\n"
+                '        items["duplicate_collection"] = []\n'
+                '    Path(os.environ["AGENT_TIMING_OUTPUT"]).write_text(json.dumps(items))',
+            )
+            timing.write_text(private / "agent_work_timing_phases.py", phase_plugin)
+            timing.write_text(private / "agent_work_timing_collect.py", collect_plugin)
+            runs: list[dict[str, object]] = []
+            deadline = timing.monotonic_clock() + 900
+            for env in _ENVIRONMENTS:
+                collection = private / f"collection-{env}.json"
+                plugin_env = dict(timing.environment) | {
+                    "PYTHONPATH": str(private),
+                    "AGENT_TIMING_OUTPUT": str(collection),
+                }
+                _run(
+                    timing,
+                    (
+                        str(
+                            timing.candidate_worktree / ".tox" / env / "bin" / "pytest"
+                        ),
+                        "--collect-only",
+                        "-q",
+                        "-p",
+                        "agent_work_timing_collect",
+                        *request.test_ids,
+                    ),
+                    cwd=timing.candidate_worktree,
+                    environment=plugin_env,
+                )
+                collected = _unique_json(_before_read(collection, dependencies))
+                if not isinstance(collected, dict) or set(collected) != set(
+                    request.test_ids
+                ):
+                    raise TimingCaptureError("before timing collection differs")
+                for repeat in (0, 1):
+                    remaining = deadline - timing.monotonic_clock()
+                    if remaining <= 0:
+                        raise TimingCaptureError("before timing budget exhausted")
+                    stem = f"focused-{env}-{repeat}"
+                    phases_path = private / f"{stem}.json"
+                    argv = _before_command(
+                        request, timing.candidate_worktree, private, env, repeat
+                    )
+                    _run(
+                        timing,
+                        argv,
+                        cwd=timing.candidate_worktree,
+                        environment=plugin_env
+                        | {"AGENT_TIMING_OUTPUT": str(phases_path)},
+                        timeout=min(120, remaining),
+                    )
+                    junit = _before_read(
+                        private / f"{stem}.xml", dependencies, MAX_JUNIT_BYTES
+                    )
+                    phases_payload = _before_read(phases_path, dependencies)
+                    phases = _unique_json(phases_payload)
+                    if not isinstance(phases, dict):
+                        raise TimingCaptureError("before timing phases are invalid")
+                    validate_before_timing_records(
+                        junit, cast(dict[str, object], phases), request.test_ids
+                    )
+                    runs.append(
+                        {
+                            "environment": env,
+                            "repeat": repeat,
+                            "seed": str(int(request.source_tree[:8], 16)),
+                            "prepared_environment": fingerprints[env],
+                            "argv": argv,
+                            "junit": {
+                                "path": str(destination / f"{stem}.xml"),
+                                "sha256": hashlib.sha256(junit).hexdigest(),
+                            },
+                            "phases": {
+                                "path": str(destination / f"{stem}.json"),
+                                "sha256": hashlib.sha256(phases_payload).hexdigest(),
+                            },
+                        }
+                    )
+            if (
+                provenance != _before_source(request, dependencies)
+                or environment_digest != _before_environment(timing)
+                or any(
+                    fingerprints[env]
+                    != _prepared_fingerprint(
+                        timing, timing.candidate_worktree, env, strict=True
+                    )
+                    for env in _ENVIRONMENTS
+                )
+            ):
+                raise TimingCaptureError("before timing provenance changed")
+            snapshot = _BeforeSnapshot.model_validate(
+                request.model_dump()
+                | {
+                    "schema_version": "before-timing-v1",
+                    "source_root": str(timing.candidate_worktree),
+                    "capture_root": str(private),
+                    "environment_sha256": environment_digest,
+                    "provenance": provenance,
+                    "runs": tuple(runs),
+                }
+            )
+            timing.atomic_write(
+                private / "manifest.json", snapshot.model_dump_json().encode()
+            )
+            dependencies.publish_snapshot(private, destination)
+            return reload_before_timing(
+                destination / "manifest.json",
+                request=request,
+                approved_scope=approved_scope,
+                dependencies=dependencies,
+            )
+    except (
+        OSError,
+        ValueError,
+        TimingCaptureError,
+        TimingAdmissionBusy,
+        RepositoryError,
+    ):
+        # Publication may have happened before an error; never remove its target.
+        raise TimingCaptureError("before timing capture is unavailable") from None
+    finally:
+        if private is not None:
+            try:
+                timing.remove_owned_tree(private)
+            except OSError:
+                raise TimingCaptureError(
+                    "before timing temporary cleanup failed"
+                ) from None

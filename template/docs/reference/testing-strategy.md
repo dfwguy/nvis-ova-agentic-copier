@@ -93,6 +93,55 @@ by itself. Present malformed or mismatched paired proof needs repair. An
 unknown comparison never waives the candidate JUnit gate above. A controlled
 task-specific budget still applies to its own scope.
 
+### Before-timing evidence
+
+`agent_work.timing_capture.capture_before_timing()` captures focused timing
+proof before a test repair. `reload_before_timing()` checks saved proof without
+running tests or writing files. The thin `agent-work before-timing` interface
+uses these inputs:
+
+```text
+agent-work before-timing capture --project-id PROJECT --issue-iid ISSUE \
+  --source-sha SHA --source-tree TREE --invariant INVARIANT \
+  --test-id EXACT_TEST_ID --repair-path APPROVED_TEST_PATH [--apply] [--json]
+agent-work before-timing reload --project-id PROJECT --issue-iid ISSUE \
+  --source-sha SHA --source-tree TREE --invariant INVARIANT \
+  --test-id EXACT_TEST_ID --repair-path APPROVED_TEST_PATH \
+  --manifest MANIFEST_PATH [--json]
+```
+
+Repeat `--test-id` and `--repair-path` for each selected case and test-owned
+path. These arguments describe a request. Native Main must separately inject
+an immutable `before_timing_scope` and `before_timing_dependencies` into
+`agent_work.cli.main()`. The scope binds the project, issue, source commit and
+tree, invariant, exact test IDs, and approved repair paths. No shell flag,
+environment value, manifest, or worker input can grant it.
+Without real native authorization, the request is refused. The public functions
+take that scope as `approved_scope` and the ports as `dependencies`; reload also
+takes `manifest_path` and `request`.
+
+Capture without `--apply` previews the request without test execution or
+artifact writes. Applied capture uses project timing admission and runs each
+selection twice on Python 3.11 and 3.14. It uses a source-derived seed and
+privately records phase JSON and JUnit. Proof binds source identity, selectors,
+commands, seed, interpreter, installed distributions, and dependency provenance.
+Every case must succeed without skips, with complete finite phase records and
+matching JUnit durations. Duplicate identities and incomplete proof are refused.
+
+Capture publishes an immutable snapshot without overwriting an existing one.
+It accepts the manifest only after reload validates it. Before publication,
+failure cleans up only artifacts owned by that attempt. A published or uncertain
+snapshot is preserved; a failed readback gives no timing pass.
+Reload uses bounded regular-file reads and read-only Git checks of the source
+commit, tree, and clean checkout. It rechecks digests, native scope, environment,
+repeats, selectors, and provenance. Missing, altered, unsupported, or changed
+proof is refused; reload never collects or executes tests, even with `--apply`.
+
+`manifest_path` and `applied` report evidence only. They do not admit a repair
+under issues 325 or 430, waive Red, or establish MCP readiness. Paired serial
+timing and local observer results cannot replace this before proof. The ordinary
+validation and review gates still apply.
+
 ### Paired staged-tree diagnosis
 
 The older `validation run --serial-timing` route can compare baseline and
