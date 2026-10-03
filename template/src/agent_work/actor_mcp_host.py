@@ -154,6 +154,9 @@ class ActorCandidateMcpConfig(_Edge):
     command: StrictStr
     args: tuple[StrictStr, ...]
     required: StrictBool
+    enabled: StrictBool = True
+    environment_id: Literal["local"] = "local"
+    tool_timeout_sec: None = None
     env_vars: tuple[StrictStr, ...]
     enabled_tools: tuple[StrictStr, ...]
     tools: dict[StrictStr, ActorMcpToolConfig]

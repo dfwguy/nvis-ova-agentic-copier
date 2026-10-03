@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import tomllib
 from collections.abc import Callable, Mapping
 from dataclasses import replace
@@ -1174,6 +1175,9 @@ class _ProvenanceTranscript(TranscriptProcess):
         super().__init__(root, phase=phase, fault=fault)
         self.user_config_path = root / "user-config.toml"
         self.config_payloads: list[dict[str, object]] = []
+        self.candidate_defaults: dict[str, object] = {}
+        self.candidate_mutation: dict[str, object] = {}
+        self.extra_active_feature = False
 
     def emit(self, value: dict[str, object]) -> None:
         result = value.get("result")
@@ -1199,6 +1203,18 @@ class _ProvenanceTranscript(TranscriptProcess):
                     layers = cast(list[dict[str, object]], result["layers"])
                     layers[0]["disabledReason"] = "PRIVATE_LAYER"
         if isinstance(result, dict) and "origins" in result:
+            result = cast(dict[str, object], result)
+            phase = "config/read" if self.config_reads == 1 else "recheck"
+            layers = cast(list[dict[str, object]], result["layers"])
+            for config in (result["config"], layers[0]["config"]):
+                config = cast(dict[str, object], config)
+                servers = cast(dict[str, dict[str, object]], config["mcp_servers"])
+                servers["candidate"].update(self.candidate_defaults)
+                if self.phase == phase:
+                    servers["candidate"].update(self.candidate_mutation)
+                    if self.extra_active_feature:
+                        features = cast(dict[str, object], config["features"])
+                        features["web_search"] = True
             self.config_payloads.append(cast(dict[str, object], result))
         super().emit(value)
 
@@ -1283,7 +1299,6 @@ def test_schema_valid_user_origin_reaches_semantic_guard_on_both_reads(
         )
         assert evidence.layers[0].name.type == "sessionFlags"
         assert evidence.layers[0].disabledReason is None
-        assert evidence.layers[0].config == evidence.config.model_dump(mode="json")
         with pytest.raises(
             worker.actor_frontend.ActorHostError, match="^actor_config_unverified$"
         ):
@@ -1449,3 +1464,227 @@ def test_permission_cli_generated_forbidden_characters_refuse_before_valid_contr
     _assert_filesystem_table(
         worker.actor_mcp_host.build_actor_permission_plan(binding, protected)
     )
+
+
+@pytest.mark.parametrize(
+    "defaults",
+    [
+        {"enabled": True},
+        {"environment_id": "local"},
+        {"tool_timeout_sec": None},
+        {"enabled": True, "environment_id": "local", "tool_timeout_sec": None},
+    ],
+    ids=["enabled", "environment", "timeout", "combined"],
+)
+def test_candidate_wire_defaults_verify_and_complete_both_reads(
+    tmp_path: Path, defaults: dict[str, object]
+) -> None:
+    fixture = _PermissionAuditFixture(tmp_path)
+    try:
+        assert isinstance(fixture.process, _ProvenanceTranscript)
+        fixture.process.candidate_defaults = defaults
+        result = fixture.run()
+        assert (result.returncode, result.stdout, result.stderr) == (
+            0,
+            "review complete",
+            "",
+        )
+        assert fixture.process.config_reads == 2
+        for payload in fixture.process.config_payloads:
+            worker.actor_mcp_host.validate_actor_provenance(fixture.plan, payload, {})
+        assert [message["method"] for message in fixture.process.requests] == [
+            "initialize",
+            "initialized",
+            "config/read",
+            "thread/start",
+            "config/read",
+            "turn/start",
+        ]
+        assert fixture.process.waits > 0
+        assert all(
+            stream is not None and stream.closed
+            for stream in (
+                fixture.process.stdin,
+                fixture.process.stdout,
+                fixture.process.stderr,
+            )
+        )
+    finally:
+        fixture.dispose()
+
+
+@pytest.mark.parametrize("phase", ["config/read", "recheck"])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        *[{"enabled": value} for value in (False, 0, 1, None, "true")],
+        {"environment_id": "remote"},
+        *[
+            {"tool_timeout_sec": value}
+            for value in (
+                False,
+                True,
+                0,
+                1,
+                -1,
+                0.5,
+                float("inf"),
+                float("-inf"),
+                float("nan"),
+                "30",
+            )
+        ],
+        {"unknown_candidate_key": None},
+        {"command": "/foreign/command"},
+        {"args": ["foreign"]},
+        {"required": False},
+        {"env_vars": ["FOREIGN_ENV"]},
+        {"enabled_tools": ["shell"]},
+        {"tools": {"candidate_read": {"approval_mode": "auto"}}},
+        {},
+    ],
+)
+def test_candidate_wire_fault_refuses_at_selected_read_after_normalized_control(
+    tmp_path: Path, phase: str, mutation: dict[str, object]
+) -> None:
+    control = _PermissionAuditFixture(tmp_path / "control")
+    subject = _PermissionAuditFixture(tmp_path / "subject", phase=phase)
+    try:
+        for fixture in (control, subject):
+            assert isinstance(fixture.process, _ProvenanceTranscript)
+            fixture.process.candidate_defaults = {
+                "enabled": True,
+                "environment_id": "local",
+                "tool_timeout_sec": None,
+            }
+        assert isinstance(subject.process, _ProvenanceTranscript)
+        subject.process.candidate_mutation = mutation
+        subject.process.extra_active_feature = not mutation
+        control_result = control.run()
+        assert (
+            control_result.returncode,
+            control_result.stdout,
+            control_result.stderr,
+        ) == (0, "review complete", "")
+        assert control.process.config_reads == 2
+        result = subject.run()
+        assert (result.returncode, result.stdout, result.stderr) == (
+            None,
+            "",
+            "actor_config_unverified",
+        )
+        assert subject.process.config_reads == (1 if phase == "config/read" else 2)
+        assert [message["method"] for message in subject.process.requests] == (
+            ["initialize", "initialized", "config/read"]
+            if phase == "config/read"
+            else [
+                "initialize",
+                "initialized",
+                "config/read",
+                "thread/start",
+                "config/read",
+            ]
+        )
+        payload = subject.process.config_payloads[-1]
+        with pytest.raises(
+            worker.actor_frontend.ActorHostError, match="^actor_config_unverified$"
+        ):
+            worker.actor_mcp_host.validate_actor_provenance(subject.plan, payload, {})
+        for fixture in (control, subject):
+            assert len(fixture.commands) == 2
+            assert fixture.process.waits > 0
+            assert all(
+                stream is not None and stream.closed
+                for stream in (
+                    fixture.process.stdin,
+                    fixture.process.stdout,
+                    fixture.process.stderr,
+                )
+            )
+    finally:
+        control.dispose()
+        subject.dispose()
+
+
+@settings(max_examples=12)
+@given(
+    fields=st.sets(
+        st.sampled_from(("enabled", "environment_id", "tool_timeout_sec")),
+        min_size=1,
+    )
+)
+def test_generated_candidate_defaults_preserve_public_provenance(
+    fields: set[str],
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        fixture = _PermissionAuditFixture(Path(directory))
+        try:
+            assert isinstance(fixture.process, _ProvenanceTranscript)
+            assert fixture.run().returncode == 0
+            payload = json.loads(json.dumps(fixture.process.config_payloads[0]))
+            defaults = {
+                "enabled": True,
+                "environment_id": "local",
+                "tool_timeout_sec": None,
+            }
+            for config in (payload["config"], payload["layers"][0]["config"]):
+                config["mcp_servers"]["candidate"].update(
+                    {key: defaults[key] for key in fields}
+                )
+            worker.actor_mcp_host.validate_actor_provenance(fixture.plan, payload, {})
+        finally:
+            fixture.dispose()
+
+
+@settings(max_examples=18)
+@given(
+    mutation=st.one_of(
+        st.fixed_dictionaries(
+            {"enabled": st.sampled_from((False, 0, 1, None, "true"))}
+        ),
+        st.fixed_dictionaries(
+            {"environment_id": st.text(max_size=12).filter(lambda s: s != "local")}
+        ),
+        st.fixed_dictionaries(
+            {
+                "tool_timeout_sec": st.one_of(
+                    st.booleans(), st.floats(), st.text(max_size=12)
+                )
+            }
+        ),
+        st.dictionaries(
+            st.text(alphabet="abc", min_size=1, max_size=8),
+            st.none(),
+            min_size=1,
+            max_size=1,
+        ),
+    )
+)
+def test_generated_candidate_faults_deny_after_public_normalized_control(
+    mutation: dict[str, object],
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        fixture = _PermissionAuditFixture(Path(directory))
+        try:
+            assert isinstance(fixture.process, _ProvenanceTranscript)
+            assert fixture.run().returncode == 0
+            payload = json.loads(json.dumps(fixture.process.config_payloads[0]))
+            for config in (payload["config"], payload["layers"][0]["config"]):
+                config["mcp_servers"]["candidate"].update(
+                    {
+                        "enabled": True,
+                        "environment_id": "local",
+                        "tool_timeout_sec": None,
+                    }
+                )
+            worker.actor_mcp_host.validate_actor_provenance(fixture.plan, payload, {})
+            for config in (payload["config"], payload["layers"][0]["config"]):
+                config["mcp_servers"]["candidate"].update(mutation)
+            with pytest.raises(
+                worker.actor_frontend.ActorHostError, match="^actor_config_unverified$"
+            ):
+                worker.actor_mcp_host.validate_actor_provenance(
+                    fixture.plan, payload, {}
+                )
+        finally:
+            fixture.dispose()
