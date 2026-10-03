@@ -22,6 +22,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from pytest_subprocess import FakeProcess
 
 from agent_work import cli
 from agent_work.cli import _render, build_parser, main
@@ -44,6 +45,11 @@ from agent_work.repository import CommandResult
 from agent_work.timing_admission import TimingAdmissionLease
 from agent_work.upstream_finding import UpstreamFindingPreview
 from agent_work.worker import WorkerProtocolError, WorkerResultBrokerClientRequest
+from tests.test_agent_work_timing_capture import (
+    BeforeTimingFixture,
+    NativeCommandFailureFixture,
+    before_timing_snapshot_bytes,
+)
 
 
 def test_validation_window_preview_does_not_launch_child() -> None:
@@ -3496,3 +3502,303 @@ def test_xml_live_and_saved_readers_preserve_inclusive_cap_and_overflow_sentinel
         hashlib.sha256(generic).hexdigest()
         == hashlib.sha256(raw[:1_048_577]).hexdigest()
     )
+
+
+def _before_timing_argv(
+    fixture: BeforeTimingFixture,
+    *,
+    action: str = "capture",
+    manifest: Path | None = None,
+) -> list[str]:
+    binding = fixture.binding()
+    arguments = ["before-timing", action, "--json"]
+    for field in ("project_id", "issue_iid", "source_sha", "source_tree", "invariant"):
+        arguments.extend(("--" + field.replace("_", "-"), str(binding[field])))
+    for selector in fixture.selectors:
+        arguments.extend(("--test-id", selector))
+    for path in fixture.repair_paths:
+        arguments.extend(("--repair-path", path))
+    if manifest is not None:
+        arguments.extend(("--manifest", str(manifest)))
+    return arguments
+
+
+def _invoke_before_timing(
+    fixture: BeforeTimingFixture,
+    arguments: list[str],
+    output: list[str],
+    errors: list[str],
+    *,
+    native_scope: bool = True,
+    native_dependencies: bool = True,
+    environment: Mapping[str, str] | None = None,
+) -> int:
+    entrypoint = cast(Callable[..., int], main)
+    try:
+        return entrypoint(
+            arguments,
+            before_timing_scope=fixture.scope() if native_scope else None,
+            before_timing_dependencies=fixture.dependencies()
+            if native_dependencies
+            else None,
+            run_command=fixture.run,
+            environment=environment or {},
+            current_checkout=lambda: fixture.source,
+            write_stdout=output.append,
+            write_stderr=errors.append,
+        )
+    except SystemExit as error:
+        assert isinstance(error.code, int)
+        return error.code
+
+
+@pytest.mark.parametrize("apply_reload", [False, True])
+def test_before_timing_cli_capture_and_readonly_reload_use_genuine_producer(
+    tmp_path: Path,
+    apply_reload: bool,
+) -> None:
+    fixture = BeforeTimingFixture(tmp_path)
+    output: list[str] = []
+    errors: list[str] = []
+    assert (
+        _invoke_before_timing(
+            fixture, _before_timing_argv(fixture) + ["--apply"], output, errors
+        )
+        == 0
+    )
+    payload = json.loads(output[-1])
+    assert payload["applied"] is True
+    manifest = Path(payload["manifest_path"])
+    assert manifest.is_file() and fixture.focused == 4
+    before = {
+        path: path.read_bytes() for path in manifest.parent.iterdir() if path.is_file()
+    }
+    fixture.reload_only = True
+    assert (
+        _invoke_before_timing(
+            fixture,
+            _before_timing_argv(fixture, action="reload", manifest=manifest)
+            + (["--apply"] if apply_reload else []),
+            output,
+            errors,
+        )
+        == 0
+    )
+    assert json.loads(output[-1])["manifest_path"] == str(manifest)
+    assert before == {path: path.read_bytes() for path in before}
+    assert fixture.focused == 4 and len(fixture.publications) == 1
+    assert errors == []
+
+
+def test_before_timing_cli_default_preview_performs_no_execution_or_writes(
+    tmp_path: Path,
+) -> None:
+    control = BeforeTimingFixture(tmp_path / "control")
+    output: list[str] = []
+    errors: list[str] = []
+    assert (
+        _invoke_before_timing(
+            control, _before_timing_argv(control) + ["--apply"], output, errors
+        )
+        == 0
+    )
+    subject = BeforeTimingFixture(tmp_path / "subject")
+    output.clear()
+    assert (
+        _invoke_before_timing(subject, _before_timing_argv(subject), output, errors)
+        == 0
+    )
+    assert json.loads(output[-1])["applied"] is False
+    assert subject.commands == [] and subject.publications == []
+    assert not subject.state.exists()
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [{}, {"AGENT_WORK_BEFORE_TIMING_SCOPE": "approved", "GITLAB_PROJECT_ID": "55"}],
+)
+@pytest.mark.parametrize("action", ["capture", "reload"])
+@pytest.mark.parametrize("missing", ["scope", "dependencies"])
+def test_before_timing_cli_flags_and_environment_cannot_grant_controller_scope(
+    tmp_path: Path, environment: Mapping[str, str], action: str, missing: str
+) -> None:
+    control = BeforeTimingFixture(tmp_path / "control")
+    output: list[str] = []
+    errors: list[str] = []
+    assert (
+        _invoke_before_timing(
+            control, _before_timing_argv(control) + ["--apply"], output, errors
+        )
+        == 0
+    )
+    manifest = Path(json.loads(output[-1])["manifest_path"])
+    if action == "reload":
+        control.reload_only = True
+        assert (
+            _invoke_before_timing(
+                control,
+                _before_timing_argv(control, action="reload", manifest=manifest),
+                output,
+                errors,
+            )
+            == 0
+        )
+    subject = BeforeTimingFixture(tmp_path / "subject")
+    output.clear()
+    assert (
+        _invoke_before_timing(
+            subject,
+            _before_timing_argv(
+                subject,
+                action=action,
+                manifest=manifest if action == "reload" else None,
+            )
+            + ["--apply"],
+            output,
+            errors,
+            native_scope=missing != "scope",
+            native_dependencies=missing != "dependencies",
+            environment=environment,
+        )
+        == 1
+    )
+    assert json.loads(output[-1])["applied"] is False
+    assert subject.commands == [] and subject.publications == []
+    assert "PRIVATE" not in "".join(output + errors)
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["skipped", "command_failed", "busy", "before_publish", "uncertain_publish"],
+)
+def test_before_timing_cli_refuses_incomplete_capture_without_false_success(
+    tmp_path: Path, fault: str
+) -> None:
+    control = BeforeTimingFixture(tmp_path / "control")
+    output: list[str] = []
+    errors: list[str] = []
+    assert (
+        _invoke_before_timing(
+            control, _before_timing_argv(control) + ["--apply"], output, errors
+        )
+        == 0
+    )
+    subject = BeforeTimingFixture(tmp_path / "subject", fault=fault)
+    output.clear()
+    assert (
+        _invoke_before_timing(
+            subject, _before_timing_argv(subject) + ["--apply"], output, errors
+        )
+        == 1
+    )
+    assert not any(json.loads(message).get("applied") is True for message in output)
+    assert "PRIVATE" not in "".join(output + errors)
+    assert len(subject.publications) == (1 if fault == "uncertain_publish" else 0)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--approved-scope", "yes"],
+        ["--test-id", "--collect-only"],
+        ["--repair-path", "src/unsafe.py"],
+    ],
+)
+def test_before_timing_cli_invalid_input_refuses_without_command_or_publication(
+    tmp_path: Path, extra: list[str]
+) -> None:
+    control = BeforeTimingFixture(tmp_path / "control")
+    output: list[str] = []
+    errors: list[str] = []
+    assert (
+        _invoke_before_timing(
+            control, _before_timing_argv(control) + ["--apply"], output, errors
+        )
+        == 0
+    )
+    subject = BeforeTimingFixture(tmp_path / "subject")
+    assert (
+        _invoke_before_timing(
+            subject, _before_timing_argv(subject) + ["--apply", *extra], output, errors
+        )
+        == 2
+    )
+    assert subject.commands == [] and subject.publications == []
+
+
+@pytest.mark.parametrize("action", ["capture", "reload"])
+def test_before_timing_cli_help_exposes_closed_existing_selection_interface(
+    capsys: pytest.CaptureFixture[str], action: str
+) -> None:
+    try:
+        result = main(["before-timing", action, "--help"])
+    except SystemExit as error:
+        result = cast(int, error.code)
+    assert result == 0
+    help_text = capsys.readouterr().out
+    assert "--test-id" in help_text and "--repair-path" in help_text
+    assert "--source-sha" in help_text and "--source-tree" in help_text
+    assert "--approved-scope" not in help_text
+
+
+@pytest.mark.parametrize("native_error", ["missing", "timeout"])
+@pytest.mark.parametrize("stage", ["focused", "published", "reload", "uncertain"])
+def test_before_timing_cli_native_adapter_failure_refuses_without_private_output(
+    tmp_path: Path, fp: FakeProcess, native_error: str, stage: str
+) -> None:
+    control = BeforeTimingFixture(tmp_path / "control")
+    output: list[str] = []
+    errors: list[str] = []
+    assert (
+        _invoke_before_timing(
+            control, _before_timing_argv(control) + ["--apply"], output, errors
+        )
+        == 0
+    )
+    assert json.loads(output[-1])["applied"] is True
+    subject = NativeCommandFailureFixture(
+        tmp_path / "subject", fp=fp, native_error=native_error, stage=stage
+    )
+    arguments = _before_timing_argv(subject) + ["--apply"]
+    before: dict[Path, bytes] = {}
+    removals: tuple[Path, ...] = ()
+    if stage in ("reload", "uncertain"):
+        if stage == "uncertain":
+            subject.fault = "uncertain_publish"
+            assert _invoke_before_timing(subject, arguments, output, errors) == 1
+            subject.fault = ""
+            manifest = subject.publications[0] / "manifest.json"
+            assert subject.reload(manifest)["manifest_path"] == str(manifest)
+        else:
+            assert _invoke_before_timing(subject, arguments, output, errors) == 0
+            manifest = Path(json.loads(output[-1])["manifest_path"])
+        subject.reload_only = True
+        arguments = _before_timing_argv(subject, action="reload", manifest=manifest) + [
+            "--apply"
+        ]
+        before = before_timing_snapshot_bytes(subject.state)
+        removals = tuple(subject.removals)
+    output.clear()
+    errors.clear()
+    subject.armed = True
+    assert _invoke_before_timing(subject, arguments, output, errors) == 1
+    assert json.loads(output[-1])["applied"] is False
+    assert "PRIVATE" not in "".join(output + errors)
+    assert str(subject.source) not in "".join(output + errors)
+    assert subject.native_attempts == 1
+    if stage == "focused":
+        assert subject.publications == []
+        assert len(subject.removals) == 1 and not subject.removals[0].exists()
+        assert before_timing_snapshot_bytes(subject.state) == {}
+    elif stage == "published":
+        assert len(subject.publications) == 1 and subject.focused == 4
+        assert len(subject.removals) == 1 and not subject.removals[0].exists()
+        published = before_timing_snapshot_bytes(subject.state)
+        subject.armed = False
+        manifest = subject.publications[0] / "manifest.json"
+        assert subject.reload(manifest)["manifest_path"] == str(manifest)
+        assert published == before_timing_snapshot_bytes(subject.state)
+    else:
+        assert before == before_timing_snapshot_bytes(subject.state)
+        assert tuple(subject.removals) == removals
+        assert subject.focused == 4 and len(subject.publications) == 1

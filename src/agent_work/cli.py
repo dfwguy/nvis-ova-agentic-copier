@@ -142,11 +142,16 @@ from .timing_admission import (
     run_supervised_command,
 )
 from .timing_capture import (
+    BeforeTimingDependencies,
+    BeforeTimingRequest,
+    BeforeTimingScope,
     TimingCaptureDependencies,
     TimingCaptureError,
     candidate_source_matches,
+    capture_before_timing,
     capture_serial_timing_review,
     read_serial_timing_transcript,
+    reload_before_timing,
 )
 from .upstream_finding import ManifestError, PreparedIssueDraft, UpstreamFindingPreview
 from .upstream_finding import prepare_issue_draft as default_prepare_issue_draft
@@ -735,6 +740,37 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the nested resource/action command surface."""
     parser = _AgentWorkParser(prog="agent-work")
     resources = parser.add_subparsers(dest="resource", required=True)
+    before_timing = resources.add_parser(
+        "before-timing", help="capture or reload approved existing-test timing evidence"
+    )
+    before_actions = before_timing.add_subparsers(dest="action", required=True)
+    for action in ("capture", "reload"):
+        command = before_actions.add_parser(
+            action,
+            description=(
+                "Without --apply, preview capture without execution or writes. "
+                "Reload always reads evidence without running tests or writing files. "
+                "Native controller scope is required; flags cannot grant it."
+            ),
+        )
+        command.add_argument("--project-id", type=_positive_integer, required=True)
+        command.add_argument("--issue-iid", type=_positive_integer, required=True)
+        command.add_argument("--source-sha", required=True)
+        command.add_argument("--source-tree", required=True)
+        command.add_argument("--invariant", required=True)
+        command.add_argument("--test-id", action="append", required=True)
+        command.add_argument("--repair-path", action="append", required=True)
+        if action == "reload":
+            command.add_argument("--manifest", type=Path, required=True)
+        command.add_argument(
+            "--apply",
+            "-a",
+            action="store_true",
+            help="apply capture; reload remains read-only",
+        )
+        command.add_argument(
+            "--json", action="store_true", help="write structured output"
+        )
     scope = resources.add_parser(
         "scope", help="capture or inspect informational human scope evidence"
     )
@@ -1809,6 +1845,8 @@ def main(
     candidate_gate: Callable[[str], CommandResult] | None = None,
     approved_diagnostic_modules: tuple[str, ...] = (),
     focused_runner: FocusedDiagnosticRunner | None = None,
+    before_timing_scope: BeforeTimingScope | None = None,
+    before_timing_dependencies: BeforeTimingDependencies | None = None,
     systemd_smoke_action: Callable[..., SystemdSmokeReport] = run_systemd_smoke,
     discover_agent_work_config: Callable[..., AgentWorkConfig] = discover_config,
     sleeper: Callable[[float], None] = time.sleep,
@@ -1886,6 +1924,64 @@ def main(
             )
     else:
         parsed = build_parser().parse_args(arguments)
+    if parsed.resource == "before-timing":
+        try:
+            request = BeforeTimingRequest(
+                project_id=parsed.project_id,
+                issue_iid=parsed.issue_iid,
+                source_sha=parsed.source_sha,
+                source_tree=parsed.source_tree,
+                invariant=parsed.invariant,
+                test_ids=tuple(parsed.test_id),
+                repair_paths=tuple(parsed.repair_path),
+            )
+        except ValueError:
+            write_stderr("before timing request is invalid")
+            return 2
+        if (
+            before_timing_scope is None
+            or before_timing_dependencies is None
+            or request.model_dump()
+            != {
+                field: getattr(before_timing_scope, field)
+                for field in BeforeTimingRequest.model_fields
+            }
+        ):
+            if parsed.json:
+                write_stdout(json.dumps({"applied": False}))
+            write_stderr("native before timing scope is unavailable or differs")
+            return 1
+        try:
+            if parsed.action == "reload":
+                report = reload_before_timing(
+                    parsed.manifest,
+                    request=request,
+                    approved_scope=before_timing_scope,
+                    dependencies=before_timing_dependencies,
+                ) | {"applied": False}
+            elif parsed.apply:
+                report = capture_before_timing(
+                    request,
+                    approved_scope=before_timing_scope,
+                    dependencies=before_timing_dependencies,
+                ) | {"applied": True}
+            else:
+                report = {"applied": False, "action": "capture_preview"}
+        except (TimingCaptureError, OSError, ValueError, RepositoryError):
+            if parsed.json:
+                write_stdout(json.dumps({"applied": False}))
+            write_stderr("before timing evidence is unavailable")
+            return 1
+        write_stdout(
+            json.dumps(report)
+            if parsed.json
+            else (
+                "Before timing capture preview"
+                if report.get("action") == "capture_preview"
+                else f"Before timing evidence: {report['manifest_path']}"
+            )
+        )
+        return 0
     if parsed.resource == "cli-contract":
         selected = (
             str(parsed.executable)

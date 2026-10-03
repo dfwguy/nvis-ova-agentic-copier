@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
+import subprocess
 import tomllib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -24,9 +27,11 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from jinja2 import StrictUndefined, Template
+from pytest_subprocess import FakeProcess
 
+from agent_work import timing_capture
 from agent_work.ports import CommandRunner
-from agent_work.repository import CommandResult
+from agent_work.repository import CommandResult, run_subprocess
 from agent_work.timing_capture import (
     FocusedTimingCaptureError,
     TimingCaptureDependencies,
@@ -1143,3 +1148,702 @@ def test_capture_bounded_reader_checks_stat_then_actual_bytes_before_parsing(
             command[:3] == ("git", "worktree", "remove")
             for command in observed_commands
         )
+
+
+class BeforeTimingFixture:
+    """Synthetic commands and immutable-publication ports for the real producer."""
+
+    def __init__(self, root: Path, *, fault: str = "") -> None:
+        self.source = root / "source"
+        self.state = root / "state"
+        self.source.mkdir(parents=True)
+        (self.source / "tests").mkdir()
+        (self.source / "tests/test_speed.py").write_text(
+            "def test_existing():\n    assert 1 == 1\n"
+        )
+        (self.source / "pyproject.toml").write_text("[project]\nname='fixture'\n")
+        (self.source / "uv.lock").write_text("version = 1\n")
+        for environment in ("py311", "py314"):
+            binary = self.source / ".tox" / environment / "bin"
+            binary.mkdir(parents=True)
+            for name in ("python", "pytest"):
+                (binary / name).write_text("synthetic nonexecuted interpreter")
+                (binary / name).chmod(0o700)
+        self.fault = fault
+        self.commands: list[tuple[str, ...]] = []
+        self.command_environments: list[dict[str, str]] = []
+        self.publications: list[Path] = []
+        self.removals: list[Path] = []
+        self.admissions = 0
+        self.focused = 0
+        self.duration = 0.04
+        self.fingerprint_drift = ""
+        self.reload_only = False
+        self.head = BASE_SHA
+        self.tree = BASE_TREE
+        self.selectors = ("tests/test_speed.py::test_existing",)
+        self.repair_paths = ("tests/test_speed.py",)
+        self.tracked_bytes = {
+            name: (self.source / name).read_bytes()
+            for name in ("tests/test_speed.py", "pyproject.toml", "uv.lock")
+        }
+
+    def run(self, command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        self.commands.append(command)
+        environment = dict(cast(Mapping[str, str], kwargs.get("environment") or {}))
+        self.command_environments.append(environment)
+        if command[0] == "git":
+            changed = [
+                name
+                for name, contents in self.tracked_bytes.items()
+                if (self.source / name).read_bytes() != contents
+            ]
+            if self.reload_only:
+                assert "write-tree" not in command
+                assert not any(
+                    part in command for part in ("worktree", "checkout", "add")
+                )
+                assert environment.get("GIT_OPTIONAL_LOCKS") == "0"
+            if "rev-parse" in command:
+                return CommandResult(
+                    0, self.tree if command[-1].endswith("{tree}") else self.head, ""
+                )
+            if "write-tree" in command:
+                return CommandResult(0, self.tree, "")
+            if "diff" in command and "--quiet" in command:
+                return CommandResult(int(bool(changed)), "", "")
+            if "status" in command:
+                return CommandResult(0, "".join(f" M {name}\n" for name in changed), "")
+            if "ls-files" in command:
+                return CommandResult(
+                    0,
+                    ""
+                    if "--others" in command
+                    else "tests/test_speed.py\npyproject.toml\nuv.lock\n",
+                    "",
+                )
+            return CommandResult(0, "", "")
+        if "-c" in command:
+            version = "3.14" if "py314" in command[0] else "3.11"
+            identity = [version, "cpython-" + version.replace(".", ""), "linux-x86_64"]
+            distributions = [["pytest", "9.0"], ["pytest-randomly", "4.0"]]
+            if self.fingerprint_drift == "interpreter":
+                identity[1] = "PRIVATE_DIFFERENT_INTERPRETER"
+            elif self.fingerprint_drift == "distributions":
+                distributions[0][1] = "99.0"
+            return CommandResult(
+                0,
+                json.dumps(
+                    {"interpreter": identity, "distributions": distributions},
+                    sort_keys=True,
+                ),
+                "",
+            )
+        assert not self.reload_only
+        assert not any(part in command for part in ("hook", "tox"))
+        assert all(selector in command for selector in self.selectors)
+        output = Path(environment["AGENT_TIMING_OUTPUT"])
+        if "--collect-only" in command:
+            payload = json.dumps({selector: [] for selector in self.selectors})
+            if self.fault == "duplicate_collection":
+                payload = '{"tests/test_speed.py::test_existing":[],"tests/test_speed.py::test_existing":[]}'
+            output.write_text(payload)
+            return CommandResult(0, "", "")
+        self.focused += 1
+        if self.fault == "source_during":
+            self.tree = "f" * 40
+        elif self.fault == "dependency_during":
+            (self.source / "uv.lock").write_text("version = 99\n")
+        elif self.fault == "environment_during":
+            self.fingerprint_drift = "distributions"
+        if self.fault == "command_failed":
+            return CommandResult(1, "PRIVATE_EXTERNAL_OUTPUT", "PRIVATE_ERROR")
+        phases: dict[str, object] = {
+            "setup": 0.01,
+            "call": self.duration - 0.02,
+            "teardown": 0.01,
+        }
+        if self.fault == "nonfinite":
+            phases["call"] = float("nan")
+        elif self.fault == "boolean_phase":
+            phases["setup"] = True
+        elif self.fault == "missing_phase":
+            del phases["teardown"]
+        payload = json.dumps({selector: phases for selector in self.selectors})
+        if self.fault == "duplicate_report":
+            payload = payload.replace('"setup": 0.01', '"setup": 0.01,"setup": 0.01')
+        elif self.fault == "malformed_phase":
+            payload = "{invalid"
+        elif self.fault == "wrong_test":
+            payload = payload.replace("test_existing", "test_foreign")
+        output.write_text(payload)
+        junit_args = [
+            part.removeprefix("--junitxml=")
+            for part in command
+            if part.startswith("--junitxml=")
+        ]
+        if not junit_args and "--junitxml" in command:
+            junit_args = [command[command.index("--junitxml") + 1]]
+        assert len(junit_args) == 1
+        duration = self.duration + (0.1 if self.fault == "disagreement" else 0)
+        cases = "".join(
+            f'<testcase classname="tests.test_speed" name="{selector.split("::")[-1]}" time="{duration:.6f}"/>'
+            for selector in self.selectors
+        )
+        if self.fault == "duplicate_junit":
+            cases += cases
+        elif self.fault == "skipped":
+            cases = cases.replace("/>", "><skipped/></testcase>")
+        artifact = f'<testsuite tests="{len(self.selectors)}" failures="0" errors="0" skipped="{int(self.fault == "skipped")}">{cases}</testsuite>'
+        Path(junit_args[0]).write_text(artifact)
+        return CommandResult(0, "", "")
+
+    @contextmanager
+    def admission(self) -> Iterator[None]:
+        from agent_work.timing_admission import TimingAdmissionBusy
+
+        self.admissions += 1
+        if self.fault == "busy":
+            raise TimingAdmissionBusy("PRIVATE_BUSY")
+        yield
+
+    def publish(self, temporary: Path, destination: Path) -> None:
+        if self.fault == "before_publish":
+            raise OSError("PRIVATE_BEFORE_PUBLISH")
+        assert not destination.exists()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        # Exclusive mkdir arbitrates collisions; no replacement writer can overwrite.
+        destination.mkdir()
+        for child in temporary.iterdir():
+            if child.is_dir():
+                shutil.copytree(child, destination / child.name)
+            else:
+                shutil.copy2(child, destination / child.name)
+        self.publications.append(destination)
+        if self.fault == "readback":
+            (destination / "manifest.json").write_bytes(b"PRIVATE_CORRUPT_MANIFEST")
+        if self.fault == "uncertain_publish":
+            raise OSError("PRIVATE_AFTER_PUBLICATION")
+
+    def remove(self, path: Path) -> None:
+        self.removals.append(path)
+        assert path not in self.publications
+        shutil.rmtree(path)
+
+    def read_regular(self, path: Path, limit: int) -> bytes:
+        if not path.is_file() or path.is_symlink():
+            raise OSError("not a regular file")
+        with path.open("rb") as stream:
+            return stream.read(limit + 1)
+
+    def binding(self, **changes: object) -> dict[str, object]:
+        """Return independent native scope and request values."""
+        return {
+            "project_id": 55,
+            "issue_iid": 324,
+            "source_sha": BASE_SHA,
+            "source_tree": BASE_TREE,
+            "invariant": "existing behavior remains covered",
+            "test_ids": self.selectors,
+            "repair_paths": self.repair_paths,
+        } | changes
+
+    def request(self, **changes: object) -> object:
+        """Construct the real boundary request only when each test executes."""
+        constructor = cast(Callable[..., object], timing_capture.BeforeTimingRequest)
+        return constructor(**self.binding(**changes))
+
+    def scope(self, **changes: object) -> object:
+        """Supply a separate immutable Main-owned approval value."""
+        constructor = cast(Callable[..., object], timing_capture.BeforeTimingScope)
+        return constructor(**self.binding(**changes))
+
+    def dependencies(self) -> object:
+        """Compose only genuine external command/filesystem/admission ports."""
+        timing = TimingCaptureDependencies(
+            run_command=self.run,
+            monotonic_clock=lambda: 0.0,
+            candidate_worktree=self.source,
+            state_root=self.state,
+            environment={},
+            atomic_write=_write_bytes,
+            remove_owned_tree=self.remove,
+        )
+        constructor = cast(
+            Callable[..., object], timing_capture.BeforeTimingDependencies
+        )
+        return constructor(
+            timing=timing,
+            publish_snapshot=self.publish,
+            project_admission=self.admission,
+            read_regular_file=self.read_regular,
+        )
+
+    def capture(
+        self, *, request: object | None = None, scope: object | None = None
+    ) -> Mapping[str, object]:
+        """Call the genuine producer, never a fake frontend/result action."""
+        producer = cast(
+            Callable[..., Mapping[str, object]],
+            timing_capture.capture_before_timing,
+        )
+        return producer(
+            self.request() if request is None else request,
+            approved_scope=self.scope() if scope is None else scope,
+            dependencies=self.dependencies(),
+        )
+
+    def reload(
+        self, path: Path, *, request: object | None = None, scope: object | None = None
+    ) -> Mapping[str, object]:
+        """Replay through the public read-only validator and same external ports."""
+        producer = cast(
+            Callable[..., Mapping[str, object]],
+            timing_capture.reload_before_timing,
+        )
+        self.reload_only = True
+        return producer(
+            path,
+            request=self.request() if request is None else request,
+            approved_scope=self.scope() if scope is None else scope,
+            dependencies=self.dependencies(),
+        )
+
+
+def test_before_timing_capture_publishes_complete_bound_evidence_then_reloads(
+    tmp_path: Path,
+) -> None:
+    fixture = BeforeTimingFixture(tmp_path)
+    captured = fixture.capture()
+    manifest = Path(cast(str, captured["manifest_path"]))
+    assert manifest.is_file() and manifest.parent in fixture.publications
+    assert fixture.admissions == 1
+    assert fixture.focused == 4
+    evidence = cast(dict[str, object], json.loads(manifest.read_bytes()))
+    assert evidence["source_sha"] == BASE_SHA
+    assert evidence["source_tree"] == BASE_TREE
+    assert evidence["test_ids"] == list(fixture.selectors)
+    assert evidence["repair_paths"] == list(fixture.repair_paths)
+    runs = cast(list[dict[str, object]], evidence["runs"])
+    assert {(run["environment"], run["repeat"]) for run in runs} == {
+        (environment, repeat) for environment in ("py311", "py314") for repeat in (0, 1)
+    }
+    for run in runs:
+        assert run["seed"] == str(int(BASE_TREE[:8], 16))
+        assert fixture.selectors[0] in cast(list[str], run["argv"])
+        assert len(cast(str, run["prepared_environment"])) == 64
+        for key in ("junit", "phases"):
+            artifact = cast(dict[str, str], run[key])
+            path = Path(artifact["path"])
+            assert path.is_relative_to(manifest.parent) and path.is_file()
+            assert hashlib.sha256(path.read_bytes()).hexdigest() == artifact["sha256"]
+    before = {
+        path: path.read_bytes() for path in manifest.parent.iterdir() if path.is_file()
+    }
+    focused = fixture.focused
+    publications = tuple(fixture.publications)
+    assert fixture.reload(manifest) == captured
+    assert fixture.focused == focused and tuple(fixture.publications) == publications
+    assert before == {path: path.read_bytes() for path in before}
+    assert fixture.admissions == 1
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "command_failed",
+        "skipped",
+        "duplicate_collection",
+        "duplicate_report",
+        "duplicate_junit",
+        "malformed_phase",
+        "nonfinite",
+        "boolean_phase",
+        "missing_phase",
+        "wrong_test",
+        "disagreement",
+        "before_publish",
+        "busy",
+    ],
+)
+def test_before_timing_public_producer_refuses_incomplete_evidence_after_control(
+    tmp_path: Path, fault: str
+) -> None:
+    control = BeforeTimingFixture(tmp_path / "control")
+    captured = control.capture()
+    assert control.reload(Path(cast(str, captured["manifest_path"]))) == captured
+    subject = BeforeTimingFixture(tmp_path / "subject", fault=fault)
+    with pytest.raises((TimingCaptureError, ValueError, OSError)) as caught:
+        subject.capture()
+    assert "PRIVATE" not in str(caught.value)
+    assert subject.publications == []
+    assert not subject.state.exists() or not list(subject.state.iterdir())
+    if fault == "busy":
+        assert subject.focused == 0
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("project_id", 56),
+        ("issue_iid", 325),
+        ("source_sha", "d" * 40),
+        ("source_tree", "e" * 40),
+        ("invariant", "different invariant"),
+        ("test_ids", ("tests/test_speed.py::test_foreign",)),
+        ("repair_paths", ("tests/test_foreign.py",)),
+    ],
+)
+def test_before_timing_request_cannot_expand_separate_controller_scope(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    fixture = BeforeTimingFixture(tmp_path)
+    assert fixture.capture()
+    before = tuple(fixture.commands)
+    with pytest.raises((TimingCaptureError, ValueError)):
+        fixture.capture(
+            request=fixture.request(**{field: value}), scope=fixture.scope()
+        )
+    assert tuple(fixture.commands) == before
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("test_ids", ()),
+        ("test_ids", ("tests/test_speed.py::test_existing",) * 2),
+        ("test_ids", ("--collect-only",)),
+        ("test_ids", ("../test_speed.py::test_existing",)),
+        ("repair_paths", ("src/agent_work/timing_capture.py",)),
+        ("repair_paths", ("tests/../src/unsafe.py",)),
+        ("repair_paths", ("/tmp/test_speed.py",)),
+        ("project_id", True),
+        ("issue_iid", "324"),
+    ],
+)
+def test_before_timing_strict_request_rejects_unsafe_or_coerced_selection(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    fixture = BeforeTimingFixture(tmp_path)
+    assert fixture.capture()
+    with pytest.raises((TimingCaptureError, ValueError)):
+        fixture.capture(request=fixture.request(**{field: value}))
+
+
+@pytest.mark.parametrize(
+    "drift",
+    ["head", "tree", "interpreter", "distributions", "dependency", "source", "scope"],
+)
+def test_before_timing_reload_refuses_source_environment_and_scope_drift(
+    tmp_path: Path, drift: str
+) -> None:
+    fixture = BeforeTimingFixture(tmp_path)
+    captured = fixture.capture()
+    path = Path(cast(str, captured["manifest_path"]))
+    if drift == "head":
+        fixture.head = "f" * 40
+    elif drift == "tree":
+        fixture.tree = "f" * 40
+    elif drift in ("interpreter", "distributions"):
+        fixture.fingerprint_drift = drift
+    elif drift == "dependency":
+        (fixture.source / "uv.lock").write_text("version = 99\n")
+    elif drift == "source":
+        (fixture.source / "tests/test_speed.py").write_text(
+            "def test_foreign(): pass\n"
+        )
+    scope = fixture.scope(invariant="foreign") if drift == "scope" else fixture.scope()
+    before = fixture.focused
+    with pytest.raises((TimingCaptureError, ValueError)):
+        fixture.reload(path, scope=scope)
+    assert fixture.focused == before
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing",
+        "partial",
+        "altered",
+        "duplicate_json",
+        "command",
+        "seed",
+        "repeat",
+        "observer",
+        "unsupported",
+        "symlink",
+        "project",
+        "issue",
+        "invariant",
+        "selectors",
+        "paths",
+        "source",
+    ],
+)
+def test_before_timing_reload_rejects_altered_or_noncontroller_proof(
+    tmp_path: Path, mutation: str
+) -> None:
+    fixture = BeforeTimingFixture(tmp_path)
+    captured = fixture.capture()
+    path = Path(cast(str, captured["manifest_path"]))
+    evidence = cast(dict[str, object], json.loads(path.read_bytes()))
+    runs = cast(list[dict[str, object]], evidence["runs"])
+    if mutation in ("missing", "altered", "symlink"):
+        artifact = Path(cast(dict[str, str], runs[0]["junit"])["path"])
+        artifact.unlink()
+        if mutation == "altered":
+            artifact.write_bytes(b"PRIVATE_ALTERED")
+        elif mutation == "symlink":
+            artifact.symlink_to(path)
+    elif mutation == "partial":
+        path.write_bytes(b'{"source_tree":')
+    elif mutation == "duplicate_json":
+        path.write_bytes(
+            b'{"source_tree":"' + BASE_TREE.encode() + b'",' + path.read_bytes()[1:]
+        )
+    else:
+        if mutation == "command":
+            runs[0]["argv"] = ["PRIVATE_WORKER_COMMAND"]
+        elif mutation == "seed":
+            runs[0]["seed"] = "314159"
+        elif mutation == "repeat":
+            runs.pop()
+        elif mutation == "unsupported":
+            runs[0]["environment"] = "py312"
+        elif mutation == "project":
+            evidence["project_id"] = 56
+        elif mutation == "issue":
+            evidence["issue_iid"] = 325
+        elif mutation == "invariant":
+            evidence["invariant"] = "different invariant"
+        elif mutation == "selectors":
+            evidence["test_ids"] = ["tests/test_speed.py::test_foreign"]
+        elif mutation == "paths":
+            evidence["repair_paths"] = ["src/agent_work/unsafe.py"]
+        elif mutation == "source":
+            evidence["source_sha"] = "f" * 40
+        else:
+            evidence = {
+                "schema": "observer",
+                "source_tree": BASE_TREE,
+                "measurements": runs,
+            }
+        path.write_text(json.dumps(evidence))
+    before = fixture.focused
+    with pytest.raises((TimingCaptureError, ValueError, OSError)) as caught:
+        fixture.reload(path)
+    assert "PRIVATE" not in str(caught.value)
+    assert fixture.focused == before
+
+
+def test_before_timing_exclusive_publication_preserves_existing_and_uncertain_artifacts(
+    tmp_path: Path,
+) -> None:
+    fixture = BeforeTimingFixture(tmp_path / "existing")
+    captured = fixture.capture()
+    path = Path(cast(str, captured["manifest_path"]))
+    before = {
+        item: item.read_bytes() for item in path.parent.iterdir() if item.is_file()
+    }
+    with pytest.raises((TimingCaptureError, OSError)):
+        fixture.capture()
+    assert before == {item: item.read_bytes() for item in before}
+    uncertain = BeforeTimingFixture(tmp_path / "uncertain", fault="uncertain_publish")
+    with pytest.raises((TimingCaptureError, OSError)):
+        uncertain.capture()
+    assert len(uncertain.publications) == 1
+    retained = uncertain.publications[0]
+    assert (retained / "manifest.json").is_file()
+    assert retained not in uncertain.removals
+    uncertain.fault = ""
+    assert uncertain.reload(retained / "manifest.json")
+
+
+@settings(max_examples=8)
+@given(milliseconds=st.integers(min_value=20, max_value=999))
+def test_before_timing_generated_duration_rules_keep_exact_producer_control(
+    tmp_path_factory: pytest.TempPathFactory, milliseconds: int
+) -> None:
+    root = tmp_path_factory.mktemp("before-duration")
+    control = BeforeTimingFixture(root / "control")
+    control.duration = milliseconds / 1000
+    captured = control.capture()
+    assert control.reload(Path(cast(str, captured["manifest_path"]))) == captured
+    subject = BeforeTimingFixture(root / "subject", fault="disagreement")
+    subject.duration = milliseconds / 1000
+    with pytest.raises((TimingCaptureError, ValueError)):
+        subject.capture()
+
+
+@pytest.mark.parametrize(
+    "fault", ["source_during", "dependency_during", "environment_during"]
+)
+def test_before_timing_capture_refuses_provenance_change_before_publication(
+    tmp_path: Path, fault: str
+) -> None:
+    control = BeforeTimingFixture(tmp_path / "control")
+    assert control.capture()
+    subject = BeforeTimingFixture(tmp_path / "subject", fault=fault)
+    with pytest.raises((TimingCaptureError, ValueError)):
+        subject.capture()
+    assert subject.publications == []
+
+
+def test_before_timing_capture_without_native_scope_has_no_execution_or_publication(
+    tmp_path: Path,
+) -> None:
+    fixture = BeforeTimingFixture(tmp_path)
+    control = fixture.capture()
+    assert control
+    before = tuple(fixture.commands)
+    producer = cast(
+        Callable[..., Mapping[str, object]], timing_capture.capture_before_timing
+    )
+    with pytest.raises((TimingCaptureError, ValueError)):
+        producer(
+            fixture.request(), approved_scope=None, dependencies=fixture.dependencies()
+        )
+    assert tuple(fixture.commands) == before
+
+
+def test_before_timing_published_readback_failure_preserves_untrusted_snapshot(
+    tmp_path: Path,
+) -> None:
+    control = BeforeTimingFixture(tmp_path / "control")
+    assert control.capture()
+    subject = BeforeTimingFixture(tmp_path / "subject", fault="readback")
+    with pytest.raises((TimingCaptureError, ValueError)):
+        subject.capture()
+    assert len(subject.publications) == 1
+    destination = subject.publications[0]
+    assert destination.exists() and destination not in subject.removals
+    with pytest.raises((TimingCaptureError, ValueError)):
+        subject.reload(destination / "manifest.json")
+
+
+@settings(max_examples=6)
+@given(parameter=st.integers(min_value=0, max_value=99))
+def test_before_timing_generated_exact_selector_identity_is_bound_at_reload(
+    tmp_path_factory: pytest.TempPathFactory, parameter: int
+) -> None:
+    root = tmp_path_factory.mktemp("before-selector")
+    fixture = BeforeTimingFixture(root)
+    fixture.selectors = (f"tests/test_speed.py::test_existing[{parameter}]",)
+    (fixture.source / "tests/test_speed.py").write_text(
+        "import pytest\n"
+        f"@pytest.mark.parametrize('value', [{parameter}])\n"
+        "def test_existing(value):\n    assert value >= 0\n"
+    )
+    fixture.tracked_bytes["tests/test_speed.py"] = (
+        fixture.source / "tests/test_speed.py"
+    ).read_bytes()
+    captured = fixture.capture()
+    path = Path(cast(str, captured["manifest_path"]))
+    assert fixture.reload(path) == captured
+    with pytest.raises((TimingCaptureError, ValueError)):
+        fixture.reload(
+            path,
+            request=fixture.request(
+                test_ids=("tests/test_speed.py::test_existing[foreign]",)
+            ),
+        )
+
+
+class NativeCommandFailureFixture(BeforeTimingFixture):
+    """Exercise the native OS adapter through the public command port."""
+
+    def __init__(
+        self, root: Path, *, fp: FakeProcess, native_error: str, stage: str
+    ) -> None:
+        super().__init__(root)
+        self.fp = fp
+        self.fp.allow_unregistered(False)
+        self.native_error = native_error
+        self.stage = stage
+        self.armed = False
+        self.native_attempts = 0
+
+    def run(self, command: tuple[str, ...], **kwargs: object) -> CommandResult:
+        focused = "pytest" in Path(command[0]).name and "--collect-only" not in command
+        if self.armed and (
+            (self.stage == "focused" and focused)
+            or (self.stage == "published" and bool(self.publications))
+            or self.stage in ("reload", "uncertain")
+        ):
+            self.native_attempts += 1
+
+            def native_failure(_process: object) -> None:
+                if self.native_error == "missing":
+                    raise OSError("PRIVATE_NATIVE_COMMAND")
+                raise subprocess.TimeoutExpired(
+                    command,
+                    1,
+                    output="PRIVATE_NATIVE_OUTPUT",
+                    stderr="PRIVATE_NATIVE_ERROR",
+                )
+
+            self.fp.register(command, callback=native_failure)
+            try:
+                return run_subprocess(command, timeout_seconds=1)
+            finally:
+                assert self.fp.call_count(command) == 1
+        return super().run(command, **kwargs)
+
+
+def before_timing_snapshot_bytes(root: Path) -> dict[Path, bytes]:
+    """Read persisted bytes independently of the producer."""
+    return {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize("native_error", ["missing", "timeout"])
+@pytest.mark.parametrize("stage", ["focused", "published", "reload", "uncertain"])
+def test_before_timing_native_command_failure_is_safe_and_preserves_publication(
+    tmp_path: Path, fp: FakeProcess, native_error: str, stage: str
+) -> None:
+    control = BeforeTimingFixture(tmp_path / "control")
+    control_manifest = Path(str(control.capture()["manifest_path"]))
+    assert control.reload(control_manifest)["manifest_path"] == str(control_manifest)
+    assert control.focused == 4
+    subject = NativeCommandFailureFixture(
+        tmp_path / "subject", fp=fp, native_error=native_error, stage=stage
+    )
+    manifest = Path()
+    before: dict[Path, bytes] = {}
+    removals: tuple[Path, ...] = ()
+    if stage in ("reload", "uncertain"):
+        if stage == "uncertain":
+            subject.fault = "uncertain_publish"
+            with pytest.raises(TimingCaptureError):
+                subject.capture()
+            subject.fault = ""
+            manifest = subject.publications[0] / "manifest.json"
+            assert subject.reload(manifest)["manifest_path"] == str(manifest)
+        else:
+            manifest = Path(str(subject.capture()["manifest_path"]))
+        before = before_timing_snapshot_bytes(subject.state)
+        removals = tuple(subject.removals)
+    subject.armed = True
+    with pytest.raises(TimingCaptureError) as error:
+        if stage in ("reload", "uncertain"):
+            subject.reload(manifest)
+        else:
+            subject.capture()
+    assert "PRIVATE" not in str(error.value)
+    assert str(subject.source) not in str(error.value)
+    assert subject.native_attempts == 1
+    if stage == "focused":
+        assert subject.publications == []
+        assert len(subject.removals) == 1 and not subject.removals[0].exists()
+        assert before_timing_snapshot_bytes(subject.state) == {}
+    elif stage == "published":
+        assert len(subject.publications) == 1 and subject.focused == 4
+        assert len(subject.removals) == 1 and not subject.removals[0].exists()
+        published = before_timing_snapshot_bytes(subject.state)
+        subject.armed = False
+        manifest = subject.publications[0] / "manifest.json"
+        assert subject.reload(manifest)["manifest_path"] == str(manifest)
+        assert published == before_timing_snapshot_bytes(subject.state)
+    else:
+        assert before == before_timing_snapshot_bytes(subject.state)
+        assert tuple(subject.removals) == removals
+        assert subject.focused == 4 and len(subject.publications) == 1
