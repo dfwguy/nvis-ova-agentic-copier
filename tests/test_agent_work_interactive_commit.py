@@ -51,6 +51,7 @@ def _environment() -> dict[str, str]:
         "GIT_AUTHOR_EMAIL": "author@example.invalid",
         "GIT_COMMITTER_NAME": "Test Committer",
         "GIT_COMMITTER_EMAIL": "committer@example.invalid",
+        "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_CONFIG_COUNT": "1",
         "GIT_CONFIG_KEY_0": "core.fsync",
         "GIT_CONFIG_VALUE_0": "none",

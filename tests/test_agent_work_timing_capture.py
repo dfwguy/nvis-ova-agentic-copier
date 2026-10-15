@@ -1040,7 +1040,7 @@ def test_capture_bounded_reader_checks_stat_then_actual_bytes_before_parsing(
             assert limit == (1_048_576 if path.suffix == ".json" else 33_554_432)
             reads.append((path, limit))
             if reader_case == "overflow":
-                path.write_bytes(artifact + b" " * (limit + 1 - len(artifact)))
+                return artifact.ljust(limit + 1, b" ")
             with path.open("rb") as stream:
                 raw = stream.read(limit + 1)
             if reader_case == "nonbytes":
@@ -1059,7 +1059,7 @@ def test_capture_bounded_reader_checks_stat_then_actual_bytes_before_parsing(
             if reader_case == "legacy_nonbytes":
                 return cast(bytes, "PRIVATE_TOKEN=invalid-type")
             if reader_case == "legacy_overflow":
-                return artifact + b" " * (33_554_433 - len(artifact))
+                return artifact.ljust(33_554_433, b" ")
             return path.read_bytes()
 
         dependencies = cast(
