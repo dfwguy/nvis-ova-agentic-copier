@@ -35,6 +35,15 @@ level.
 
 The pytest suite uses `conftest.py` fixtures.
 
+### Recovery records
+
+GitLab holds the durable workflow record. It holds pushed issue checkpoints,
+strict progress receipts in issue notes, and MR and pipeline proof. WIP
+checkpoints save work. They do not prove that work is ready to publish. Local
+worktrees and JSON state are caches that can be rebuilt. Local locks protect
+live processes. Migration keeps old local recovery proof until it can be
+checked against GitLab.
+
 ### Configuration (`pyproject.toml`)
 
 This is the source of truth for project metadata and dependencies. It holds
@@ -57,8 +66,8 @@ entry points.
   `scripts/agent-work-systemd-run.sh`. It is invoked by
   `systemd/{{ project_slug }}-agent-work.service`. It has no generated-project
   Bash test. The template repository checks it in `tests/test_agent_work_systemd_smoke.py`
-  before rendering. Recoverable records are below the XDG state directory. The project lock
-  is there. Durable issue worktrees are too.
+  before rendering. The XDG state directory holds local state projections,
+  process locks, and rebuildable issue worktrees.
 - **Rationale:** this is a systemd boundary, not an interactive CLI or
   sourceable library. The installed service unit uses its stable `scripts/`
   path.

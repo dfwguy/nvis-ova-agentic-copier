@@ -65,6 +65,15 @@ Python console commands are in generated `pyproject.toml` under
 `test_template.py` calls `copier.run_copy()` with test answers. It checks the
 output.
 
+### Recovery records
+
+GitLab holds the durable workflow record. It holds pushed issue checkpoints,
+strict progress receipts in issue notes, and MR and pipeline proof. WIP
+checkpoints save work. They do not prove that work is ready to publish. Local
+worktrees and JSON state are caches that can be rebuilt. Local locks protect
+live processes. Migration keeps old local recovery proof until it can be
+checked against GitLab.
+
 ## Filesystem structure deviations
 
 This Copier template has its payload in `template/`. It also ships the
@@ -96,8 +105,8 @@ This Copier template has its payload in `template/`. It also ships the
 - **Actual paths:** the systemd-only wrapper and entry point is
   `scripts/agent-work-systemd-run.sh`. Its mirror is in `template/scripts/`.
   Its service units are in `systemd/` and `template/systemd/`. Its behavior is
-  tested by `tests/test_agent_work_systemd_smoke.py`. Recoverable records are below the XDG state directory.
-  The project lock is there. Durable issue worktrees are too.
+  tested by `tests/test_agent_work_systemd_smoke.py`. The XDG state directory
+  holds local state projections, process locks, and rebuildable issue worktrees.
 - **Rationale:** this is a systemd boundary, not an interactive CLI or
   sourceable library. The installed service unit uses its stable `scripts/`
   path.

@@ -5,7 +5,7 @@ summary: Set up a recoverable serial agent loop.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-10-02
+last_reviewed: 2026-10-15
 related:
   - path: ../reference/serial-gitlab-agent-loop.md
     why: Defines the commands, lifecycle, JSON, and exit contract.
@@ -463,8 +463,8 @@ reporting work. Other wrapper housekeeping calls have a 120-second deadline.
 The applied worker remains governed by its remaining 10,800-second budget.
 If the outer timeout expires, systemd
 terminates the whole control group. It gives the group 30 seconds to exit and
-records the timeout in the journal. The durable ledger and
-issue worktree remain for normal retry or human diagnosis. Run only one timer
+records the timeout in the journal. Pushed checkpoints and accepted progress notes remain in GitLab. Local ledger
+and worktree caches support normal retry or diagnosis while they exist. Run only one timer
 host for a project. The service's environment and XDG state directory must be
 writable only by the operator. If `systemctl --user`
 reports `Failed to connect to bus`, stop and fix the user-manager socket. Do
@@ -787,7 +787,67 @@ increase worker budgets to bypass the sizing decision. The explicit retry
 preserves the durable recovery path. The next worker session reassesses the
 revised scope before mutation.
 
-## Move old loop proof.
+## Rebuild after host or local state loss.
+
+Keep the timer stopped until claim ownership is clear. Load the approved
+checkout-local credential route and configured host and numeric project ID on
+the new VM. Keep the same factory identity. Do not copy secrets into issue notes.
+
+1. Inspect the issue's remote progress history and pushed checkpoint branch.
+   Check the exact issue, run, operation, claim generation, and full commit SHA.
+2. Resolve any claim stop first. Fence the former dispatcher before following
+   the reported recovery action. A missing XDG directory or an old timestamp
+   does not prove the former owner has stopped.
+3. Create an exact `loop recover` preview for the issue, using the commands
+   below. Review `operational_plan.action` and its evidence. Apply that same
+   plan to fetch the checked commit and rebuild the ledger and worktree.
+   Do not create a replacement issue branch or MR by hand.
+4. Check any discovered MR against its exact source SHA, target, project, and
+   closing issue. Keep existing review work bound to that MR.
+5. Resume the full workflow and repeat required checks. Rebuilt coding work
+   runs fresh Red, restores saved implementation, then runs Green. A prior
+   passing note does not stand in for current verification.
+
+| Reported condition | Operator action |
+| --- | --- |
+| Pushed commit lacks an accepted receipt | Let the controller reconcile the prepared event with the exact remote tip. Do not make another checkpoint commit. |
+| Accepted receipt lacks local state | Rebuild from GitLab and repair the missing local projection. |
+| Prepared checkpoint object was lost before push | Keep the earlier accepted checkpoint. Inspect the reported missing commit; do not claim its work was saved remotely. |
+| Unknown or conflicting claim owner | Stop. Fence and resolve the exact owner before retry. Never steal a claim by timeout. |
+| Conflicting receipt SHA, branch tip, or MR | Keep all evidence. Resolve the named identity conflict and obtain a fresh preview. |
+| Legacy local proof has no remote receipt | Keep the original ledger and worktree. Use the reviewed migration path below before deleting local state. |
+
+The [reference](../reference/serial-gitlab-agent-loop.md#remote-progress-receipts)
+defines receipt fields. The [architecture](../explanation/serial-agent-loop-recovery-design.md#gitlab-ownership-and-local-caches)
+explains ownership and interrupted writes.
+
+## Migrate a retained local checkpoint.
+
+Keep the old XDG directory and worktree until this migration succeeds. Stop
+the timer and service. Use the same exact-IID `loop recover` preview and apply
+route shown below. For an existing local record with no remote receipt,
+`operational_plan.action` is `migrate_legacy_checkpoint`. Review its record
+revision, source SHA, branch, and remote refs.
+
+Apply rechecks the same evidence under the project lock. It keeps the original
+JSON bytes in the local `recovery/` directory and keeps the worktree files.
+Every migration binds the current exclusive claim, run, and actual generation.
+A changed revision or SHA rejects the plan before remote mutation.
+
+| Retained work | What to inspect after migration |
+| --- | --- |
+| Work snapshot | Prepared note, exact pushed WIP checkpoint, and accepted note. Run fresh verification; WIP is not publication proof. |
+| Already-published open handoff | Fresh MR, source commit, pipeline, and required-job observations. The checked candidate history keeps the same MR and source SHA without repushing or turning it into WIP. Old review permission is cleared; current observation decides the next handoff. |
+| Complete work | Fresh closed-issue and applicable completion proof. Checked history retains the published candidate or verified unpublished closure. A deleted merged source is not recreated or repushed. |
+
+Review the checked history before retiring any old host storage. Pending,
+failed, or missing pipeline proof is not a passing handoff.
+
+## Move old loop projections.
+
+The separate `migration preview` and `migration apply` commands below handle
+old lifecycle projections. They do not replace checkpoint migration for an
+existing ledger record.
 
 Before moving old data, stop the timer and ensure no service segment is active.
 The preview lists running, awaiting-human, failed, blocked, and closed GitLab
@@ -838,10 +898,23 @@ review that fixed label-spec action and use the same stopped-timer order. Apply
 checks the preview again, creates lost fixed labels or the `agent-work::manual`
 marker, and fixes their color or text. It never assigns a label to an issue.
 
-When status finds a nonblocked retained item that needs restore, make a separate
-plan for that exact IID. Do not use normal `loop run`; it would skip the
-targeted proof check. For a blocked item, use the `loop retry` plan above; it
-shares the `recovery resolve --choice retry` predicate.
+Make a separate plan for the exact issue that needs restore. Remote checkpoint
+recovery uses `operational_plan.action=reconstruct_remote_checkpoint`. Review
+its event ID, checkpoint SHA, base SHA, branch, and remote refs. Apply rejects
+moved evidence and rebuilds caches from checked GitLab proof. Legacy checkpoint
+migration uses the same commands with `migrate_legacy_checkpoint` instead.
+Ordinary startup stops on unmigrated legacy records before replacing caches.
+Review that migration plan first; its apply preserves the original JSON bytes.
+
+If ownership is stale or unknown, stop and follow the reported fence or
+handover action. A timer delay does not authorize takeover. Keep prepared
+objects and leases for an exact retry under the same owner. If a later
+invocation cannot retry them, recovery must verify no push, record an aborted
+operation, and release it before proceeding.
+
+For other blocked local work, use the `loop retry` plan above. It shares the
+`recovery resolve --choice retry` predicate. Do not substitute one route for
+another or edit the reviewed plan.
 
 ```bash
 uv run agent-work loop recover --issue-iid IID --json >agent-work-recover-IID-plan.json
@@ -850,6 +923,20 @@ uv run agent-work loop recover --issue-iid IID --apply \
   --plan-file agent-work-recover-IID-plan.json --json
 uv run agent-work loop status --issue-iid IID --json
 ```
+
+After a `reconstructed` result, inspect its next action. Run the ordinary loop
+for fresh checks. Recovery clears old validation. It does not publish work or
+prove readiness.
+
+| Reported recovery | What to expect |
+| --- | --- |
+| Published candidate with only checked unchanged bookkeeping | Apply restores the exact checkout before fresh observation of the same MR and source SHA. Preview restores nothing. Dirty or conflicting local work is kept and refused. No source repush or new MR. Pending, failed, or missing pipeline proof is not a passing handoff. |
+| Genuine unfinished or uncertain WIP | Saved WIP and candidate remain separate. Resume the required workflow and fresh validation. A successful candidate pipeline does not validate later work. |
+| Human merge and deleted source | Fresh exact completion proof with no unfinished WIP. A missing local copy of the same candidate uses fresh remote commit and ancestry proof. Distinct unknown WIP still refuses. No source or checkout is recreated or repushed. |
+
+Keep unknown content and dirty files. Keep pending workflow or repair proof.
+Follow the reported recovery action. Equal trees alone do not approve workflow
+WIP.
 
 Each apply rechecks the reviewed plan under the project lock. Create a new
 preview after an identity rotation, ledger revision, or a change to target,

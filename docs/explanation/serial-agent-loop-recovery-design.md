@@ -5,7 +5,7 @@ summary: Learn how the loop recovers unattended work.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-10-02
+last_reviewed: 2026-10-15
 related:
   - path: serial-gitlab-agent-loop.md
     why: Explains the operational model implemented by this architecture.
@@ -41,9 +41,10 @@ explanation](serial-gitlab-agent-loop.md) explains use. The
 [reference](../reference/serial-gitlab-agent-loop.md) owns commands, schemas,
 states, and exit codes. The setup guide owns user steps.
 
-The scheduler was healthy, but missed recovery, repair, and post-publish work.
-The new state machine keeps worktrees and one coarse `WORKFLOW` boundary. It
-stores no checkpoints for individual agent roles or workflow stages.
+GitLab holds the durable workflow record. Pushed commits save work; issue notes
+save checked progress. The MR and its pipelines hold review and test proof.
+The local ledger and worktrees are caches. Recovery still starts at the coarse
+`WORKFLOW` boundary. It does not restore individual agents or their messages.
 
 ## Evidence and confirmed defects
 
@@ -77,7 +78,8 @@ services stay as proof until a user reviews a migration preview.
 
 ## State model
 
-GitLab is the shared queue. A small local ledger holds run detail not in labels.
+GitLab holds the task contract, claim, and progress history. The local ledger
+projects checked remote evidence into the existing state machine.
 
 ```mermaid
 stateDiagram-v2
@@ -116,8 +118,7 @@ GitLab labels stay broad:
   superseded, satisfied, or unfit work.
 
 The three repair and close labels exclude each other and running,
-awaiting-human, blocked, and failed. None is selectable. The ledger is the
-log. It splits `agent::running` into `preparing`, `executing`, `retry-wait`,
+awaiting-human, blocked, and failed. None is selectable. The local ledger projects checked remote progress. It splits `agent::running` into `preparing`, `executing`, `retry-wait`,
 `publishing`, `observing`, and `repair`. `agent::repair_failed` keeps plan ID,
 proof delta, fault, time, and worktree. `agent::blocked` covers authority,
 safety, and open proof; `agent::failed` is rare and fatal. Labels show owner.
@@ -280,31 +281,102 @@ control group after 30-second TERM-to-KILL grace. It retains
 and worktree support retry and diagnosis. The timer owns no workflow state or
 checkout cleanup.
 
-## Durable ledger and worktrees
+## GitLab ownership and local caches
 
-The XDG state directory uses GitLab host and numeric project ID as its key. Reconcile
-this ledger before selecting work. Each active issue has one durable worktree
-and one record. The record tells recovery what to do, in order.
+Each record has a clear owner. Losing the full XDG state directory must not
+lose pushed work or accepted workflow history.
 
-| Durable field group | Purpose and constraint |
+| Record | Owner and purpose |
 | --- | --- |
-| Schema version, project identity, issue IID, and work kind | Name one known record, project, and issue. |
-| State, coarse workflow phase, attempt count, retry deadline, and last transition time | Use only this state and phase. Retry by this count and deadline. |
-| Base, source, and target branches with observed commit IDs | Keep branch identity and the commit IDs used to check it. |
-| Verified reconciliation target commit | Keep the exact SHA used to merge the worktree with the target branch before replay. |
-| Merge-request identity and verified publication evidence | Keep the MR IID, project identities, branches, exact source SHA, and publication marker. |
-| Worker protocol version, latest result kind, and historical receipts | Keep them readable for legacy records. Treat receipt prose as non-authoritative. Keep controller evidence markers and the human-handoff marker. |
-| Stable error code, redacted summary, and explicit next action | Keep a stable error identity and next action. Redact detail. |
-| Transition intent | Write an external-change intent first, so it can be replayed safely. |
+| Pushed issue branch | Recoverable work product. Explicit checkpoints can save WIP. A WIP commit is never a validated publication candidate. |
+| GitLab issue | Task contract, claim owner, and visible state through existing `agent::` labels. Labels are projections, not proof of a passing candidate. |
+| Factory-authored progress notes | Versioned machine records bind checked progress to exact commits and stable operations. Ordinary comments stay untrusted context. |
+| MR and pipelines | Review handoff and exact-source verification proof. Recovery checks the current MR and pipeline; old passing notes cannot replace those checks. |
+| Local ledger and worktree | Derived state and a checkout cache, keyed by host and numeric project ID. Local locks guard live processes only. |
+| Legacy local records and stashes | Retained migration evidence. Keep them until an exact reviewed migration can bind them to GitLab. Never apply or drop a stash automatically. |
 
-| Condition | Ledger or worktree action |
+The agent requests a bounded action through MCP. The trusted controller checks
+identity and makes Git and GitLab changes. Worker text cannot choose a remote,
+grant a claim, or turn WIP into publication proof. A worker gets no general
+GitLab write tool.
+
+### Checkpoint and receipt order
+
+A push and an issue note cannot be atomic. The controller records a prepared
+receipt, pushes the exact commit with a lease, reads the remote branch back,
+and records acceptance. Only then does it update the cache and label view.
+Stable operation IDs and full SHAs make each boundary repeatable.
+
+| Interruption | Safe reconciliation |
 | --- | --- |
-| A record is new, resumed, or stopped mid-step | Atomically write the ledger with restricted permissions. Reconcile before work resumes. |
-| A record is corrupt, unsupported, missing, unknown, or ambiguous | Fail closed as `agent::blocked`. Use `agent::failed` only if safe recording or reconciliation fails. |
-| A durable worktree, commit, or verified remote ref is found | Keep it with its record as normal persistence. Do not make a competing worktree. |
-| A stash is found | Inventory it and associate it with its worktree as emergency evidence. Never apply, drop, or clean it up automatically. |
-| Cleanup is safe | Clean only the durable worktree owned by a terminal, reconciled record. Keep its ledger and ownership evidence until then. |
-| Diagnostics are stored | Redact them. Never save tokens, secrets, credentials, issue-body authority, or unredacted worker transcripts. |
+| Prepared note exists; push is absent | The same owner may retry only the original objects and leases. After object loss or a new invocation, verify that no push occurred, record an explicit aborted disposition, then release. Never mark absent work accepted. Check an absent first ref before object lookup. Restore prior accepted work from its own checked ref. With no prior checkpoint, return checked preparation with no invented checkpoint SHA. |
+| Push succeeded; acceptance note is absent | Verify the prepared receipt and remote tip. Record acceptance for the same operation; create no new commit. |
+| Acceptance exists; local projection is absent | Rebuild the record and worktree from checked remote proof. Repair only the missing projection. |
+| An MR exists; local MR identity is absent | Discover one exact matching MR and verify its project, branches, source SHA, and closing issue. Reuse it. |
+| Notes, branch tips, claims, or MRs conflict | Stop with the exact conflicting identity and next recovery action. Never choose the newest plausible note or MR. |
+
+Receipts bind host, project, issue, run, operation, sequence, predecessor,
+phase, state, typed workflow lane and work kind. They also bind full commit
+and base SHAs, completed work, next action, bounded failure, and claim generation.
+Parsing rejects unknown or malformed fields.
+The controller checks the note author. It checks claims against Git, the MR,
+and pipelines. Notes contain no secrets or raw transcripts.
+
+Ordinary WIP starts on the task branch. For existing-MR work, WIP uses a
+separate recovery branch. An accepted candidate also keeps its exact source
+SHA while fresh checks use that recovery branch, even before an MR exists.
+Task identity owns the worktree and recovery ref. Remediation uses its checked
+MR source; that source may belong to a different issue. This keeps saved work
+and the reviewed source apart.
+Each new WIP commit keeps the prior verified WIP commit as a parent. Older
+work remains reachable. Publication still needs fresh candidate checks and
+normal human review.
+
+Candidate protection comes from accepted operations in checked history.
+Aborted operations and released-only notes cannot supply it. New WIP does not
+erase prior candidate history. Before a source replacement, the controller
+keeps each older checked product at its own task-and-SHA retained ref. It
+checks that immutable ref and the exact source and claim leases. Active WIP
+recovery refs serve a separate purpose. Saved history preserves work; it does
+not authorize publication.
+
+### Claims and reconstruction
+
+The serial dispatcher holds one remote claim generation. Receipts bind the
+actual remote project claim, run, and generation. Generations can advance
+for other issues between two runs of the same issue. Claim release updates
+the local view. Local checks use typed host, boot, and process identity.
+Local PID locks do not grant cross-host authority. A new VM must establish the checked
+claim before it advances work. A stale or unknown owner is a recovery stop;
+clock age alone never permits takeover. An operator must fence the former
+owner and follow the exact reported claim action.
+
+After local state loss, the controller reads GitLab receipts and branch refs.
+It checks their chain and identities. It fetches the exact accepted commit. It
+then recreates the worktree and builds the ledger. It keeps three facts apart:
+the original baseline, the accepted candidate, and the latest real WIP. A later
+state note cannot hide saved work.
+
+| Saved work after publication | Recovery |
+| --- | --- |
+| Only unchanged bookkeeping | Independent content and worktree proof allows fresh observation of the same MR and candidate. Applied recovery restores the exact candidate checkout before observation continues. Preview restores nothing. No repush, new MR, or old passing permission is needed. |
+| Genuine unfinished or unknown work | Keep WIP and candidate separate. Resume work with the checked current source lease and original restoration baseline. A passing candidate pipeline cannot approve the WIP. |
+| Human merge with deleted source | Fresh exact MR, pipeline, and required-job proof permits comparison without the deleted candidate branch. Physical WIP still needs strict ref, metadata, tree, and worktree checks. Unfinished work prevents completion. The deleted source is not repushed. If work and candidate are the same object but absent locally, fresh remote non-WIP commit and baseline ancestry proof permit factual completion. No checkout is recreated. Distinct unknown WIP still refuses. |
+
+Genuine unfinished WIP returns to a fresh workflow. Ordinary coding restores
+tests at the original base. It gets a fresh actual Red failure. It then restores
+production and runs fresh Green checks. Content and remediation restore the
+full saved tree. Each uses its own validation contract. Old passing receipts
+cannot authorize publication after reconstruction.
+
+Ordinary startup stops for old records that need migration. It does not
+replace their local caches. Use only the reviewed migration. It keeps the
+original JSON bytes and
+creates checked remote history. Work snapshots use prepared, push, and accepted
+steps. Already-published or complete work instead gets fresh MR, commit, and
+applicable pipeline and job checks. It keeps the existing source and candidate
+identity without a repush. Every migration uses the current exclusive claim,
+run, and actual generation. Old passing proof cannot grant a new handoff.
 
 ## Invariants
 
@@ -316,7 +388,7 @@ The table maps each invariant to the required control or evidence.
 | Resumable work | Do not claim new work while resumable running work exists. |
 | Retry selection | `RETRY_WAIT` records queue; they are not concurrent owners. Ordinary unpinned selection uses durable state, resumes one immediate record, and fails closed when more than one immediate record exists. Passive owner-marker reconciliation applies to status, inventory, and reviewed exact-IID recovery. Due retries remain in deterministic deadline/IID order. Unknown owner evidence or shared branch, worktree, or MR identity fails closed in that recovery path. |
 | New-issue eligibility | Project-level loop enablement permits unattended work. A new issue must be open and non-confidential. It must have no `agent::running`, `agent::awaiting-human`, `agent::blocked`, or `agent::failed` label and no ledger record. |
-| Issue identity | One issue has one durable worktree and one authoritative source branch. |
+| Issue identity | One task owns its checked checkpoint history, worktree, and recovery ref. Its verified remediation source can belong to another issue. Existing-MR WIP and accepted unpublished candidates keep their source fixed during fresh checks. |
 | MR uniqueness | Existing-MR remediation uses the verified MR source branch. It never makes a second MR. |
 | Durable transitions | A transition is replayable. Its intent is durable before an external write. Reconciliation is safe after interruption on either side of that write. |
 | Exact-source observation | During exact-source pipeline observation, a human merge completes the record only after fresh evidence corroborates the configured project and recorded MR IID. It must also corroborate both MR project identities and branches, the recorded exact source SHA, the closing relationship, the closed issue, and that SHA's successful pipeline with at least one current required job and success from every current required job. Identity mismatches block. For a closed merged issue, missing or non-successful current required-job proof preserves its closed wrapper for a later recheck; it cannot complete the record. |
@@ -434,8 +506,8 @@ full exit-code table.
 
 ## Recovery and reconciliation
 
-Reconciliation uses ledger intent and external evidence to choose the next safe
-transition.
+Reconciliation checks remote receipts, branch tips, claims, MRs, and pipelines.
+It compares local intent with that proof to choose the next safe transition.
 
 | Condition and evidence | Recovery action or stop condition |
 | --- | --- |
@@ -444,7 +516,7 @@ transition.
 | Replay needs target-branch reconciliation. | Persist the exact verified target commit. Recovery uses that commit, so interruption cannot compare the prospective publication tree with a later target tip. An unresolved conflict, or a missing, mismatched, or ambiguous merge identity, fails closed before publication. |
 | An awaiting-human projection is checked against its exact MR source SHA and factory-authored issue handoff, even when its label exists. | Repair a missing handoff before projecting the label. A transient handoff-write failure keeps durable retry state and prevents a new awaiting-human label. After an interruption, reuse an already-written verified note before repairing the label. |
 | A legacy ordinary `PUBLISHING` or `READY_TO_PUBLISH` record has `source_sha`, no `merge_request_draft`, and `intent=null`. | Return side-effect-free to its lane finalizer. Reconciliation never fabricates a draft from issue text. |
-| A worktree is missing and no uncommitted evidence can be lost. | Recreate it only from recorded and verified commits. |
+| Local state or a worktree is missing. | Recreate it from checked remote receipts and exact pushed commits. Retain legacy evidence and repeat verification. |
 | A durable worktree is dirty. | Keep it for its next workflow attempt. Normal shutdown does not clean or stash it. |
 | An orphan worktree, branch, label, or stash has unproved ownership. | Inventory it and block it for a human decision. |
 | An applied activation starts with closed lifecycle projections. | Reconcile them in one bounded IID-ordered inventory before resuming or selecting open work. |
@@ -486,7 +558,7 @@ or merge.
 | --- | --- |
 | Untrusted GitLab issue text or worker results | They cannot select a project, grant credentials, weaken sandboxing or approval policy, or authorize approval or merge. |
 | Project and GitLab identity | Each API call uses the configured numeric project ID. Git and MR identity must match that project. |
-| Local durability | The ledger and worktrees are not a distributed lock or a same-user security boundary. One host owns unattended work for a project. |
+| Claim authority | Remote claim generations serialize dispatch. Local locks guard live processes. Stale or unknown remote ownership stops takeover. |
 | External credentials | Existing credential providers keep secrets out of the ledger and journal. |
 | Protected agent-policy work | Use a human-directed lane unless a separate secure cross-agent design has been reviewed. Record this boundary as `agent::blocked`. |
 | Publication boundary | Check changed paths in the durable worktree, including template mirrors. Do not weaken the sandbox or treat the issue as authority. |

@@ -21,7 +21,7 @@ from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
-from typing import Protocol
+from typing import Protocol, cast
 
 from . import actor_frontend, approved_scope, models, test_executor
 from .classification import ClassificationError, classify_work
@@ -102,6 +102,13 @@ from .ports import (
     LedgerPort,
     ProjectLockFactory,
     RepositoryPort,
+)
+from .progress import (
+    ControllerIdentity,
+    MigrationPreview,
+    ProgressGitLab,
+    ProgressRepository,
+    RemoteLedger,
 )
 from .red_checkpoint import (
     RedCheckpointDependencies,
@@ -2354,6 +2361,77 @@ def _repair_evidence_copy(evidence: Mapping[str, object]) -> dict[str, object]:
     return {key: value for key, value in evidence.items()}
 
 
+def _durable_recovery_preview(
+    request: CommandRequest,
+    *,
+    wired: RuntimeDependencies,
+    project: GitLabProject,
+    username: str,
+) -> CommandReport | None:
+    """Bind remote reconstruction or legacy migration to the existing reviewed plan."""
+    ledger = wired.ledger
+    target = request.issue_iid
+    if (
+        not isinstance(ledger, RemoteLedger)
+        or request.command != "loop.recover"
+        or target is None
+    ):
+        return None
+    record = ledger.load_read_only(target)
+    if record is None:
+        return None
+    chain = ledger.gitlab.read_progress(target)
+    evidence: dict[str, str | int | bool | None]
+    if chain:
+        event = chain[-1]
+        evidence = {
+            "event_id": event.event_id,
+            "checkpoint_sha": event.commit_sha,
+            "source_branch": event.source_branch,
+            "base_sha": event.base_sha,
+        }
+        action = "reconstruct_remote_checkpoint"
+        next_action = "Review the exact remote checkpoint plan; apply recreates local caches and repeats verification."
+    else:
+        preview = ledger.migrate(target, apply=False)
+        if not isinstance(preview, MigrationPreview):
+            raise RuntimeError("legacy migration preview did not bind evidence")
+        evidence = {
+            "record_revision": preview.expected_revision,
+            "source_sha": preview.expected_source_sha,
+            "source_branch": record.source_branch,
+        }
+        action = "migrate_legacy_checkpoint"
+        next_action = "Review the bound legacy checkpoint migration; apply preserves original JSON; work uses an explicit checkpoint transaction, while existing publication or completion uses fresh checked evidence without repushing its source."
+    if isinstance(wired.repository, GitRepository):
+        refs = wired.repository.progress_recovery_refs(
+            target, chain[-1] if chain else None
+        )
+        evidence.update(refs)
+        next_action += " Apply verifies claim authority; unresolved claims require the recorded owner to release or a verified fence and explicit handover."
+    plan = OperationalPlan(
+        command=request.command,
+        action=action,
+        project={
+            "host": wired.config.host,
+            "project_id": project.id,
+            "default_branch": project.default_branch,
+        },
+        authenticated_username=username,
+        target_iid=target,
+        evidence=evidence,
+    )
+    return CommandReport(
+        command=request.command,
+        applied=False,
+        outcome="recovery_preview",
+        project={"host": wired.config.host, "project_id": project.id},
+        operational_plan=plan,
+        summary="Remote recovery evidence bound for review.",
+        next_action=next_action,
+    )
+
+
 def _operational_preview(
     request: CommandRequest,
     *,
@@ -2363,6 +2441,11 @@ def _operational_preview(
     target_owner_status: str | None = None,
 ) -> CommandReport:
     """Choose one harmless canary/recovery checkpoint without selecting work."""
+    durable = _durable_recovery_preview(
+        request, wired=wired, project=project, username=username
+    )
+    if durable is not None:
+        return durable
     records = tuple(wired.ledger.list_records())
     gate = _inspect_pipeline_gate(
         gitlab=wired.gitlab,
@@ -2689,6 +2772,7 @@ class RuntimeCompositionDependencies:
     invoke: InvokerPort
     checkpoint_store: RuntimeCheckpointStore
     create_checkpoint: RuntimeCheckpointCreator = create_red_checkpoint
+    controller_identity: Callable[[], ControllerIdentity] | None = None
 
 
 @dataclass(frozen=True)
@@ -3086,6 +3170,15 @@ def observe_stage_timing_identity(
         return None
 
 
+def _controller_identity() -> ControllerIdentity:
+    """Read trusted process facts only at the runtime composition boundary."""
+    return ControllerIdentity(
+        machine=os.uname().nodename,
+        boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+        process_id=os.getpid(),
+    )
+
+
 def build_runtime_dependencies(
     *,
     debug: bool,
@@ -3111,6 +3204,7 @@ def build_runtime_dependencies(
             config,
             run_subprocess,
             service_environment=os.environ,
+            controller_identity=_controller_identity,
             diagnostic_sink=lambda diagnostic: logger.info("%s", diagnostic),
             test_execution_policy=test_execution_policy,
         )
@@ -3131,6 +3225,11 @@ def build_runtime_dependencies(
         invoke = composition.invoke
         checkpoint_store = composition.checkpoint_store
         create_checkpoint = composition.create_checkpoint
+
+    if isinstance(repository, GitRepository):
+        if composition is not None and composition.controller_identity is not None:
+            repository.bind_controller_identity(composition.controller_identity)
+        repository.bind_progress_mr(gitlab.find_merge_request_by_branch)
 
     if test_execution_policy is not None:
         try:
@@ -3163,12 +3262,27 @@ def build_runtime_dependencies(
         )
 
     now = lambda: datetime.now(UTC)
-    ledger = JsonLedger(config.state_root, clock=now)
+    # Native startup reconciles GitLab into this projection before a worker
+    # starts. The live Red producer must re-read its bound local revision and
+    # assets without remote I/O preceding those safety preconditions.
+    local_projection = JsonLedger(config.state_root, clock=now)
+    ledger: LedgerPort = (
+        RemoteLedger(
+            config=config,
+            cache=local_projection,
+            gitlab=cast("ProgressGitLab", gitlab),
+            repository=cast("ProgressRepository", repository),
+            clock=now,
+            run_id=f"run-{os.getpid()}-{time.time_ns()}",
+        )
+        if composition is None or hasattr(gitlab, "read_progress")
+        else local_projection
+    )
 
     def load_red_checkpoint(
         project_id: int, issue_iid: int, base_sha: str
     ) -> RedCheckpointEvidence | None:
-        record = ledger.load_read_only(issue_iid)
+        record = local_projection.load_read_only(issue_iid)
         if record is None:
             return None
         evidence = repository.read_red_checkpoint_ref(
@@ -3190,7 +3304,7 @@ def build_runtime_dependencies(
         issue_iid: int, request: RedCheckpointRequest, expected_tree_oid: str
     ) -> RedCheckpointEvidence:
         original = (
-            ledger.load_read_only(issue_iid)
+            local_projection.load_read_only(issue_iid)
             if test_execution_policy is not None
             else None
         )
@@ -3204,7 +3318,7 @@ def build_runtime_dependencies(
             base_sha = original.source_sha
 
             def verify_identity() -> None:
-                current = ledger.load_read_only(issue_iid)
+                current = local_projection.load_read_only(issue_iid)
                 if (
                     current is None
                     or current.project_id != original.project_id
@@ -3248,13 +3362,13 @@ def build_runtime_dependencies(
             return result
 
         def snapshot_test_tree(base_sha: str, paths: tuple[str, ...]) -> str:
-            record = ledger.load_read_only(issue_iid)
+            record = local_projection.load_read_only(issue_iid)
             if record is None:
                 raise RedCheckpointError("red checkpoint record is unavailable")
             return repository.snapshot_test_tree(record.worktree, base_sha, paths)
 
         def write_evidence(evidence: RedCheckpointEvidence) -> None:
-            record = ledger.load_read_only(issue_iid)
+            record = local_projection.load_read_only(issue_iid)
             if record is None:
                 raise RedCheckpointError("red checkpoint record is unavailable")
             repository.write_red_checkpoint_ref(record.worktree, evidence)
@@ -3263,7 +3377,7 @@ def build_runtime_dependencies(
             issue_iid=issue_iid,
             request=request,
             dependencies=RedCheckpointDependencies(
-                load_record=ledger.load_read_only,
+                load_record=local_projection.load_read_only,
                 current_head=repository.head,
                 changed_paths=repository.changed_paths,
                 run_red_command=(
@@ -3296,6 +3410,17 @@ def build_runtime_dependencies(
             read_tree=repository.checkpoint_tree,
         )
 
+    class DurableProjectLock(XdgProjectLock):
+        """Release the remote dispatcher claim only after the local activation drains."""
+
+        def __exit__(self, *args: object) -> bool:
+            try:
+                if isinstance(ledger, RemoteLedger):
+                    ledger.release()
+            finally:
+                super().__exit__(*args)
+            return False
+
     return RuntimeDependencies(
         config=config,
         observe_stage_identity=observe_stage_identity,
@@ -3303,7 +3428,7 @@ def build_runtime_dependencies(
         gitlab=gitlab,
         repository=repository,
         invoke=invoke,
-        lock=lambda: XdgProjectLock(config.state_root / "project.lock"),
+        lock=lambda: DurableProjectLock(config.state_root / "project.lock"),
         issue_lock=lambda issue_iid: XdgIssueLock(config.state_root, issue_iid),
         clock=now,
         monotonic=time.monotonic,
@@ -4886,6 +5011,52 @@ def dispatch(
             current_username = gitlab.verify_authenticated_user()
             if not isinstance(current_username, str) or not current_username:
                 raise RuntimeError("authenticated identity evidence is unavailable")
+            if reviewed.action in {
+                "reconstruct_remote_checkpoint",
+                "migrate_legacy_checkpoint",
+            }:
+                if not isinstance(ledger, RemoteLedger) or reviewed.target_iid is None:
+                    raise RuntimeError("durable recovery boundary is unavailable")
+                current = _durable_recovery_preview(
+                    request,
+                    wired=wired,
+                    project=current_project,
+                    username=current_username,
+                )
+                if current is None or current.operational_plan != reviewed:
+                    raise RuntimeError(
+                        "remote recovery evidence changed; preview again"
+                    )
+                target = reviewed.target_iid
+                if reviewed.action == "migrate_legacy_checkpoint":
+                    revision = reviewed.evidence.get("record_revision")
+                    sha = reviewed.evidence.get("source_sha")
+                    if not isinstance(revision, int) or not isinstance(sha, str):
+                        raise RuntimeError(
+                            "legacy migration reviewed binding is invalid"
+                        )
+                    updated = ledger.migrate(
+                        target,
+                        apply=True,
+                        expected_revision=revision,
+                        expected_source_sha=sha,
+                    )
+                    if not isinstance(updated, LedgerRecord):
+                        raise RuntimeError(
+                            "legacy migration did not return a checkpoint projection"
+                        )
+                else:
+                    updated = ledger.reconcile(target, apply=True)
+                return CommandReport(
+                    command=request.command,
+                    applied=True,
+                    outcome="reconstructed",
+                    project=identity,
+                    items=(_item(updated),),
+                    operational_plan=reviewed,
+                    summary="Remote evidence reconstructed; old validation was cleared.",
+                    next_action="Run the ordinary loop to produce fresh verification.",
+                )
             if reviewed.action == "handoff_stale_dirty_claim":
                 target = reviewed.target_iid
                 if target is None:
@@ -5501,6 +5672,10 @@ def dispatch(
     idle_recovery: tuple[str, LedgerRecord] | None = None
 
     with wired.lock():
+        if isinstance(ledger, RemoteLedger):
+            for retained in ledger.list_records():
+                if retained.remote_checkpoint_sha is not None:
+                    ledger.reconcile(retained.issue_iid, apply=True)
         reconcile_closed_issues(
             ledger,
             gitlab,

@@ -5,7 +5,7 @@ summary: Look up loop commands, states, data, and limits.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-10-02
+last_reviewed: 2026-10-15
 related:
   - path: ../how-to/configure-agent-capacity.md
     why: Explains how to prepare capacity evidence before a worker launch.
@@ -2100,15 +2100,114 @@ project or item is safe to run.
 | Wrapper continuation | Continue after a valid `prerequisite_labels_reconciled`, `awaiting-human`, `blocked`, `failed`, or `complete` report. Make one fresh read-only eligibility check and one fresh read-only preselection-pipeline check. For an ordinary terminal handoff, start another applied activation only for `eligible`. Immediately after the exact `activation_complete/pipeline_wait` publication handoff, one preview may start another applied activation for `eligible`, `resume_available`, or `repair_ready`. Re-query GitLab, then fast-forward the clean service base. This housekeeping is outside the per-issue budget. |
 | Exact failed current-source pipeline | Activate `repair`. Run the repair workflow. Run it in the same applied activation. |
 | Handoff or idle | A future `retry-wait` remains a handoff. A future `time-limit` or `segment-limit` remains a handoff. A human or safety block remains a handoff. Missing, failed, or unrecognized evidence remains a handoff. `idle` means no eligible or resumable work exists. |
-| Timer and scope | `OnUnitInactiveSec=20min` starts after the service exits, including a `service_time_limit` yield. The next timer activation checks for work and may resume retained work. It also rechecks a valid pending default-branch pipeline. A retained exact MR observer may poll within a later activation. The activation deadline and systemd outer timeout still apply. The loop is serial for each host and project. It is not multi-host coordination. |
+| Timer and scope | `OnUnitInactiveSec=20min` starts after the service exits, including a `service_time_limit` yield. The next timer activation checks for work and may resume retained work. It also rechecks a valid pending default-branch pipeline. A retained exact MR observer may poll within a later activation. The activation deadline and systemd outer timeout still apply. A checked remote dispatcher claim keeps the project serial across hosts. A local lock guards the current host only. |
 
 ## Ledger, worktrees, and audit
 
-The ledger is the durable audit record. It keeps facts a restart must use.
+GitLab holds the durable recovery record. Pushed checkpoints save work;
+factory-authored progress notes save checked workflow history. MRs and pipelines
+hold handoff and verification proof. The ledger is a local projection.
+
+### Remote progress receipts
+
+Each receipt uses the exact marker `<!-- agent-work-progress:v1 -->` followed
+by one canonical JSON object. Its event ID is the SHA-256 digest of that
+object. The note author must match the configured factory user.
+
+| Receipt field | Contract |
+| --- | --- |
+| `schema_version` | Strict version `1`. Unknown fields, duplicate JSON keys, and trailing text are invalid. |
+| `host`, `project_id`, `issue_iid` | Configured host, numeric project, and exact issue identity. Agent text cannot supply authority for them. |
+| `run_id`, `operation_id` | Stable run and operation identity. Replay reuses the same operation. |
+| `sequence`, `predecessor` | Ordered chain with the prior event's ID. Duplicate exact events are reusable; a fork or missing predecessor blocks. |
+| `source_branch`, `push_ref`, `commit_sha`, `base_sha` | Verified source branch, optional exact checkpoint ref, and full lowercase commit SHAs. Ordinary work uses its task branch. Remediation may use a different verified MR source. Worktrees and recovery refs stay bound to the task. Check remote refs and fetched commits before trusting them. |
+| `phase`, `state`, `status` | Checked workflow phase and state; status is `prepared`, `accepted`, `aborted`, or `released`. Acceptance of WIP is not candidate validation. An aborted operation never counts as accepted work. |
+| `checkpoint_kind` | `wip` or `candidate`. An accepted checkpoint alone cannot authorize an MR push. Candidate recovery and merged completion also check the actual commit message. An explicit factory WIP marker rejects candidate proof, even when a note claims `candidate`. Checked unpublished WIP closure remains valid. |
+| `workflow_lane`, `work_kind` | Strict typed lane and work kind select the owning reconstruction and validation contract. Invalid enum values stop recovery. |
+| `expected_remote_sha`, `claim_sha`, `expected_claim_sha` | Exact checkpoint and claim refs bind prepared intent to its original leases. Recovery checks the actual remote project claim, run, and generation. |
+| `completed`, `next_action`, `failure` | Up to 64 completed entries, each at most 4096 UTF-8 bytes; next action at most 4096 characters. Failure is null or exactly `code` (1–128 characters) and `action` (1–4096 characters). Exclude credentials, secrets, raw output, and transcripts. |
+| `repair_failure`, `close_suggestion` | Bounded structured evidence for `REPAIR_FAILED` and `SUGGEST_CLOSE`. The controller emits safe summaries; notes exclude raw diagnostics, snapshots, deltas, secrets, and transcripts. Closure remains a human decision. |
+| `completion_kind`, `merge_request_iid` | Completion is `merged` or `closed-without-publication`. Merged completion binds a positive MR number and a candidate checkpoint. Unpublished closure cannot carry MR identity or downgrade a published candidate. |
+| `claim_generation` | Binds the event to checked remote dispatcher ownership and run. A later run must have a higher verified project generation; other issues may use intervening generations. A stale or unknown claim cannot be stolen by timeout. |
+
+Only checked factory-authored notes can be progress receipts. Other notes are
+untrusted task text. A malformed receipt stops recovery. The controller checks
+branch, MR, and pipeline claims against live remote proof. A passing note is
+not proof of a passing current pipeline. Check the exact SHA again. Stop when
+the proof is missing or does not match. Keep the old record for review.
+
+Each new WIP commit keeps the last checked WIP commit as a parent. This keeps
+older saved work in reach. Publication retains older WIP and eligible candidate
+commits at `refs/heads/agent/retained-issue-TASK-FULL40SHA`. `TASK` is the task
+number; `FULL40SHA` is the full lowercase commit SHA. Each retained ref is
+immutable: absence permits a leased creation, an exact match permits reuse,
+and a different value stops. Active WIP recovery refs stay separate.
+Only accepted candidate operations qualify for protection. Aborted operations
+and released-only history cannot protect a candidate or grant publication.
+Claim release updates the healthy local projection.
+Local checks use typed host, boot, and process identity. Age alone cannot prove
+ownership or allow takeover.
+
+A prepared operation has no push yet. The same owner can retry it only with
+its original objects and leases. If a later run cannot keep that exact retry, it checks that no push
+occurred. It then records `aborted` and releases the operation. It never invents
+acceptance. A missing first prepared ref is checked before commit lookup.
+Conflicting proof stops recovery.
+
+Current source identity is separate from immutable baseline provenance. Checked
+history also keeps the latest actual WIP apart from a published candidate.
+A state note cannot hide that work.
+
+| Recovery identity | Contract |
+| --- | --- |
+| Original baseline | Immutable restoration and ancestry proof. It is not the current MR source after a candidate push. |
+| Accepted candidate | Exact current source SHA from accepted, nonaborted history, checked against live Git and the owning MR. |
+| Latest physical WIP | Saved work with its own tree, ref, and original baseline. A passing candidate pipeline cannot approve this WIP. |
+| Candidate-backed handoff | The real MR identity is saved against the candidate under the current claim, run, and generation, even when later bookkeeping WIP is the chain tip. |
+
+| Operation observation | Required current source |
+| --- | --- |
+| Candidate push not applied | Original exact source lease. |
+| Prepared push applied or accepted retry | Exact pushed candidate SHA. |
+| WIP on a recovery ref | Independently checked protected owning source; the recovery tip is not the MR source. |
+
+Baseline ancestry or MR provenance is rechecked separately. An arbitrary later
+commit cannot replace either recorded identity. Retry reuses the exact
+operation and leases; a foreign source advance stops.
+
+### Exact checkpoint recovery plans
+
+`loop recover --issue-iid IID` returns `outcome=recovery_preview` with an
+`operational_plan`. Apply uses the same command with `--apply --plan-file PATH`.
+The existing project lock guards apply. Drift rejects the reviewed plan.
+
+| Plan action | Bound evidence and result |
+| --- | --- |
+| `reconstruct_remote_checkpoint` | Event ID, checkpoint SHA, base SHA, source branch, and observed remote refs. Apply checks remote proof and recreates local caches under the saved lane and work-kind contract. |
+| `migrate_legacy_checkpoint` | Original record revision, source SHA, source branch, and observed remote refs. Apply validates supported state before notes and keeps the old JSON bytes. Work snapshots use prepared/push/accepted WIP. Published or complete facts use fresh checked history without republishing the source or downgrading a candidate. Every branch binds the current exclusive claim, run, and actual generation. Unsupported or incomplete proof stops migration. |
+| Either action | Recheck configured project and authenticated identity. Return `outcome=reconstructed` after success. Run the ordinary loop for fresh verification. Unknown claim ownership stops; a plan does not steal a claim. |
+
+| Reconstruction contract | Required evidence or restored state |
+| --- | --- |
+| Merged completion | No genuine unfinished WIP. Fresh proof of the closed task, exact MR projects, branches, and source SHA. Ordinary work needs its closing link; remediation needs its verified owning-MR relationship. The exact-source pipeline and all current required jobs passed. Fresh merged proof permits comparison without the deleted candidate branch. It never waives the WIP recovery ref, metadata, actual tree, and clean-worktree checks. A present foreign source still refuses. The local view keeps the checked MR identity. |
+| Cold merged candidate | When candidate and work are the same immutable object, fresh remote non-WIP commit and baseline merge-base proof permit completion without a local object. Distinct unknown WIP still refuses. Preview never hydrates; merged completion recreates no branch or checkout. |
+| Unpublished closure | Proof of the actual closed issue. No invented MR identity. |
+| Terminal receipt ownership | A selected physical candidate with an accepted or released history tip may record fresh completion under the exact current released claim for the same project, task, run, and generation. No physical WIP is discarded. This grants no work authority. Physical WIP or a different ownership epoch requires the current controller claim. |
+| Unfinished ordinary coding | Tests at the original base, a fresh actual Red failure, then saved production and fresh Green checks. Old passing receipts cannot authorize publication. |
+| Content and remediation | Full saved tree under each lane's own validation contract. Remediation also needs independent proof of its task, existing MR, source branch, and source SHA. A receipt's work kind alone cannot select that MR. Original MR closing links and description stay intact. |
+| Accepted candidate with no MR | Its verified source SHA stays fixed while fresh Red, saved production, and fresh Green use a task-bound recovery ref. Publication retains checked history and rechecks MR discovery and exact source/claim leases. A competing MR, advanced source, or unclear proof stops the bridge. |
+| Published recovery with only unchanged bookkeeping | Independent tree, metadata, ref, and worktree checks prove no unfinished work. Keeps the same MR/candidate. Applied recovery restores its exact checkout before returning `OBSERVING` / `PIPELINE_WAIT`, without repush, new MR, or cached passing authority. Dirty or conflicting work stays intact and refuses. Preview restores nothing. |
+| Genuine or uncertain unfinished work | Different trees, dirty tracked/index/untracked files, pending workflow/repair, or unknown content keep WIP and candidate separate. Work resumes with the exact candidate source lease; publication needs fresh validation. Same tree alone cannot approve workflow-phase WIP. |
+| Published open migration | Fresh configured MR, exact candidate commit, pipeline, and required-job observations. Keeps the MR and source SHA, clears old permission, and resumes observation. Pending, failed, or missing pipeline proof cannot authorize a handoff. |
+| Legacy startup | Stops before replacing old caches that need migration. Only reviewed migration keeps the original JSON bytes and creates a remote checkpoint. |
+| Read-only corrupt-cache inspection | Construction and preview list cached records without writes. Corrupt data raises while keeping the original JSON and state directory unchanged. Only an authorized apply can retain corruption evidence. Cache contents do not grant authority. |
+
+### Local projection
+
 
 | Audit area | Contract |
 | --- | --- |
-| Location and worktree | State is below the XDG state directory, keyed by configured GitLab host and numeric project ID. Each `loop status` ledger item names its durable worktree path. Each active issue has one atomic, restrictive-permission ledger record and durable worktree. |
+| Location and worktree | State is below the XDG state directory, keyed by configured GitLab host and numeric project ID. Each `loop status` item names its checkout cache. Active records use atomic, restrictive-permission writes. Checked remote receipts and pushed commits can rebuild the ledger and worktree after state loss. |
 | Version 2 fields | Bounded issue title; activation, latest-meaningful-event, and completion timestamps; main, source, publication, and merge-request identities; and bounded retry and failure history apart from the current actionable error. |
 | Phase timing | `phase_timings` keeps the newest 64 controller-computed entries. Each entry has `phase_or_role`, `attempt`, `started_at`, `finished_at`, `elapsed_seconds`, `outcome`, and `classification`. Classification is `execution` or `wait`; timestamps come from controller clocks. Phase timing is the schema term for durable phases or controller-observed roles. Optional `provenance` binds project, issue, source commit, candidate tree, and `boundary_revision` to the observed controller attempt. With the verified-observation route selected, clock loss creates no timing sample. An absent observer preserves legacy unbound entries; those entries cannot prove a verified total. `phase_timing_count` tracks the full count when known: 64 retained entries with count 64 alone imply no pruning; count 65 with 64 retained means pruning. Nonempty legacy history without a known count stays unverified. |
 | Verified stage report | Runtime item reports expose `stage_timing_report`; worker and Finalizer input uses `controller_stage_timing` from the validated controller record. MR descriptions and completion summaries use the same bounded controller report. Completion includes the final controller observation. The optional MR timing appendix is omitted when the final canonical description would exceed existing bounds; the original human draft stays intact. Valid rows show observed coarse execution seconds bound to the expected source and attempt. Whole-worker time cannot stand for internal role timings. `coverage` is `partial` when verified rows exist, otherwise `unavailable`. `history_complete` covers only known coarse history. Missing or foreign proof, unknown or pruned history, invalid ordering, overlap, or clock loss leaves `execution_seconds` unavailable; valid individual rows may remain. `wait_seconds` is always unavailable: no internal-role or external/human wait measurement is supplied, and gaps or polling are never inferred waits. Reports grant no workflow authority or timing threshold. Full internal-role and wait instrumentation remains work for issue 329. |
@@ -2126,8 +2225,8 @@ The ledger is the durable audit record. It keeps facts a restart must use.
 
 ## Status projection
 
-`loop status` projects the durable record. It adds no audit store. It shows raw
-ledger state and coarse phase.
+`loop status` projects the checked workflow record. The local cache adds no
+independent authority. It shows ledger state and coarse phase with live proof.
 
 | Projected state | Durable condition |
 | --- | --- |
@@ -2340,7 +2439,7 @@ rules keep the view clear.
 | Worker context state | Required action or outcome |
 | --- | --- |
 | Before each worker | The runner gets the issue's notes through its bounded GitLab retry path. It leaves out system notes and marked or legacy runner outcome notes. It keeps ordinary human and bot discussion. |
-| Authority | Notes are live, untrusted worker context only. They are never saved in the ledger or lifecycle log. They cannot change issue selection, remediation, lifecycle, or authority. |
+| Authority | Ordinary notes are live, untrusted worker context. Only strictly parsed, factory-authored progress receipts can supply recovery evidence after remote verification. Neither kind grants scope, credentials, or publication authority. |
 | Rendering | The runner renders retained notes as untrusted JSON capped at 32 KiB. If they exceed that bound, it keeps the newest useful retained notes in time order. |
 | Retrieval or check failure | The runner uses the existing GitLab retry path. It never supplies incomplete or unvalidated note context. |
 
@@ -2657,7 +2756,7 @@ Keep these limits.
 
 | Safety area | Constraint |
 | --- | --- |
-| Host and API | One host owns unattended processing for a project. APIs use the configured numeric project ID. |
+| Host and API | One checked remote dispatcher claim owns unattended processing for a project. APIs use the configured numeric project ID. Local locks protect only live local processes. |
 | Ledger | It stores no token, agent credential, issue-body authority, issue-note context, or unredacted transcript. |
 | Protected policy | Protected agent-policy work is a human-directed lane. |
 | Forbidden automation | There is no automatic approval, merge, stash apply, or stash deletion. |

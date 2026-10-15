@@ -1141,6 +1141,9 @@ class LedgerRecord(BoundaryModel):
     merge_request_iid: int | None = Field(default=None, gt=0)
     merge_request_url: str | None = None
     source_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+    remote_baseline_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+    remote_checkpoint_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+    remote_event_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     worktree_dirty: bool = False
     owner_status: str = "missing"
     split_prerequisites: tuple[tuple[int, str], ...] = ()

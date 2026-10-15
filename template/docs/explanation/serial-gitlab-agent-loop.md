@@ -5,7 +5,7 @@ summary: Learn why the loop uses GitLab and local state.
 audience: maintainer
 tags: [agent-workflow]
 status: current
-last_reviewed: 2026-10-02
+last_reviewed: 2026-10-15
 related:
   - path: ../how-to/setup-serial-gitlab-agent-loop.md
     why: Configures and operates the loop.
@@ -31,9 +31,9 @@ related:
 This software factory runs one issue at a time. Humans provide product and
 policy input. They review, approve, and merge the result. The deterministic
 controller and AI workflow do routine work, but neither can approve or merge. GitLab is
-the shared work record that operators can see. A local ledger and retained
-worktree let one host recover work without becoming another workflow engine or
-queue.
+the durable work record. Pushed checkpoints and checked issue-note receipts
+let a new host rebuild the local ledger and worktree. An MR and its exact-source
+pipelines hold the handoff and verification proof.
 
 At a high level, the loop does one job at a time. It first checks that it is
 safe to act. It then works on one issue and saves what it found. It does not
@@ -54,10 +54,10 @@ those facts near the work. If a fact is gone, old, or not clear, the loop stops.
 That is a safe result. It tells the team what is known and what still needs
 care. A person can then act with the full record in view.
 
-The saved worktree has a simple role. It keeps the work in one known place. It
-lets the next run look at the same files and Git state. It does not turn into a
-new queue. It does not decide which work is most worth doing. The controller
-still makes that choice from the checked state.
+The worktree is a checkout cache. A pushed checkpoint saves work across host
+loss. WIP checkpoints keep progress, but do not prove readiness for review.
+The controller checks GitLab before it rebuilds or resumes that checkout.
+Its remote claim keeps two dispatchers from advancing the same project.
 
 The flow also draws a hard line around a run. A run does not keep taking more
 issues just because time is left. It ends with a record and a next step. That
@@ -158,14 +158,40 @@ asks the Finalizer to act. Final validation uses current license evidence.
 
 ## Recovery is coarse and observable.
 
-An activation is bounded, but its evidence lasts. The ledger records the selected issue, coarse workflow state, retry data, retained worktree, branch and merge-request evidence, receipts, transition intent, and a redacted next action. GitLab labels give a simple status. The ledger holds transaction detail.
+An activation is bounded, but its checked progress lasts in GitLab. Versioned
+factory-authored issue notes bind each checkpoint to its run, operation, claim,
+and full commit SHA. Existing `agent::` labels show workflow state. The local
+ledger projects that evidence into the state machine; it is no longer the sole
+recovery history.
 
-After an interruption before one valid final workflow receipt, the controller reconciles observable repository state and preserves the retained worktree. It starts a fresh, complete workflow session at the coarse boundary. Its new Router checks intake and admission, then delegates a fresh Architect design session before any mutable child. This also applies to a fresh Red-first segment. It repeats validation when needed. It does not restore individual agents, prompts, chain-of-thought, mailboxes, or an internal phase. An oversized issue returns as a structured split plan. The controller validates that plan, reuses marker-matched children, creates only missing children, then notes and closes the parent. A later retry reruns workflow and marker searches. It does not resume a saved decomposition.
+If a run stops before a valid final result, the controller checks saved work
+against GitLab. It keeps any local work that has not yet been pushed.
+Genuine unfinished work starts a fresh full workflow at the coarse boundary. Router checks intake and slots,
+then asks a fresh Architect to review the plan before any child edits files.
+A fresh Red-first segment follows the same rule. It reruns checks as needed.
+It does not restore agents, prompts, private reasoning, or messages.
+
+A published candidate can sit behind later bookkeeping WIP in the history.
+If independent content and worktree checks prove no unfinished work, recovery
+observes that same MR and candidate with fresh pipeline and job proof. Dirty,
+changed, or unknown work stays separate and needs fresh workflow validation.
+A passing candidate pipeline cannot approve unfinished WIP.
+
+An issue that is too large returns as a split plan. The controller checks the
+plan, reuses children with exact markers, and creates only missing children.
+It then notes and closes the parent. A retry runs the workflow and marker
+searches again. It does not restore a saved split session.
 
 A clean blocked issue can start again after exact pre-checkpoint proof. Dirty,
 unclear, or published work keeps its reviewed recovery path.
 
-Only the ledger keeps the concise audit. Status is an operational projection of that record plus best-effort live evidence. This avoids presenting an old retry or failure as current. It also keeps unavailable, stale, or conflicting observations honestly unknown. The exact fields, bounded output, and state mapping are in the [serial agent-loop reference](../reference/serial-gitlab-agent-loop.md).
+Status projects the checked record and current remote evidence. It reports
+stale, unavailable, or conflicting proof as unknown. After local state loss,
+the controller rebuilds from remote checkpoints and receipts, then repeats
+verification. An old passing receipt cannot authorize publication. The
+[reference](../reference/serial-gitlab-agent-loop.md) defines the fields and
+state mapping; the [setup guide](../how-to/setup-serial-gitlab-agent-loop.md)
+explains reconstruction and migration.
 
 Scheduled repair backoff and repair quarantine are item-local. They are not `RETRY_WAIT`, the ordinary workflow retry state, and are not global blockers. By contrast, ambiguous or inexact identity, active ownership, credential, policy, or authority conflicts fail closed. Issue and merge-request text cannot set repair priority, the attempt budget, or a backoff.
 
@@ -184,7 +210,12 @@ transport errors retry.
 
 ## Credentials, audit, and human handoff.
 
-The deterministic controller, AI workflow, and nested roles share one scoped Developer GitLab credential. Their separation supports deterministic, recoverable execution; it is not a security boundary. The credential stays in the checkout-local environment, not the service file, journal, or ledger.
+The trusted controller uses the scoped Developer GitLab credential. Worker
+processes receive no service `GITLAB_TOKEN`. They request bounded actions
+through MCP; the controller checks identity and makes Git and GitLab changes.
+The account still has its configured permissions. These tool boundaries do
+not create a same-user security boundary. Keep the credential in the approved
+checkout-local route, out of service files, notes, journals, and ledger data.
 
 The bounded audit records decisions, evidence, tests, reviewers, correction outcomes, branch and merge-request identity, and the next action. It excludes credentials, prompts, chain-of-thought, and unbounded output. The worker returns one versioned, bounded result. The controller validates it before publication. A verified merge request and successful required-job proof hand work to a human reviewer. Only that human may approve or merge.
 

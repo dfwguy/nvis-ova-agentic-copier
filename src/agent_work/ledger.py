@@ -244,11 +244,18 @@ class JsonLedger:
             raise LedgerCorrupt("ledger record is corrupt") from error
 
     def list_records(self) -> tuple[LedgerRecord, ...]:
-        """Return all valid records ordered by issue IID."""
+        """Enumerate records, preserving corruption evidence on authorized apply."""
+        return self._list_records(preserve_corrupt=True)
+
+    def list_records_read_only(self) -> tuple[LedgerRecord, ...]:
+        """Enumerate without creating files or changing corrupt originals."""
+        return self._list_records(preserve_corrupt=False)
+
+    def _list_records(self, *, preserve_corrupt: bool) -> tuple[LedgerRecord, ...]:
         if not self.records.exists():
             return ()
         loaded = (
-            self.load(int(path.stem))
+            self._load(int(path.stem), preserve_corrupt=preserve_corrupt)
             for path in sorted(self.records.glob("[0-9]*.json"))
         )
         return tuple(record for record in loaded if record is not None)

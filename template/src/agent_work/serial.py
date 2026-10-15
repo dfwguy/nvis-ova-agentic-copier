@@ -100,6 +100,7 @@ from .ports import (
     LedgerPort,
     RepositoryPort,
 )
+from .progress import ProgressError, RemoteLedger, required_pipeline_jobs_succeeded
 from .red_checkpoint import (
     RedCheckpointError,
     RedCheckpointEvidence,
@@ -1752,18 +1753,13 @@ def collect_exact_failed_job_diagnostics(
 def _required_pipeline_jobs_succeeded(
     jobs: tuple[PipelineJobEvidence, ...], *, pipeline_id: int, source_sha: str
 ) -> bool | None:
-    """Check a complete exact inventory; return None when no current job exists."""
-    if len({job.id for job in jobs}) != len(jobs) or any(
-        job.pipeline_id != pipeline_id or job.pipeline_sha != source_sha for job in jobs
-    ):
-        raise SegmentError("exact pipeline job inventory is ambiguous or stale")
-    current = tuple(job for job in jobs if not job.retried)
-    if not current:
-        return None
-    required = tuple(job for job in current if not job.allow_failure)
-    if not required:
-        return None
-    return all(job.status == "success" for job in required)
+    """Use the shared exact-source job verdict with serial's error boundary."""
+    try:
+        return required_pipeline_jobs_succeeded(
+            jobs, pipeline_id=pipeline_id, source_sha=source_sha
+        )
+    except ProgressError as error:
+        raise SegmentError(str(error)) from error
 
 
 def record_failed_job_diagnostic_unavailable(
@@ -5230,7 +5226,14 @@ def _execute(
         and apply_red_checkpoint is not None
         and retained_checkpoint is None
     ):
-        with lock_factory(record.issue_iid):
+        with (
+            lock_factory(record.issue_iid),
+            (
+                ledger.worker_scope()
+                if isinstance(ledger, RemoteLedger)
+                else nullcontext()
+            ),
+        ):
             on_worker_invoke(record.issue_iid)
             red_invocation = invoke.invoke(
                 record.worktree,
@@ -5329,6 +5332,8 @@ def _execute(
                         raise RedCheckpointError("checkpoint did not reload")
                     if retained_checkpoint != accepted_artifact.red_checkpoint:
                         raise RedCheckpointError("checkpoint artifact did not reload")
+                    if isinstance(ledger, RemoteLedger):
+                        ledger.restore_after_red(record, retained_checkpoint)
                     record = ledger.persist(
                         transition_record(
                             record,
@@ -5415,7 +5420,14 @@ def _execute(
                 stage=RedCheckpointFailureStage.RESULT_REQUEST_PATH,
             )
     if invocation is None:
-        with lock_factory(record.issue_iid):
+        with (
+            lock_factory(record.issue_iid),
+            (
+                ledger.worker_scope()
+                if isinstance(ledger, RemoteLedger)
+                else nullcontext()
+            ),
+        ):
             on_worker_invoke(record.issue_iid)
             invocation = invoke.invoke(
                 record.worktree,
@@ -6616,6 +6628,8 @@ def _publish(
             )
             sha = publication_sha
         else:
+            if isinstance(ledger, RemoteLedger):
+                record = ledger.before_publish(record, publication_sha)
             sha = repository.push_prepared(
                 record.worktree, record.source_branch, publication_sha
             )

@@ -26,7 +26,7 @@ from enum import Enum
 from hashlib import sha1, sha256
 from pathlib import Path, PurePosixPath
 from time import monotonic
-from typing import IO, TYPE_CHECKING, TypedDict
+from typing import IO, TYPE_CHECKING, Literal, TypedDict
 from urllib.parse import urlparse
 
 from pydantic import ValidationError
@@ -48,6 +48,23 @@ from .ledger import project_state_path
 from .models import AgentWorkConfig
 from .ports import CommandResult as CommandResultProtocol
 from .ports import CommandRunner
+from .progress import (
+    CheckpointMetadata,
+    CheckpointObservation,
+    CheckpointProductObservation,
+    CheckpointRequest,
+    ClaimRecord,
+    CompletedProgressObservation,
+    ControllerIdentity,
+    PreparedCheckpoint,
+    ProgressEvent,
+    VerifiedCheckpointSource,
+    accepted_candidate_history,
+    parse_remote_metadata,
+    required_pipeline_jobs_succeeded,
+    retained_checkpoint_ref,
+    verify_candidate_commit_message,
+)
 from .red_checkpoint import (
     RedCheckpointError,
     RedCheckpointEvidence,
@@ -547,8 +564,16 @@ class GitRepository:
         read_git_blob: Callable[..., bytes] | None = None,
         test_execution_policy: TestExecutionPolicy | None = None,
         asset_lstat: Callable[[Path], os.stat_result] = Path.lstat,
+        controller_identity: Callable[[], ControllerIdentity] | None = None,
     ) -> None:
         self.config = config
+        self._controller_identity = controller_identity
+        self._progress_run_id = "unbound"
+        self._checkpoint_source: VerifiedCheckpointSource | None = None
+        self._progress_candidates: dict[int, ProgressEvent] = {}
+        self._progress_event: ProgressEvent | None = None
+        self._checkpoint_publication: tuple[str, str] | None = None
+        self._progress_mr: Callable[[str], object | None] = lambda _branch: None
         self._test_execution_policy = test_execution_policy
         self._run_command = run_command
         self._environment = _git_environment_controls(
@@ -558,6 +583,909 @@ class GitRepository:
         self._diagnostic_sink = diagnostic_sink or (lambda _diagnostic: None)
         self._read_git_blob = read_git_blob or run_subprocess_bytes
         self._asset_lstat = asset_lstat
+
+    def _remote_refs(self, *refs: str) -> dict[str, str]:
+        """Read exact remote refs, refusing malformed or duplicate identities."""
+        values: dict[str, str] = {}
+        for line in self._git("ls-remote", "origin", *refs).splitlines():
+            sha, separator, ref = line.partition("\t")
+            if (
+                not separator
+                or not re.fullmatch(r"[0-9a-f]{40}", sha)
+                or ref not in refs
+                or ref in values
+            ):
+                raise RepositoryError("remote ref identity is ambiguous")
+            values[ref] = sha
+        return values
+
+    def push_checkpoint(self, prepared: PreparedCheckpoint) -> str:
+        """Atomically compare and replace the exact work and dispatcher claim refs."""
+        if (
+            self._git("branch", "--show-current", cwd=prepared.worktree)
+            != prepared.source_branch
+        ):
+            raise RepositoryError("checkpoint worktree source mismatch")
+        work_ref = prepared.push_ref or f"refs/heads/{prepared.source_branch}"
+        claim = self.current_progress_claim()
+        if (
+            claim is None
+            or self.progress_owner_status() != "owned"
+            or claim.issue_iid != prepared.issue_iid
+        ):
+            raise RepositoryError("checkpoint push claim owner identity mismatch")
+        remote_claim = self.progress_claim_ref()
+        if remote_claim != prepared.expected_claim_sha:
+            raise RepositoryError("checkpoint push original claim lease changed")
+        # The controller snapshot is an isolated object; HEAD and its index stay intact.
+        self._git(
+            "cat-file", "-e", f"{prepared.commit_sha}^{{commit}}", cwd=prepared.worktree
+        )
+        self._git(
+            "push",
+            "--atomic",
+            f"--force-with-lease={work_ref}:{prepared.expected_remote_sha or ''}",
+            f"--force-with-lease={prepared.claim_ref}:{prepared.expected_claim_sha or ''}",
+            "origin",
+            f"{prepared.commit_sha}:{work_ref}",
+            f"{prepared.claim_sha}:{prepared.claim_ref}",
+            cwd=prepared.worktree,
+        )
+        remote = self._remote_refs(work_ref, prepared.claim_ref)
+        if (
+            remote.get(work_ref) != prepared.commit_sha
+            or remote.get(prepared.claim_ref) != prepared.claim_sha
+        ):
+            raise RepositoryError("checkpoint remote SHA readback mismatch")
+        return prepared.commit_sha
+
+    def resume_prepared_checkpoint(
+        self, request: CheckpointRequest, event: ProgressEvent
+    ) -> PreparedCheckpoint:
+        """Reuse the exact prepared object and leases instead of making another commit."""
+        if (
+            event.run_id != self._progress_run_id
+            or request.source_branch != event.source_branch
+            or event.claim_sha is None
+        ):
+            raise RepositoryError("prepared checkpoint claim identity unavailable")
+        self._git(
+            "cat-file", "-e", f"{event.commit_sha}^{{commit}}", cwd=request.worktree
+        )
+        self._git(
+            "cat-file", "-e", f"{event.claim_sha}^{{commit}}", cwd=request.worktree
+        )
+        return PreparedCheckpoint(
+            issue_iid=request.issue_iid,
+            worktree=request.worktree,
+            source_branch=request.source_branch,
+            work_kind=request.work_kind,
+            merge_request_iid=request.merge_request_iid,
+            commit_sha=event.commit_sha,
+            expected_remote_sha=event.expected_remote_sha,
+            claim_ref="refs/heads/agent/claim-project",
+            claim_sha=event.claim_sha,
+            expected_claim_sha=event.expected_claim_sha,
+            push_ref=event.push_ref,
+        )
+
+    def bind_progress_run(self, run_id: str) -> None:
+        """Bind an invocation identity at the trusted composition boundary."""
+        self._progress_run_id = run_id
+
+    def progress_claim_ref(self) -> str | None:
+        """Observe the dispatcher lease without downloading any local Git object."""
+        ref = "refs/heads/agent/claim-project"
+        return self._remote_refs(ref).get(ref)
+
+    def progress_recovery_refs(
+        self, iid: int, event: ProgressEvent | None
+    ) -> dict[str, str | None]:
+        """Read exact remote leases for an operator preview without fetching objects."""
+        ref = event.push_ref if event is not None else None
+        ref = (
+            ref
+            or f"refs/heads/{event.source_branch if event is not None else f'agent/issue-{iid}'}"
+        )
+        claim = "refs/heads/agent/claim-project"
+        refs = self._remote_refs(ref, claim)
+        return {"remote_work_sha": refs.get(ref), "remote_claim_sha": refs.get(claim)}
+
+    def bind_checkpoint_source(self, source: VerifiedCheckpointSource) -> None:
+        """Accept only controller-produced configured GitLab source observations."""
+        if (
+            source.project_id != self.config.project_id
+            or source.source_project_id != self.config.project_id
+            or source.target_project_id != self.config.project_id
+            or source.target_branch != self.config.default_branch
+        ):
+            raise RepositoryError(
+                "verified checkpoint source project identity mismatch"
+            )
+        self._checkpoint_source = source
+
+    def _source_matches(self, issue_iid: int, branch: str) -> bool:
+        return branch == f"agent/issue-{issue_iid}" or (
+            self._checkpoint_source is not None
+            and self._checkpoint_source.issue_iid == issue_iid
+            and self._checkpoint_source.source_branch == branch
+        )
+
+    def bind_progress_observation(self, event: ProgressEvent) -> None:
+        """Bind note identity while independently verifying the remote Git object."""
+        self._progress_event = event
+        if event.checkpoint_kind == "candidate" and event.status == "accepted":
+            self._progress_candidates[event.issue_iid] = event
+
+    def bind_progress_history(self, events: tuple[ProgressEvent, ...]) -> None:
+        """Replace derived protection with accepted nonaborted remote history."""
+        self._progress_candidates = {
+            event.issue_iid: event for event in accepted_candidate_history(events)
+        }
+
+    def bind_progress_mr(self, lookup: Callable[[str], object | None]) -> None:
+        """Use the trusted configured adapter to freeze existing review branches."""
+        self._progress_mr = lookup
+
+    def _ensure_commit_available(self, sha: str) -> None:
+        """Fetch an immutable object only when the derived local cache lacks it."""
+        if not re.fullmatch(r"[0-9a-f]{40}", sha):
+            raise RepositoryError("commit cache identity is invalid")
+        result = self._bounded_command(
+            (
+                str(self.config.git_path),
+                "-C",
+                str(self.config.checkout),
+                "cat-file",
+                "-e",
+                f"{sha}^{{commit}}",
+            ),
+            environment=self._environment,
+            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+        )
+        if result.returncode == 0:
+            return
+        if result.returncode not in {1, 128}:
+            raise RepositoryError("commit cache could not be inspected")
+        self._git("fetch", "--no-tags", "origin", sha)
+
+    def _checkpoint_metadata(self, sha: str) -> CheckpointMetadata:
+        """Decode bounded controller metadata from an explicitly fetched commit."""
+        self._ensure_commit_available(sha)
+        body = self._git("show", "-s", "--format=%B", sha)
+        marker = "agent-work-checkpoint-v1\n"
+        if marker not in body or len(body.encode()) > 300_000:
+            raise RepositoryError(
+                "checkpoint metadata missing; inspect remote branch manually"
+            )
+        request = CheckpointMetadata.model_validate(
+            parse_remote_metadata(
+                "agent-work-checkpoint-v1\n" + body.split(marker, 1)[1],
+                "agent-work-checkpoint-v1",
+            )
+        )
+        if (
+            request.project_id != self.config.project_id
+            or request.host != self.config.host
+        ):
+            raise RepositoryError("checkpoint project identity mismatch")
+        return request
+
+    def _claim_payload(self, sha: str, *, allow_fetch: bool = True) -> ClaimRecord:
+        if allow_fetch:
+            self._ensure_commit_available(sha)
+        body = self._git("show", "-s", "--format=%B", sha)
+        payload = ClaimRecord.model_validate(
+            parse_remote_metadata(body, "agent-work-claim-v1")
+        )
+        if (
+            payload.host != self.config.host
+            or payload.project_id != self.config.project_id
+        ):
+            raise RepositoryError("remote claim identity mismatch")
+        return payload
+
+    def checkpoint_claim_released(self, event: ProgressEvent) -> bool:
+        """Verify the same remote owner's release before recording recovery handover."""
+        ref = "refs/heads/agent/claim-project"
+        sha = self._remote_refs(ref).get(ref)
+        if sha is None:
+            return False
+        claim = self._claim_payload(sha)
+        return (
+            claim.status == "released"
+            and claim.run_id == event.run_id
+            and claim.issue_iid == event.issue_iid
+            and claim.generation == event.claim_generation
+        )
+
+    def bind_controller_identity(
+        self, provider: Callable[[], ControllerIdentity]
+    ) -> None:
+        """Bind host facts at the trusted runtime composition boundary."""
+        self._controller_identity = provider
+
+    def current_progress_claim(self) -> ClaimRecord | None:
+        """Observe the actual project-wide immutable ownership epoch."""
+        sha = self.progress_claim_ref()
+        return self._claim_payload(sha) if sha is not None else None
+
+    def current_progress_claim_read_only(self) -> ClaimRecord | None:
+        """Observe an exact locally available remote claim without fetching."""
+        sha = self.progress_claim_ref()
+        if sha is None:
+            return None
+        result = self._bounded_command(
+            (
+                str(self.config.git_path),
+                "-C",
+                str(self.config.checkout),
+                "cat-file",
+                "-e",
+                f"{sha}^{{commit}}",
+            ),
+            environment=self._environment,
+            timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+        )
+        if result.returncode in {1, 128}:
+            return None
+        if result.returncode != 0:
+            raise RepositoryError("claim immutable object availability unknown")
+        return self._claim_payload(sha, allow_fetch=False)
+
+    def _claim_owned(
+        self, claim: ClaimRecord, identity: ControllerIdentity | None
+    ) -> bool:
+        return (
+            identity is not None
+            and claim.status == "owned"
+            and claim.run_id == self._progress_run_id
+            and (claim.machine, claim.boot_id, claim.process_id)
+            == (identity.machine, identity.boot_id, identity.process_id)
+        )
+
+    def progress_owner_status(self) -> Literal["owned", "unknown", "released"]:
+        """Require host, boot and process identity before declaring ownership."""
+        claim = self.current_progress_claim()
+        if claim is None or claim.status == "released":
+            return "released"
+        identity = (
+            self._controller_identity()
+            if self._controller_identity is not None
+            else None
+        )
+        return "owned" if self._claim_owned(claim, identity) else "unknown"
+
+    def acquire_progress_claim(self, issue_iid: int) -> None:
+        """Lease one ownership epoch; rebind issue intent only for the same owner."""
+        if self._controller_identity is None:
+            raise RepositoryError("trusted host identity provider required")
+        identity = self._controller_identity()
+        ref = "refs/heads/agent/claim-project"
+        prior = self._remote_refs(ref).get(ref)
+        old = self._claim_payload(prior) if prior is not None else None
+        if old is not None and old.status == "owned":
+            if not self._claim_owned(old, identity):
+                raise RepositoryError(
+                    "remote claim owner identity requires fencing and handover"
+                )
+            if old.issue_iid == issue_iid:
+                return
+        generation = (
+            old.generation
+            if old is not None and old.status == "owned"
+            else old.generation + 1
+            if old is not None
+            else 1
+        )
+        claim = ClaimRecord(
+            host=self.config.host,
+            project_id=self.config.project_id,
+            issue_iid=issue_iid,
+            run_id=self._progress_run_id,
+            **identity.model_dump(),
+            generation=generation,
+            operation_id="acquire",
+            status="owned",
+        )
+        tree = self._git("rev-parse", "HEAD^{tree}")
+        parents = ("-p", prior) if prior is not None else ()
+        sha = self._git(
+            "commit-tree",
+            tree,
+            *parents,
+            "-m",
+            "agent-work-claim-v1\n" + claim.model_dump_json(),
+        )
+        self._git(
+            "push", f"--force-with-lease={ref}:{prior or ''}", "origin", f"{sha}:{ref}"
+        )
+        if self._remote_refs(ref).get(ref) != sha:
+            raise RepositoryError("claim acquisition readback mismatch")
+
+    def release_progress_claim(self) -> None:
+        """Lease a released marker only for this exact dispatcher invocation."""
+        ref = "refs/heads/agent/claim-project"
+        prior = self._remote_refs(ref).get(ref)
+        if prior is None:
+            return
+        payload = self._claim_payload(prior)
+        identity = (
+            self._controller_identity()
+            if self._controller_identity is not None
+            else None
+        )
+        if not self._claim_owned(payload, identity):
+            raise RepositoryError("cannot release another dispatcher claim")
+        payload = payload.model_copy(
+            update={"status": "released", "operation_id": "release"}
+        )
+        tree = self._git("rev-parse", f"{prior}^{{tree}}")
+        sha = self._git(
+            "commit-tree",
+            tree,
+            "-p",
+            prior,
+            "-m",
+            "agent-work-claim-v1\n" + payload.model_dump_json(),
+        )
+        self._git("push", f"--force-with-lease={ref}:{prior}", "origin", f"{sha}:{ref}")
+        if self._remote_refs(ref).get(ref) != sha:
+            raise RepositoryError("claim release exact readback mismatch")
+
+    def authorize_checkpoint_publication(self, source_branch: str, sha: str) -> None:
+        """Bind the final controller publication gate to one exact source object."""
+        self._checkpoint_publication = (source_branch, sha)
+
+    def _preserve_wip_before_publication(
+        self, request: CheckpointRequest, old_sha: str
+    ) -> None:
+        """Keep the recoverable WIP reachable before replacing its issue ref."""
+        event = self._progress_candidates.get(request.issue_iid)
+        candidate = (
+            event is not None
+            and event.checkpoint_kind == "candidate"
+            and event.commit_sha == old_sha
+            and event.source_branch == request.source_branch
+            and event.issue_iid == request.issue_iid
+        )
+        if candidate:
+            self._ensure_commit_available(old_sha)
+            verify_candidate_commit_message(
+                self._git("show", "-s", "--format=%B", old_sha)
+            )
+            if not self._is_ancestor(event.base_sha, old_sha, self.config.checkout):
+                raise RepositoryError(
+                    "candidate preservation baseline ancestry conflict"
+                )
+        else:
+            metadata = self._checkpoint_metadata(old_sha)
+        if not candidate and (
+            metadata.issue_iid != request.issue_iid
+            or metadata.source_branch != request.source_branch
+            or metadata.checkpoint_kind != "wip"
+        ):
+            raise RepositoryError("publication cannot replace non-controller WIP")
+        ref = retained_checkpoint_ref(request.issue_iid, old_sha)
+        prior = self._remote_refs(ref).get(ref)
+        if prior is not None and prior != old_sha:
+            raise RepositoryError("immutable retained checkpoint ref conflict")
+        if prior != old_sha:
+            self._git(
+                "push",
+                f"--force-with-lease={ref}:{prior or ''}",
+                "origin",
+                f"{old_sha}:{ref}",
+            )
+        if self._remote_refs(ref).get(ref) != old_sha:
+            raise RepositoryError("WIP preservation remote readback mismatch")
+
+    def prepare_checkpoint(self, request: CheckpointRequest) -> PreparedCheckpoint:
+        """Snapshot into a temporary index without moving HEAD or losing staged work."""
+        expected = self.config.state_root / "worktrees" / str(request.issue_iid)
+        if (
+            request.worktree.resolve() != expected.resolve()
+            or request.project_id != self.config.project_id
+        ):
+            raise RepositoryError("checkpoint worktree identity mismatch")
+        if self.progress_owner_status() != "owned":
+            raise RepositoryError("checkpoint requires owned remote claim")
+        if (
+            self._git("branch", "--show-current", cwd=request.worktree)
+            != request.source_branch
+        ):
+            raise RepositoryError("checkpoint branch identity mismatch")
+        if not self._source_matches(request.issue_iid, request.source_branch):
+            raise RepositoryError(
+                "checkpoint source lacks independently verified task identity"
+            )
+        protected = self._progress_candidates.get(request.issue_iid)
+        protected_candidate = (
+            protected is not None and protected.source_branch == request.source_branch
+        )
+        if protected_candidate:
+            original = self._progress_event
+            self._progress_event = protected
+            try:
+                self.observe_checkpoint(request.issue_iid)
+            finally:
+                self._progress_event = original
+            mr = self._progress_mr(request.source_branch)
+            if mr is not None and getattr(mr, "sha", None) != protected.commit_sha:
+                raise RepositoryError(
+                    "competing MR advanced protected candidate source"
+                )
+        claim_ref = "refs/heads/agent/claim-project"
+        work_ref = (
+            f"refs/heads/agent/recovery-issue-{request.issue_iid}-{request.run_id}"
+            if request.checkpoint_kind == "wip"
+            and (
+                protected_candidate
+                or self._progress_mr(request.source_branch) is not None
+            )
+            else f"refs/heads/{request.source_branch}"
+        )
+        refs = self._remote_refs(work_ref, claim_ref)
+        claim = refs.get(claim_ref)
+        if claim is None:
+            raise RepositoryError("checkpoint remote claim disappeared")
+        owner = self._claim_payload(claim)
+        if (
+            owner.run_id != request.run_id
+            or owner.issue_iid != request.issue_iid
+            or owner.generation != request.claim_generation
+        ):
+            raise RepositoryError(
+                "checkpoint current claim issue, run or generation mismatch"
+            )
+        head = self.head(request.worktree)
+        if request.checkpoint_kind == "candidate":
+            if self.has_changes(request.worktree) or self._checkpoint_publication != (
+                request.source_branch,
+                head,
+            ):
+                raise RepositoryError(
+                    "candidate requires clean HEAD and exact trusted publication gate"
+                )
+            # The trusted publication gate authorizes this exact clean HEAD.
+            # Untrusted recovery candidates are separately classified from their
+            # actual remote commit in observe_checkpoint and completion verification.
+            sha = head
+        else:
+            paths = self.changed_paths(request.worktree)
+            if paths:
+                validate_git_read_paths(paths)
+            tree = (
+                self._snapshot_tree(request.worktree, head, paths)
+                if paths
+                else self._git("rev-parse", "HEAD^{tree}", cwd=request.worktree)
+            )
+            metadata = CheckpointMetadata(
+                host=self.config.host,
+                **request.model_dump(
+                    include={
+                        "project_id",
+                        "issue_iid",
+                        "run_id",
+                        "operation_id",
+                        "source_branch",
+                        "base_sha",
+                        "checkpoint_kind",
+                        "claim_generation",
+                        "workflow_lane",
+                        "work_kind",
+                    }
+                ),
+            )
+            parent = request.base_sha
+            if request.checkpoint_kind == "wip" and refs.get(work_ref) not in {
+                None,
+                request.base_sha,
+            }:
+                parent = refs[work_ref]
+                previous = self._checkpoint_metadata(parent)
+                if (
+                    previous.issue_iid,
+                    previous.source_branch,
+                    previous.base_sha,
+                    previous.checkpoint_kind,
+                ) != (
+                    request.issue_iid,
+                    request.source_branch,
+                    request.base_sha,
+                    "wip",
+                ):
+                    raise RepositoryError("previous WIP metadata identity conflict")
+                if (
+                    self._progress_event is not None
+                    and self._progress_event.commit_sha != parent
+                ):
+                    raise RepositoryError(
+                        "previous WIP receipt and remote ref conflict"
+                    )
+            sha = self._git(
+                "commit-tree",
+                tree,
+                "-p",
+                parent,
+                "-m",
+                "WIP: recoverable factory checkpoint\n\nagent-work-checkpoint-v1\n"
+                + metadata.model_dump_json(),
+                cwd=request.worktree,
+            )
+        if (
+            request.checkpoint_kind == "candidate"
+            and refs.get(work_ref) not in {None, sha}
+            and self._progress_mr(request.source_branch) is None
+        ):
+            self._preserve_wip_before_publication(request, refs[work_ref])
+            if self._progress_mr(request.source_branch) is not None:
+                raise RepositoryError(
+                    "MR appeared while preserving WIP; inspect review SHA before publication"
+                )
+        next_owner = owner.model_copy(update={"operation_id": request.operation_id})
+        claim_tree = self._git("rev-parse", f"{claim}^{{tree}}")
+        next_claim = self._git(
+            "commit-tree",
+            claim_tree,
+            "-p",
+            claim,
+            "-m",
+            "agent-work-claim-v1\n" + next_owner.model_dump_json(),
+        )
+        return PreparedCheckpoint(
+            issue_iid=request.issue_iid,
+            worktree=request.worktree,
+            source_branch=request.source_branch,
+            commit_sha=sha,
+            expected_remote_sha=refs.get(work_ref),
+            claim_ref=claim_ref,
+            claim_sha=next_claim,
+            expected_claim_sha=claim,
+            push_ref=work_ref,
+            work_kind=request.work_kind,
+            merge_request_iid=request.merge_request_iid,
+        )
+
+    def observe_checkpoint(self, iid: int) -> CheckpointObservation:
+        """Verify remote work identity independently of issue note assertions."""
+        event = self._progress_event
+        branch = (
+            self._checkpoint_source.source_branch
+            if self._checkpoint_source is not None
+            and self._checkpoint_source.issue_iid == iid
+            else f"agent/issue-{iid}"
+        )
+        ref = event.push_ref if event is not None and event.issue_iid == iid else None
+        ref = ref or f"refs/heads/{branch}"
+        sha = self._remote_refs(ref).get(ref)
+        if sha is None:
+            raise RepositoryError("remote issue checkpoint missing")
+        if event is not None and event.checkpoint_kind == "candidate":
+            self._ensure_commit_available(sha)
+            verify_candidate_commit_message(self._git("show", "-s", "--format=%B", sha))
+            if sha != event.commit_sha or not self._is_ancestor(
+                event.base_sha, sha, self.config.checkout
+            ):
+                raise RepositoryError("candidate remote ancestry or SHA mismatch")
+            metadata = CheckpointMetadata(
+                host=event.host,
+                project_id=event.project_id,
+                issue_iid=event.issue_iid,
+                source_branch=event.source_branch,
+                run_id=event.run_id,
+                operation_id=event.operation_id,
+                base_sha=event.base_sha,
+                checkpoint_kind=event.checkpoint_kind,
+                claim_generation=event.claim_generation,
+                workflow_lane=event.workflow_lane,
+                work_kind=event.work_kind,
+            )
+        else:
+            metadata = self._checkpoint_metadata(sha)
+        if metadata.issue_iid != iid or metadata.source_branch != branch:
+            raise RepositoryError("remote checkpoint issue identity mismatch")
+        return CheckpointObservation(
+            issue_iid=iid,
+            source_branch=branch,
+            commit_sha=sha,
+            base_sha=metadata.base_sha,
+            checkpoint_kind=metadata.checkpoint_kind,
+            operation_id=metadata.operation_id,
+            run_id=metadata.run_id,
+            claim_generation=metadata.claim_generation,
+            workflow_lane=metadata.workflow_lane,
+            work_kind=metadata.work_kind,
+            owner_status=self.progress_owner_status(),
+        )
+
+    def observe_checkpoint_products(
+        self,
+        work_event: ProgressEvent,
+        candidate_event: ProgressEvent | None,
+        *,
+        worktree: Path | None,
+        completed: CompletedProgressObservation | None = None,
+    ) -> CheckpointProductObservation:
+        """Read exact objects and trees without fetching or projecting local state."""
+        if completed is not None:
+            candidate = candidate_event
+            mr, pipeline = completed.merge_request, completed.pipeline
+            if (
+                candidate is None
+                or completed.issue.iid != candidate.issue_iid
+                or completed.issue.state != "closed"
+                or mr is None
+                or mr.state != "merged"
+                or mr.iid != candidate.merge_request_iid
+                or mr.source_project_id != self.config.project_id
+                or mr.target_project_id != self.config.project_id
+                or mr.target_branch != self.config.default_branch
+                or mr.source_branch != candidate.source_branch
+                or mr.sha != candidate.commit_sha
+                or pipeline is None
+                or pipeline.sha != candidate.commit_sha
+                or pipeline.status != "success"
+                or required_pipeline_jobs_succeeded(
+                    completed.jobs, pipeline_id=pipeline.id, source_sha=pipeline.sha
+                )
+                is not True
+            ):
+                raise RepositoryError(
+                    "completed checkpoint product proof identity or pipeline invalid"
+                )
+        events = (
+            (work_event,) if candidate_event is None else (work_event, candidate_event)
+        )
+        refs = tuple(
+            dict.fromkeys(
+                item.push_ref or f"refs/heads/{item.source_branch}" for item in events
+            )
+        )
+        retained = (
+            retained_checkpoint_ref(
+                candidate_event.issue_iid, candidate_event.commit_sha
+            )
+            if candidate_event is not None
+            else None
+        )
+        actual = self._remote_refs(
+            *refs, *((retained,) if retained is not None else ())
+        )
+        if (
+            candidate_event is not None
+            and retained is not None
+            and actual.get(retained)
+            not in {
+                None,
+                candidate_event.commit_sha,
+            }
+        ):
+            raise RepositoryError("candidate retained checkpoint ref identity conflict")
+        for item in events:
+            ref = item.push_ref or f"refs/heads/{item.source_branch}"
+            deleted_merged_source = (
+                completed is not None
+                and item.checkpoint_kind == "candidate"
+                and ref == f"refs/heads/{item.source_branch}"
+                and actual.get(ref) is None
+            )
+            if actual.get(ref) != item.commit_sha and not deleted_merged_source:
+                raise RepositoryError(
+                    "checkpoint product remote ref SHA identity conflict"
+                )
+        local_changes = (
+            self.has_changes(worktree)
+            if worktree is not None and worktree.exists()
+            else None
+        )
+        provenance = completed.provenance if completed is not None else None
+        if (
+            provenance is not None
+            and candidate_event is not None
+            and work_event.checkpoint_kind == "candidate"
+            and work_event.commit_sha == candidate_event.commit_sha
+        ):
+            if (
+                provenance.project_id,
+                provenance.baseline_sha,
+                provenance.commit_sha,
+            ) != (
+                self.config.project_id,
+                candidate_event.base_sha,
+                candidate_event.commit_sha,
+            ):
+                raise RepositoryError("candidate remote provenance identity conflict")
+            return CheckpointProductObservation(
+                work_event.commit_sha, candidate_event.commit_sha, True, local_changes
+            )
+        for item in events:
+            result = self._bounded_command(
+                (
+                    str(self.config.git_path),
+                    "-C",
+                    str(self.config.checkout),
+                    "cat-file",
+                    "-e",
+                    f"{item.commit_sha}^{{commit}}",
+                ),
+                environment=self._environment,
+                timeout_seconds=HOUSEKEEPING_COMMAND_TIMEOUT_SECONDS,
+            )
+            if result.returncode in {1, 128}:
+                return CheckpointProductObservation(
+                    work_event.commit_sha,
+                    candidate_event.commit_sha if candidate_event else None,
+                    None,
+                    local_changes,
+                )
+            if result.returncode != 0:
+                raise RepositoryError("checkpoint product object availability unknown")
+            body = self._git("show", "-s", "--format=%B", item.commit_sha)
+            if item.checkpoint_kind == "candidate":
+                verify_candidate_commit_message(body)
+                if not self._is_ancestor(
+                    item.base_sha, item.commit_sha, self.config.checkout
+                ):
+                    raise RepositoryError(
+                        "candidate product baseline ancestry conflict"
+                    )
+            else:
+                marker = "agent-work-checkpoint-v1"
+                if marker + "\n" not in body:
+                    raise RepositoryError("WIP checkpoint product metadata missing")
+                metadata = CheckpointMetadata.model_validate(
+                    parse_remote_metadata(
+                        marker + "\n" + body.split(marker + "\n", 1)[1], marker
+                    )
+                )
+                if any(
+                    getattr(metadata, key) != getattr(item, key)
+                    for key in (
+                        "host",
+                        "project_id",
+                        "issue_iid",
+                        "source_branch",
+                        "base_sha",
+                        "checkpoint_kind",
+                        "run_id",
+                        "operation_id",
+                        "claim_generation",
+                        "workflow_lane",
+                        "work_kind",
+                    )
+                ):
+                    raise RepositoryError(
+                        "checkpoint product WIP metadata identity conflict"
+                    )
+        if (
+            candidate_event is not None
+            and work_event.commit_sha == candidate_event.commit_sha
+        ):
+            # Exact immutable object identity proves tree equality; all ref,
+            # classification and ancestry checks above still apply.
+            return CheckpointProductObservation(
+                work_event.commit_sha, candidate_event.commit_sha, True, local_changes
+            )
+        trees = [
+            self._git("show", "-s", "--format=%T", item.commit_sha) for item in events
+        ]
+        if any(re.fullmatch(r"[0-9a-f]{40}", tree) is None for tree in trees):
+            raise RepositoryError("checkpoint product tree identity invalid")
+        return CheckpointProductObservation(
+            work_event.commit_sha,
+            candidate_event.commit_sha if candidate_event else None,
+            trees[0] == trees[-1] if candidate_event is not None else None,
+            local_changes,
+        )
+
+    def restore_complete_checkpoint(
+        self,
+        *,
+        issue_iid: int,
+        source_branch: str,
+        commit_sha: str,
+        base_sha: str,
+        worktree: Path,
+    ) -> None:
+        """Restore complete content/remediation work under its fresh workflow lane."""
+        self.restore_checkpoint(
+            issue_iid=issue_iid,
+            source_branch=source_branch,
+            commit_sha=commit_sha,
+            base_sha=base_sha,
+            worktree=worktree,
+            fresh_red=True,
+        )
+        self.restore_checkpoint(
+            issue_iid=issue_iid,
+            source_branch=source_branch,
+            commit_sha=commit_sha,
+            base_sha=base_sha,
+            worktree=worktree,
+            fresh_red=False,
+        )
+
+    def restore_published_checkpoint(
+        self, *, issue_iid: int, source_branch: str, commit_sha: str, worktree: Path
+    ) -> None:
+        """Recreate the exact MR source checkout before fresh pipeline observation."""
+        self.restore_checkpoint(
+            issue_iid=issue_iid,
+            source_branch=source_branch,
+            commit_sha=commit_sha,
+            base_sha=commit_sha,
+            worktree=worktree,
+            fresh_red=True,
+        )
+
+    def restore_checkpoint(
+        self,
+        *,
+        issue_iid: int,
+        source_branch: str,
+        commit_sha: str,
+        base_sha: str,
+        worktree: Path,
+        fresh_red: bool,
+    ) -> None:
+        """Recreate tests at BASE first; restore saved production only after Red."""
+        if worktree.resolve() != (
+            self.config.state_root / "worktrees" / str(issue_iid)
+        ).resolve() or not self._source_matches(issue_iid, source_branch):
+            raise RepositoryError("reconstruction worktree identity mismatch")
+        self._ensure_commit_available(commit_sha)
+        self._git("cat-file", "-e", f"{base_sha}^{{commit}}")
+        if not worktree.exists():
+            worktree.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            self._git("worktree", "prune")
+            if self._git("branch", "--list", source_branch):
+                local_sha = self._git("rev-parse", source_branch)
+                if local_sha != base_sha:
+                    if self.progress_owner_status() not in {"released", "owned"}:
+                        raise RepositoryError(
+                            "retained local branch owner must be fenced"
+                        )
+                    preserved = (
+                        f"refs/heads/agent/local-cache-issue-{issue_iid}-{local_sha}"
+                    )
+                    self._git("update-ref", preserved, local_sha)
+                    self._git(
+                        "update-ref", f"refs/heads/{source_branch}", base_sha, local_sha
+                    )
+                self._git("worktree", "add", str(worktree), source_branch)
+            else:
+                self._git(
+                    "worktree", "add", "-b", source_branch, str(worktree), base_sha
+                )
+        if (
+            self._git("branch", "--show-current", cwd=worktree) != source_branch
+            or self.head(worktree) != base_sha
+        ):
+            raise RepositoryError("reconstruction baseline or branch changed")
+        if fresh_red and self.has_changes(worktree):
+            raise RepositoryError(
+                "reconstruction preserves dirty local work; inspect before retry"
+            )
+        paths = tuple(
+            self._git("diff", "--name-only", base_sha, commit_sha).splitlines()
+        )
+        if paths:
+            validate_git_read_paths(paths)
+        selected = tuple(
+            path for path in paths if path.startswith("tests/") == fresh_red
+        )
+        if selected:
+            self._git(
+                "restore",
+                "--source",
+                commit_sha,
+                "--staged",
+                "--worktree",
+                "--",
+                *selected,
+                cwd=worktree,
+            )
 
     def bind_test_execution_policy(self, policy: TestExecutionPolicy) -> bool:
         """Affirm the exact host policy used by the owning runtime composition."""

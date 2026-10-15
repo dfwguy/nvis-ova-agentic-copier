@@ -23,6 +23,7 @@ from urllib.parse import quote
 from pydantic import TypeAdapter, ValidationError
 
 from .approved_scope import ScopeError
+from .classification import ClassificationError, classify_work
 from .domain import (
     AGENT_OUTCOME_NOTE_MARKER,
     CANARY_LABEL_SPECS,
@@ -33,6 +34,8 @@ from .domain import (
     PREREQUISITE_LABEL_DESCRIPTION,
     JobTraceEvidence,
     PipelineJobEvidence,
+    RunnerState,
+    WorkKind,
     legacy_prerequisite_label_iid,
     prerequisite_dependency_proof,
     prerequisite_label_iid,
@@ -62,6 +65,20 @@ from .models import (
     render_decision_review_notice,
 )
 from .ports import CommandRunner
+from .progress import (
+    CandidateProvenanceObservation,
+    ClaimRecord,
+    CompletedProgressObservation,
+    ProgressEvent,
+    PublishedProgressObservation,
+    VerifiedCheckpointSource,
+    parse_progress_note,
+    parse_remote_metadata,
+    render_progress_note,
+    required_pipeline_jobs_succeeded,
+    validate_progress_chain,
+    verify_candidate_commit_message,
+)
 from .repository import CommandTimeoutError
 
 
@@ -1514,6 +1531,427 @@ class GitLabGateway:
         except ValidationError as error:
             raise GitLabError("GitLab returned invalid issue data") from error
 
+    def read_progress_claim(self, sha: str) -> ClaimRecord:
+        """Read immutable claim metadata over the configured read-only GitLab API."""
+        if not re.fullmatch(r"[0-9a-f]{40}", sha):
+            raise GitLabError("claim commit SHA invalid")
+        commit = self._mapping(
+            self._call(f"projects/{self._config.project_id}/repository/commits/{sha}"),
+            "claim commit",
+        )
+        if commit.get("id") != sha or not isinstance(commit.get("message"), str):
+            raise GitLabError("claim commit identity mismatch")
+        claim = ClaimRecord.model_validate(
+            parse_remote_metadata(str(commit["message"]).strip(), "agent-work-claim-v1")
+        )
+        if (
+            claim.host != self._config.host
+            or claim.project_id != self._config.project_id
+        ):
+            raise GitLabError("claim project identity mismatch")
+        return claim
+
+    def verify_checkpoint_source(
+        self,
+        *,
+        issue_iid: int,
+        source_branch: str,
+        source_sha: str,
+        work_kind: WorkKind,
+        merge_request_iid: int | None,
+        baseline_sha: str | None = None,
+    ) -> VerifiedCheckpointSource:
+        """Separate the task contract from its independently fetched owning MR."""
+        if (
+            baseline_sha is not None
+            and re.fullmatch(r"[0-9a-f]{40}", baseline_sha) is None
+        ):
+            raise GitLabError("checkpoint baseline SHA identity invalid")
+        project = self.verify_project()
+        issue = self.fetch_issue(issue_iid)
+        try:
+            classification = classify_work(issue, project_id=project.id)
+        except ClassificationError as error:
+            raise GitLabError(
+                "checkpoint remediation marker classification invalid"
+            ) from error
+        owning_mr = classification.merge_request_iid
+        if work_kind is WorkKind.ORDINARY:
+            if source_branch != f"agent/issue-{issue_iid}":
+                raise GitLabError("ordinary checkpoint source branch identity mismatch")
+            if classification.kind in {
+                WorkKind.EXISTING_MR_REMEDIATION,
+                WorkKind.MERGE_CONFLICT_REPAIR,
+            }:
+                if owning_mr is None:
+                    raise GitLabError("remediation owning MR is missing")
+                prior = self.fetch_merge_request(owning_mr)
+                if (
+                    prior.state != "merged"
+                    or prior.source_project_id != project.id
+                    or prior.target_project_id != project.id
+                    or prior.target_branch != project.default_branch
+                    or prior.source_branch != classification.source_branch
+                    or classification.source_sha is None
+                    or not self.merge_request_contains_commit(
+                        prior.iid, classification.source_sha
+                    )
+                ):
+                    raise GitLabError(
+                        "ordinary restart requires verified merged remediation provenance"
+                    )
+            elif classification.kind is not WorkKind.ORDINARY:
+                raise GitLabError(
+                    "checkpoint work kind differs from task classification"
+                )
+        elif work_kind in {
+            WorkKind.EXISTING_MR_REMEDIATION,
+            WorkKind.MERGE_CONFLICT_REPAIR,
+        }:
+            if merge_request_iid is None or (
+                owning_mr is not None and owning_mr != merge_request_iid
+            ):
+                raise GitLabError("remediation marker and owning MR identity conflict")
+            if owning_mr is None and source_branch != f"agent/issue-{issue_iid}":
+                raise GitLabError("remediation source lacks task provenance")
+            mr = self.fetch_merge_request(merge_request_iid)
+            if (
+                mr.state not in {"opened", "merged"}
+                or mr.source_project_id != project.id
+                or mr.target_project_id != project.id
+                or mr.target_branch != project.default_branch
+                or mr.source_branch != source_branch
+                or mr.sha != source_sha
+                or (
+                    classification.source_branch is not None
+                    and classification.source_branch != source_branch
+                )
+            ):
+                raise GitLabError(
+                    "remediation source MR project, branch or current SHA identity conflict"
+                )
+            if (
+                classification.source_sha is not None
+                and classification.source_sha != source_sha
+                and not self.merge_request_contains_commit(
+                    mr.iid, classification.source_sha
+                )
+            ):
+                raise GitLabError(
+                    "remediation historical source SHA provenance unavailable"
+                )
+        elif (
+            classification.kind is not work_kind
+            or source_branch != f"agent/issue-{issue_iid}"
+        ):
+            raise GitLabError("checkpoint source classification mismatch")
+        return VerifiedCheckpointSource(
+            project.id,
+            issue_iid,
+            work_kind,
+            source_branch,
+            source_sha,
+            merge_request_iid,
+            project.id,
+            project.id,
+            project.default_branch,
+        )
+
+    def verify_candidate_provenance(
+        self, event: ProgressEvent
+    ) -> CandidateProvenanceObservation:
+        """Read exact candidate classification and explicit two-ref remote ancestry."""
+        if (event.host, event.project_id) != (
+            self._config.host,
+            self._config.project_id,
+        ) or event.checkpoint_kind != "candidate":
+            raise GitLabError(
+                "candidate provenance project or classification identity invalid"
+            )
+        commit = self._mapping(
+            self._call(
+                f"projects/{self._config.project_id}/repository/commits/{event.commit_sha}"
+            ),
+            "candidate provenance commit",
+        )
+        if commit.get("id") != event.commit_sha or not isinstance(
+            commit.get("message"), str
+        ):
+            raise GitLabError("candidate provenance commit identity invalid")
+        verify_candidate_commit_message(str(commit["message"]))
+        # glab's bracketed array fields carry both refs, not a repeated scalar.
+        ancestor = self._mapping(
+            self._call(
+                f"projects/{self._config.project_id}/repository/merge_base",
+                fields=(f"refs[]={event.base_sha}", f"refs[]={event.commit_sha}"),
+            ),
+            "candidate merge base",
+        )
+        if ancestor.get("id") != event.base_sha:
+            raise GitLabError("candidate remote ancestry merge-base identity mismatch")
+        return CandidateProvenanceObservation(
+            project_id=self._config.project_id,
+            baseline_sha=event.base_sha,
+            commit_sha=event.commit_sha,
+        )
+
+    def verify_completed_progress(
+        self, event: ProgressEvent
+    ) -> CompletedProgressObservation | None:
+        """Corroborate terminal identity and fresh exact-source verification."""
+        if (
+            event.host != self._config.host
+            or event.project_id != self._config.project_id
+        ):
+            raise GitLabError("completion project identity mismatch")
+        project = self.verify_project()
+        issue = self.fetch_issue(event.issue_iid)
+        if issue.state != "closed":
+            if event.state in {RunnerState.OBSERVING, RunnerState.AWAITING_HUMAN}:
+                return None
+            raise GitLabError("completion issue evidence is not closed")
+        if event.completion_kind == "closed-without-publication":
+            if event.checkpoint_kind != "wip" or event.merge_request_iid is not None:
+                raise GitLabError("completion cannot downgrade published candidate")
+            items = self._items(
+                self._call(
+                    f"projects/{self._config.project_id}/merge_requests",
+                    fields=(
+                        "state=all",
+                        f"source_branch={event.source_branch}",
+                        "per_page=100",
+                    ),
+                ),
+                "completion MR evidence",
+            )
+            if items:
+                raise GitLabError(
+                    "unpublished completion has MR evidence; inspect owning handoff"
+                )
+            return CompletedProgressObservation(issue=issue)
+        derived_merge = event.checkpoint_kind == "candidate" and event.state in {
+            RunnerState.OBSERVING,
+            RunnerState.AWAITING_HUMAN,
+        }
+        if (
+            event.completion_kind != "merged" and not derived_merge
+        ) or event.merge_request_iid is None:
+            raise GitLabError(
+                "completion kind unknown; corroborate exact merged MR or unpublished closure"
+            )
+        observed = self._observe_published_progress(event, project, issue, merged=True)
+        if observed.disposition != "passed":
+            raise GitLabError(
+                "completion exact-source pipeline or required job evidence is missing or failed"
+            )
+        return CompletedProgressObservation(
+            issue=issue,
+            merge_request=observed.merge_request,
+            pipeline=observed.pipeline,
+            jobs=observed.jobs,
+        )
+
+    def verify_published_progress(
+        self, event: ProgressEvent
+    ) -> PublishedProgressObservation:
+        """Fresh open handoff facts; no mutation or cached publication permission."""
+        if (event.host, event.project_id) != (
+            self._config.host,
+            self._config.project_id,
+        ):
+            raise GitLabError("publication project identity mismatch")
+        project = self.verify_project()
+        issue = self.fetch_issue(event.issue_iid)
+        if (
+            issue.state != "opened"
+            or event.checkpoint_kind != "candidate"
+            or event.merge_request_iid is None
+        ):
+            raise GitLabError(
+                "publication handoff requires exact open issue and candidate MR"
+            )
+        return self._observe_published_progress(event, project, issue, merged=False)
+
+    def _observe_published_progress(
+        self,
+        event: ProgressEvent,
+        project: GitLabProject,
+        issue: GitLabIssue,
+        *,
+        merged: bool,
+    ) -> PublishedProgressObservation:
+        """Shared strict commit, MR identity and current pipeline/job observation."""
+        if event.merge_request_iid is None:
+            raise GitLabError("publication candidate owning MR identity missing")
+        commit = self._mapping(
+            self._call(
+                f"projects/{self._config.project_id}/repository/commits/{event.commit_sha}"
+            ),
+            "completion commit",
+        )
+        if commit.get("id") != event.commit_sha or not isinstance(
+            commit.get("message"), str
+        ):
+            raise GitLabError("completion commit identity or message is invalid")
+        verify_candidate_commit_message(str(commit["message"]))
+        mr = self.fetch_merge_request(event.merge_request_iid)
+        if (
+            mr.state != ("merged" if merged else "opened")
+            or mr.source_project_id != self._config.project_id
+            or mr.target_project_id != self._config.project_id
+            or mr.source_branch != event.source_branch
+            or mr.target_branch != project.default_branch
+            or mr.sha != event.commit_sha
+            or (
+                event.work_kind is WorkKind.ORDINARY
+                and not self.mr_closes_issue(mr.iid, event.issue_iid)
+            )
+        ):
+            raise GitLabError(
+                "completion MR project, branch, source SHA or closing evidence disagrees"
+            )
+        if event.work_kind is not WorkKind.ORDINARY:
+            self.verify_checkpoint_source(
+                issue_iid=event.issue_iid,
+                source_branch=event.source_branch,
+                source_sha=event.commit_sha,
+                work_kind=event.work_kind,
+                merge_request_iid=mr.iid,
+            )
+        pipeline = self.latest_pipeline_for_sha(mr.iid, event.commit_sha)
+        jobs = ()
+        disposition = "missing"
+        if pipeline is not None:
+            if pipeline.sha != event.commit_sha:
+                raise GitLabError(
+                    "publication exact-source pipeline SHA identity mismatch"
+                )
+            jobs = self.list_pipeline_jobs(
+                pipeline.id, pipeline.sha, require_failure_policy=True
+            )
+            verdict = required_pipeline_jobs_succeeded(
+                jobs, pipeline_id=pipeline.id, source_sha=pipeline.sha
+            )
+            if pipeline.status == "success":
+                if verdict is not True:
+                    raise GitLabError(
+                        "publication required job evidence is missing or failed"
+                    )
+                disposition = "passed"
+            elif pipeline.status in {"failed", "canceled"}:
+                disposition = "failed"
+            else:
+                disposition = "pending"
+        return PublishedProgressObservation(
+            issue=issue,
+            merge_request=mr,
+            source_sha=event.commit_sha,
+            pipeline=pipeline,
+            jobs=jobs,
+            disposition=disposition,
+        )
+
+    def verify_recovery_merge_request(
+        self, issue_iid: int, mr: MergeRequestEvidence
+    ) -> None:
+        """Recheck exact identity, target and closing association before observation."""
+        project = self.verify_project()
+        current = self.fetch_merge_request(mr.iid)
+        if (
+            current != mr
+            or mr.target_branch != project.default_branch
+            or mr.state != "opened"
+            or (
+                mr.source_branch == f"agent/issue-{issue_iid}"
+                and not self.mr_closes_issue(mr.iid, issue_iid)
+            )
+        ):
+            raise GitLabError(
+                "recovery MR identity, target or closing association changed"
+            )
+
+        if mr.source_branch != f"agent/issue-{issue_iid}":
+            classification = classify_work(
+                self.fetch_issue(issue_iid), project_id=self._config.project_id
+            )
+            self.verify_checkpoint_source(
+                issue_iid=issue_iid,
+                source_branch=mr.source_branch,
+                source_sha=mr.sha,
+                work_kind=classification.kind,
+                merge_request_iid=mr.iid,
+            )
+
+    def progress_inventory(self) -> tuple[GitLabIssue, ...]:
+        """Find receipts even when an interrupted projection never added a label."""
+        return self._issues(state="all")
+
+    def read_progress(self, iid: int) -> tuple[ProgressEvent, ...]:
+        """Read strict factory receipts; task notes cannot grant controller authority."""
+        events: list[ProgressEvent] = []
+        for page in range(1, _MAX_NOTE_PAGES + 1):
+            items = self._items(
+                self._call(
+                    f"projects/{self._config.project_id}/issues/{iid}/notes",
+                    fields=(
+                        "order_by=created_at",
+                        "sort=asc",
+                        "per_page=100",
+                        f"page={page}",
+                    ),
+                ),
+                "progress notes",
+            )
+            for item in items:
+                body = item.get("body")
+                if not isinstance(body, str) or "agent-work-progress" not in body:
+                    continue
+                author = self._mapping(item.get("author"), "progress author")
+                if (
+                    author.get("username") != self._config.factory_username
+                    or item.get("system") is not False
+                ):
+                    raise GitLabError("progress factory author identity mismatch")
+                try:
+                    event = parse_progress_note(body)
+                except ValueError as error:
+                    raise GitLabError("invalid factory progress receipt") from error
+                if (event.host, event.project_id, event.issue_iid) != (
+                    self._config.host,
+                    self._config.project_id,
+                    iid,
+                ):
+                    raise GitLabError("progress project identity mismatch")
+                events.append(event)
+            if len(items) < 100:
+                return validate_progress_chain(tuple(events))
+        raise GitLabError("progress note page bound exceeded")
+
+    def ensure_progress_event(self, event: ProgressEvent) -> ProgressEvent:
+        """Resolve uncertain note POST through exact remote fingerprint readback."""
+        if (event.host, event.project_id) != (
+            self._config.host,
+            self._config.project_id,
+        ):
+            raise GitLabError("progress configured identity mismatch")
+        existing = self.read_progress(event.issue_iid)
+        if event in existing:
+            return event
+        validate_progress_chain((*existing, event))
+        try:
+            self._call(
+                f"projects/{self._config.project_id}/issues/{event.issue_iid}/notes",
+                method="POST",
+                fields=(f"body={render_progress_note(event)}",),
+            )
+        except GitLabError:
+            if event in self.read_progress(event.issue_iid):
+                return event
+            raise
+        if event not in self.read_progress(event.issue_iid):
+            raise GitLabError("progress note exact readback missing")
+        return event
+
     def fetch_issue_notes(self, iid: int) -> tuple[GitLabIssueNote, ...]:
         """Fetch all validated issue notes in deterministic chronological order."""
         notes_by_id: dict[int, GitLabIssueNote] = {}
@@ -1938,7 +2376,7 @@ class GitLabGateway:
         return pipelines[0] if pipelines else None
 
     def list_pipeline_jobs(
-        self, pipeline_id: int, source_sha: str
+        self, pipeline_id: int, source_sha: str, *, require_failure_policy: bool = False
     ) -> tuple[PipelineJobEvidence, ...]:
         """Return one bounded validated inventory for an exact pipeline."""
         try:
@@ -1960,6 +2398,10 @@ class GitLabGateway:
                     break
             else:
                 raise GitLabError("GitLab pipeline job inventory exceeded the bound")
+            if any(
+                not isinstance(item.get("allow_failure"), bool) for item in raw_jobs
+            ):
+                raise GitLabError("pipeline job failure policy evidence is missing")
             jobs = tuple(
                 PipelineJobEvidence.model_validate(
                     {
